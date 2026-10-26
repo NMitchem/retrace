@@ -498,6 +498,16 @@ fn main() {
         .status().expect("clang kq_dyn");
     assert!(status.success(), "kq_dyn guest build failed");
 
+    // kqdup_dyn: the M53 t3 fixture — a duplicated guest kqueue, modes shared, outlives, fdclose and
+    // mio. Same recipe as kq_dyn.
+    let src = format!("{}/c/kqdup_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/kqdup_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang kqdup_dyn");
+    assert!(status.success(), "kqdup_dyn guest build failed");
+
     // stall_dyn: the M52 §3i fixture — main spins on a flag a created thread would set. Same recipe
     // as hello_dyn; pthreads are in libSystem.
     let src = format!("{}/c/stall_dyn.c", env!("CARGO_MANIFEST_DIR"));

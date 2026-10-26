@@ -62,6 +62,9 @@ pub struct Knote {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Waiter {
     pub tid: usize,
+    /// The descriptor it blocked through. A kqueue may have several (M53 t3), and its close is the
+    /// one refused while the thread waits.
+    pub fd: u64,
     /// The guest VA of its event list.
     pub events: u64,
     pub nevents: usize,
@@ -149,17 +152,28 @@ impl Pipes {
     }
 }
 
-/// Every guest kqueue, by its guest fd, and the guest's pipes.
+/// Every guest kqueue, by id, the descriptors on each, and the guest's pipes. The kernel's kqueue is
+/// per open file, so a `dup` of its descriptor shares the one table (M53 t3, t0 §M4).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct GuestKqueues {
     kqs: BTreeMap<u64, Kqueue>,
+    /// Guest fd -> the id of the kqueue it names.
+    fd_kq: BTreeMap<u64, u64>,
+    next_id: u64,
     pipes: Pipes,
     /// The activation counter, one for every kqueue, so the order is total.
     seq: u64,
 }
 
 impl GuestKqueues {
-    pub fn is_kqueue(&self, fd: u64) -> bool { self.kqs.contains_key(&fd) }
+    pub fn is_kqueue(&self, fd: u64) -> bool { self.fd_kq.contains_key(&fd) }
+
+    fn kq_of(&self, fd: u64) -> Option<&Kqueue> { self.fd_kq.get(&fd).and_then(|id| self.kqs.get(id)) }
+
+    fn kq_of_mut(&mut self, fd: u64) -> Option<&mut Kqueue> {
+        let id = *self.fd_kq.get(&fd)?;
+        self.kqs.get_mut(&id)
+    }
 
     pub fn kind_of(&self, fd: u64) -> FdKind {
         if self.is_kqueue(fd) { FdKind::Kqueue } else { self.pipes.kind_of(fd).unwrap_or(FdKind::Other) }
@@ -172,7 +186,10 @@ impl GuestKqueues {
             return Err(format!("M48: kevent on fd {fd}: kqueue() returned fd {fd}, which the model \
                                 still holds as {k:?}: a close it never saw"));
         }
-        self.kqs.insert(fd, Kqueue::default());
+        let id = self.next_id;
+        self.next_id += 1;
+        self.kqs.insert(id, Kqueue::default());
+        self.fd_kq.insert(fd, id);
         Ok(())
     }
 
@@ -193,15 +210,20 @@ impl GuestKqueues {
         Ok(())
     }
 
-    /// `fd` closed. A kqueue's table goes with it; every knote on `fd` leaves every kqueue
-    /// (`kern_event.c:knote_fdclose`); and a pipe end loses a descriptor. The close of a kqueue a
-    /// thread is blocked on is refused, because the kernel's answer to that thread is unmeasured.
+    /// `fd` closed. A kqueue's table goes with its last descriptor; every knote on `fd` leaves every
+    /// kqueue (`kern_event.c:knote_fdclose`); and a pipe end loses a descriptor. The close of the
+    /// very descriptor a thread blocked in `kevent` through is refused: natively that thread wakes at
+    /// once with EBADF, which is unmodelled (Ruling T0-M4). The close of another descriptor of the
+    /// same kqueue is a plain close, and the waiter is not woken (t0 §M4).
     pub fn close(&mut self, fd: u64) -> Result<(), String> {
-        if let Some(w) = self.kqs.get(&fd).and_then(|k| k.waiter) {
-            return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("M48: kevent on kq {fd}: closed while thread {} is blocked on it; the \
-                                kernel's answer to the waiter is unmeasured", w.tid)));
+        if let Some(w) = self.kq_of(fd).and_then(|k| k.waiter).filter(|w| w.fd == fd) {
+            return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
+                "M53: close of kqueue descriptor {fd} while thread {} waits in kevent on it: natively the \
+                 waiter wakes at once with EBADF, which is not modelled (Ruling T0-M4)", w.tid)));
         }
-        self.kqs.remove(&fd);
+        if let Some(id) = self.fd_kq.remove(&fd) {
+            if !self.fd_kq.values().any(|&v| v == id) { self.kqs.remove(&id); }
+        }
         for k in self.kqs.values_mut() {
             k.knotes.retain(|&(ident, filter), _| !(ident == fd && matches!(filter, EVFILT_READ | EVFILT_WRITE)));
         }
@@ -210,15 +232,13 @@ impl GuestKqueues {
     }
 
     /// `dup`, `dup2` or `F_DUPFD` made `new` a copy of `old`. Closing `new` first is `dup2`'s
-    /// implicit close. A kqueue is refused (M48 §3c: the kernel's kqueue is per open file, and
-    /// sharing one is unmeasured). A pipe end gains a descriptor.
+    /// implicit close. A kqueue's new descriptor names the same kqueue (M53 t3). A pipe end gains a
+    /// descriptor.
     pub fn dup(&mut self, old: u64, new: u64) -> Result<(), String> {
         if old == new { return Ok(()); }
-        if self.is_kqueue(old) {
-            return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("M48: kevent on fd {old}: a dup of a guest kqueue to fd {new}: the \
-                                kernel's kqueue is per open file and sharing one is unmeasured (M48 §3c)")));
-        }
+        let id = self.fd_kq.get(&old).copied();
         self.close(new)?;
+        if let Some(id) = id { self.fd_kq.insert(new, id); }
         if let Some(&(id, write)) = self.pipes.ends.get(&old) { self.pipes.bind(new, id, write); }
         Ok(())
     }
@@ -246,7 +266,7 @@ impl GuestKqueues {
     /// Re-evaluate every pipe knote: one that became ready joins the activation order at its tail,
     /// and one that stopped being ready leaves it (level-triggered).
     fn refresh(&mut self) -> Result<(), String> {
-        let Self { kqs, pipes, seq } = self;
+        let Self { kqs, pipes, seq, .. } = self;
         for k in kqs.values_mut() {
             for (&(ident, filter), n) in k.knotes.iter_mut() {
                 let Some(watch) = n.watch else { continue };
@@ -263,13 +283,14 @@ impl GuestKqueues {
     /// Apply `changes` to kqueue `kq`, in list order (`kern_event.c:kevent_register`, F8). All or
     /// nothing: they go to a copy that replaces the table only if every change is admitted.
     pub fn apply(&mut self, kq: u64, changes: &[Kevent]) -> Result<(), String> {
-        let mut k = self.kqs.get(&kq).cloned()
+        let id = *self.fd_kq.get(&kq)
             .ok_or_else(|| format!("M48: kevent on fd {kq}, which is not a guest kqueue"))?;
+        let mut k = self.kqs[&id].clone();
         let mut seq = self.seq;
         for (i, c) in changes.iter().enumerate() {
             self.apply_one(&mut k, &mut seq, i, c)?;
         }
-        self.kqs.insert(kq, k);
+        self.kqs.insert(id, k);
         self.seq = seq;
         Ok(())
     }
@@ -331,11 +352,17 @@ impl GuestKqueues {
                 };
                 n.watch = Some(watch);
             } else {
-                if c.fflags & !NOTE_FFLAGSMASK != 0 {
-                    return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("{at}: an EV_ADD whose fflags carry NOTE_TRIGGER or a NOTE_FF* \
+                if c.fflags & !(NOTE_FFLAGSMASK | NOTE_TRIGGER) != 0 {
+                    return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("{at}: an EV_ADD whose fflags carry a NOTE_FF* \
                                         operation: what the kernel then delivers as fflags is unmeasured")));
                 }
-                n.sfflags = c.fflags;
+                n.sfflags = c.fflags & NOTE_FFLAGSMASK;
+                // `kern_event.c:filt_userattach` (inferred from source): an add carrying NOTE_TRIGGER
+                // activates at once. mio's waker registers and wakes in this one change.
+                if c.fflags & NOTE_TRIGGER != 0 && n.enabled {
+                    *seq += 1;
+                    n.active = Some(*seq);
+                }
             }
             k.knotes.insert(key, n);
             return Ok(());
@@ -369,15 +396,16 @@ impl GuestKqueues {
 
     /// Does `kq` hold an event a scan would deliver?
     pub fn has_events(&self, kq: u64) -> bool {
-        self.kqs.get(&kq).is_some_and(|k| k.knotes.values().any(|n| n.enabled && n.active.is_some()))
+        self.kq_of(kq).is_some_and(|k| k.knotes.values().any(|n| n.enabled && n.active.is_some()))
     }
 
     /// Deliver up to `max` active, enabled knotes of `kq` in activation order
     /// (`kern_event.c:kqueue_process`, F8): `EV_ONESHOT` drops a knote, `EV_CLEAR` deactivates it,
     /// and any other is re-activated at the tail. A pipe knote's `data` and `EV_EOF` are read now.
     pub fn take_events(&mut self, kq: u64, max: usize) -> Result<Vec<Kevent>, String> {
-        let Self { kqs, pipes, seq } = self;
-        let k = kqs.get_mut(&kq).expect("take_events on a guest kqueue");
+        let Self { kqs, fd_kq, pipes, seq, .. } = self;
+        let id = fd_kq.get(&kq).expect("take_events on a guest kqueue");
+        let k = kqs.get_mut(id).expect("a mapped kqueue id is live");
         let mut due: Vec<((u64, i16), u64)> = k.knotes.iter()
             .filter_map(|(&key, n)| n.active.filter(|_| n.enabled).map(|s| (key, s)))
             .collect();
@@ -408,26 +436,28 @@ impl GuestKqueues {
         Ok(out)
     }
 
-    pub fn waiter(&self, kq: u64) -> Option<Waiter> { self.kqs.get(&kq).and_then(|k| k.waiter) }
+    pub fn waiter(&self, kq: u64) -> Option<Waiter> { self.kq_of(kq).and_then(|k| k.waiter) }
 
     /// Record `w` as `kq`'s waiter. `Box_::guest_kevent` refuses a second one first (K2).
     pub fn set_waiter(&mut self, kq: u64, w: Waiter) {
-        let k = self.kqs.get_mut(&kq).expect("set_waiter on a guest kqueue");
+        let k = self.kq_of_mut(kq).expect("set_waiter on a guest kqueue");
         assert!(k.waiter.is_none(), "M48: a second waiter on kq {kq}; guest_kevent refuses it first (K2)");
         k.waiter = Some(w);
     }
 
     pub fn take_waiter(&mut self, kq: u64) -> Option<Waiter> {
-        self.kqs.get_mut(&kq).and_then(|k| k.waiter.take())
+        self.kq_of_mut(kq).and_then(|k| k.waiter.take())
     }
 
-    /// Every kqueue whose waiter now has an event, in kqueue fd order.
+    /// The descriptor each ready waiter blocked through, in kqueue creation order.
     pub fn ready_waiters(&self) -> Vec<u64> {
-        self.kqs.keys().copied().filter(|&kq| self.waiter(kq).is_some() && self.has_events(kq)).collect()
+        self.kqs.values()
+            .filter_map(|k| k.waiter.filter(|_| k.knotes.values().any(|n| n.enabled && n.active.is_some())))
+            .map(|w| w.fd).collect()
     }
 
     pub fn knote(&self, kq: u64, ident: u64, filter: i16) -> Option<&Knote> {
-        self.kqs.get(&kq).and_then(|k| k.knotes.get(&(ident, filter)))
+        self.kq_of(kq).and_then(|k| k.knotes.get(&(ident, filter)))
     }
 }
 
@@ -464,9 +494,9 @@ mod tests {
         assert!(g.knote(KQ, 9, EVFILT_READ).is_none() && g.knote(4, 9, EVFILT_READ).is_none(),
             "every kqueue loses fd 9's knote");
         assert!(g.knote(KQ, ID, EVFILT_USER).is_some(), "an EVFILT_USER knote names no descriptor and stays");
-        g.set_waiter(4, Waiter { tid: 1, events: 0x1000, nevents: 1 });
+        g.set_waiter(4, Waiter { tid: 1, fd: 4, events: 0x1000, nevents: 1 });
         let e = g.close(4).unwrap_err().unmark();
-        assert!(e.starts_with("M48: kevent on kq 4: closed while thread 1 is blocked on it"), "{e}");
+        assert!(e.starts_with("M53: close of kqueue descriptor 4 while thread 1 waits in kevent on it"), "{e}");
         assert!(g.is_kqueue(4), "the refused close changed nothing");
         g.close(KQ).unwrap();
         assert!(!g.is_kqueue(KQ) && g.knote(KQ, ID, EVFILT_USER).is_none(), "a kqueue's close drops its table");
@@ -608,12 +638,12 @@ mod tests {
     /// naming it. libuv's `uv__stream_try_select` probe on a descriptor that is not a guest pipe is
     /// the one external shape admitted, and it is never ready.
     #[test]
-    fn an_unmodelled_filter_flag_descriptor_or_kqueue_dup_is_refused_by_value() {
+    fn an_unmodelled_filter_flag_or_descriptor_is_refused_by_value() {
         let mut g = kq();
         for (c, why) in [
             (ch(1, EVFILT_TIMER, EV_ADD, 0, 0, 0), "filter -7 is not modelled"),
             (ch(1, EVFILT_USER, EV_ADD | EV_RECEIPT, 0, 0, 0), "flags 0x40 are not modelled"),
-            (ch(1, EVFILT_USER, EV_ADD, NOTE_TRIGGER, 0, 0), "an EV_ADD whose fflags carry NOTE_TRIGGER"),
+            (ch(1, EVFILT_USER, EV_ADD, NOTE_FFCOPY, 0, 0), "an EV_ADD whose fflags carry a NOTE_FF* operation"),
             (ch(1, EVFILT_READ, EV_ADD, 0, 0, 0), "not a guest pipe end"),
             (ch(KQ, EVFILT_READ, EV_ADD, 0, 0, 0), "filter -1 on Kqueue is not modelled"),
         ] {
@@ -622,7 +652,52 @@ mod tests {
         }
         g.apply(KQ, &[ch(1, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, 0)]).unwrap();
         assert!(!g.has_events(KQ), "§11b item 7: registered, never ready");
-        let e = g.dup(KQ, 9).unwrap_err().unmark();
-        assert!(e.starts_with("M48: kevent on fd 3: a dup of a guest kqueue"), "{e}");
+    }
+
+    /// M53 t3 (t0 §M4): a dup of a kqueue's descriptor names the same kqueue, so a knote added
+    /// through one is delivered through the other, and a kqueue lives until its last descriptor closes.
+    #[test]
+    fn a_dup_shares_the_knotes_and_the_last_close_drops_the_kqueue() {
+        let mut g = kq();
+        g.apply(KQ, &[user(EV_ADD | EV_CLEAR, 0)]).unwrap();
+        g.dup(KQ, 9).unwrap();
+        assert!(g.is_kqueue(9) && g.knote(9, ID, EVFILT_USER).is_some(), "the copy sees the knote");
+        g.apply(9, &[user(0, NOTE_TRIGGER)]).unwrap();
+        assert!(g.has_events(KQ), "a trigger through the copy is an event on the original");
+        g.close(KQ).unwrap();
+        assert!(!g.is_kqueue(KQ) && g.knote(9, ID, EVFILT_USER).is_some(), "the kqueue outlives one close");
+        assert_eq!(g.take_events(9, 4).unwrap().len(), 1);
+        g.close(9).unwrap();
+        assert!(!g.is_kqueue(9) && g.kqs.is_empty(), "the last close drops the kqueue");
+    }
+
+    /// A close of another descriptor leaves a waiter and the knotes alone (t0 §M4); the close of the
+    /// descriptor the waiter blocked through is the refusal, even with a copy alive.
+    #[test]
+    fn closing_a_descriptor_the_waiter_is_not_on_is_plain_and_the_waited_one_is_refused() {
+        let mut g = kq();
+        g.dup(KQ, 9).unwrap();
+        g.apply(KQ, &[user(EV_ADD, 0)]).unwrap();
+        g.set_waiter(9, Waiter { tid: 2, fd: 9, events: 0x2000, nevents: 4 });
+        g.close(KQ).unwrap();
+        assert_eq!(g.waiter(9).map(|w| w.tid), Some(2), "the waiter stays");
+        assert!(g.knote(9, ID, EVFILT_USER).is_some(), "the knotes stay");
+        g.dup(9, 11).unwrap();
+        let e = g.close(9).unwrap_err().unmark();
+        assert!(e.starts_with("M53: close of kqueue descriptor 9 while thread 2 waits in kevent on it"), "{e}");
+        assert!(g.is_kqueue(9) && g.is_kqueue(11));
+        g.close(11).unwrap();
+        assert_eq!(g.waiter(9).map(|w| w.tid), Some(2));
+    }
+
+    /// `filt_userattach`: an add carrying NOTE_TRIGGER is active at once and delivers its fflags.
+    #[test]
+    fn an_add_carrying_note_trigger_activates_at_once() {
+        let mut g = kq();
+        g.apply(KQ, &[user(EV_ADD | EV_ONESHOT, NOTE_TRIGGER | 5)]).unwrap();
+        assert!(g.has_events(KQ));
+        let e = g.take_events(KQ, 4).unwrap();
+        assert_eq!((e.len(), e[0].fflags), (1, 5));
+        assert!(g.knote(KQ, ID, EVFILT_USER).is_none(), "EV_ONESHOT drops it at delivery");
     }
 }

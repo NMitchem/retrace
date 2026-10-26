@@ -363,11 +363,3 @@ fn a_wall_prints_no_backtrace_even_with_rust_backtrace_set() {
     assert!(retrace_lines(&rec.stderr)[0].starts_with("retrace: unsupported: "), "{}", rec.stderr);
     let _ = std::fs::remove_file(&t);
 }
-
-/// T4-c: a wall raised after record appended its landmark, through `note_fd_effects` (a dup of a
-/// guest kqueue). Replay meets it at the recording's last landmark, so it must reach the incomplete
-/// line, which needs the mirror to pass the marked refusal through unchanged.
-#[test]
-fn a_dup_of_a_kqueue_stops_at_one_clean_line_and_replays_to_its_end() {
-    assert_guest_wall(retrace_guest::CF_WALLS, &["kqdup"], "cf: kqdup\n", "M48: kevent on fd ", "threads");
-}

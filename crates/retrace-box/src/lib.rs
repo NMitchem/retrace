@@ -6436,7 +6436,7 @@ impl Box_ {
                 Some(self.now_guest().saturating_add(u64::try_from(ns * 3 / 125).unwrap_or(u64::MAX)))
             }
         };
-        self.gkq.set_waiter(kq, gkq::Waiter { tid: cur, events: elist, nevents });
+        self.gkq.set_waiter(kq, gkq::Waiter { tid: cur, fd: kq, events: elist, nevents });
         self.threads.block(thread::BlockReason::Kevent { kq, deadline });
         Ok((0, false))
     }
@@ -6451,7 +6451,7 @@ impl Box_ {
     /// its fd set:
     /// - `kqueue` creates the returned fd's table, and `pipe` (`Ret::FdPair`) the pair's count (R4);
     /// - `close`/`close_nocancel` drop a table, the closed fd's knotes and a pipe end;
-    /// - `dup`, `dup2` and `F_DUPFD`/`F_DUPFD_CLOEXEC` copy a pipe end, and refuse a kqueue;
+    /// - `dup`, `dup2` and `F_DUPFD`/`F_DUPFD_CLOEXEC` copy a pipe end or share a kqueue;
     /// - `read`, `read_nocancel`, the `write` pair and the `writev` pair move a pipe's count by
     ///   their return.
     ///
