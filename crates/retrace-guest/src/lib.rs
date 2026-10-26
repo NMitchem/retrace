@@ -458,8 +458,14 @@ pub const FC_SIGNAL: &str = concat!(env!("OUT_DIR"), "/fc_signal");
 pub const CF_WALLS: &str = concat!(env!("OUT_DIR"), "/cf_walls");
 /// The source of `CF_WALLS`, which cleanfail_e2e builds for x86_64 to test the arm64-only refusal.
 pub const CF_WALLS_SRC: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/c/cf_walls.c");
-/// M50 Review Focus 1: a Rust program that calls fsync(2).
-pub const CF_RS_FSYNC: &str = concat!(env!("OUT_DIR"), "/cf_rs_fsync");
+/// M50 Review Focus 1: a Rust program that calls chroot(2) (M53 C1; it was fsync(2) until fsync got a row).
+pub const CF_RS_CHROOT: &str = concat!(env!("OUT_DIR"), "/cf_rs_chroot");
+/// M53 (spec §3b): the POSIX file and process calls, one mode each, picked by argv[1] (see the source).
+pub const POSIX_DYN: &str = concat!(env!("OUT_DIR"), "/posix_dyn");
+/// M53: `posix_dyn`'s modes in sequence, one directory, as a first-contact C program.
+pub const FC_POSIX: &str = concat!(env!("OUT_DIR"), "/fc_posix");
+/// M53: `std::fs` end to end, as a first-contact Rust program.
+pub const FC_RS_FS: &str = concat!(env!("OUT_DIR"), "/fc_rs_fs");
 /// M51 (spec §3e): the output modes (see the source).
 pub const FID_OUTPUT: &str = concat!(env!("OUT_DIR"), "/fid_output");
 /// M51 (spec §3b): one trap per mode (see the source).

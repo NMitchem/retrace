@@ -6650,6 +6650,26 @@ impl Box_ {
         self.deliver_wake(tid, retrace_arch::ETIMEDOUT, true, &[]).unwrap_or_else(|m| panic!("{m}"));
     }
 
+    /// M53 §3g: `flock(fd, op)` (131), forwarded with `LOCK_NB` added, so the recorder never waits for
+    /// a lock. The host kernel answers as it would for the program (`EWOULDBLOCK`, 35, when another
+    /// descriptor holds the lock), and a call that did not itself ask for `LOCK_NB` and got that
+    /// answer is one that natively WAITS, which is a wall (R6): the one holder that could release it
+    /// is another descriptor of this program, and a wait is a block no schedule here models.
+    ///
+    /// The descriptor is translated by `forward_and_diff`, as for every forwarded call. Returns
+    /// `(ret, err)`; the record arm appends it under the guest's own `args` (C4), which is all replay's
+    /// generic dispatch needs. `Err` is the wall, for `wall_or_bug`.
+    pub fn forward_flock(&mut self, args: [u64; 8]) -> Result<(u64, bool), String> {
+        let mut host = args;
+        host[1] |= retrace_arch::LOCK_NB;
+        let (ret, _ret1, err, _writes) = self.forward_and_diff(retrace_arch::SYS_FLOCK, host);
+        if err && ret == retrace_arch::EWOULDBLOCK && args[1] & retrace_arch::LOCK_NB == 0 {
+            return Err(retrace_arch::wall(retrace_arch::WallCategory::Syscalls, format!(
+                "flock (syscall 131) on fd {} would wait for a lock another descriptor holds", args[0] as u32)));
+        }
+        Ok((ret, err))
+    }
+
     /// M47 §3c: `madvise(addr, len, behav)` (75), **modelled, never forwarded**. Forwarded, the
     /// host applied the advice to RETRACE's backing of the guest range: a `MADV_FREE_REUSABLE`
     /// there lets the host reclaim pages the guest may later write through stage 2 (the hazard M37

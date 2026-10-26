@@ -1539,6 +1539,19 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                     .map_err(|e| format!("append kevent: {e}"))?; count += 1;
                 b.set_x0_err_and_return(rc, err);
             }
+            // M53 §3g: flock is forwarded with LOCK_NB added (Box_::forward_flock), so the recorder
+            // never waits; a call that would wait is a wall. The landmark carries the GUEST's args
+            // (C4), not the host's `op | LOCK_NB`, and replay's generic dispatch applies the answer.
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_FLOCK => {
+                if let Err(e) = b.prepare_forward_pointers(num, &args) {
+                    append_refused(&mut w, &mut b, &mut count, num, args, e, true, thread)?;
+                    continue;
+                }
+                let (ret, err) = b.forward_flock(args).map_err(wall_or_bug)?;
+                w.append(&Event::Syscall { num, args, ret, ret1: 0, err, writes: vec![], thread })
+                    .map_err(|e| format!("append flock: {e}"))?; count += 1;
+                b.set_x0_err_and_return(ret, err);
+            }
             // M48 §3e: every SDK psynch number is EMULATED, never forwarded (see Box_::guest_psynch).
             // Forwarded, a psynch call acts on the HOST's psynch state keyed by retrace's own
             // addresses, blocking or waking the recorder. One arm serves them all: cvwait, cvsignal and

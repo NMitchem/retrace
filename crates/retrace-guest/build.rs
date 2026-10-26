@@ -1129,7 +1129,7 @@ fn main() {
     let dir = env!("CARGO_MANIFEST_DIR");
     for name in ["fc_null_load", "fc_null_store", "fc_null_call", "fc_munmapped", "fc_low_store",
                  "fc_stack_overflow", "fc_uaf", "fc_assert", "fc_sleep", "fc_usleep", "fc_nanosleep",
-                 "fc_mutex", "fc_fileio", "fc_env", "fc_c_trap", "fc_signal"] {
+                 "fc_mutex", "fc_fileio", "fc_env", "fc_c_trap", "fc_signal", "fc_posix"] {
         let src = format!("{dir}/c/{name}.c");
         let bin = format!("{out}/{name}");
         println!("cargo:rerun-if-changed={src}");
@@ -1153,7 +1153,8 @@ fn main() {
     // test` runs the binary it builds.
     let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
     for (name, harness) in [("fc_rs_null", false), ("fc_rs_sleep", false),
-                            ("fc_rs_tests", true), ("fc_rs_tests_fail", true), ("fc_rs_threads", true)] {
+                            ("fc_rs_tests", true), ("fc_rs_tests_fail", true), ("fc_rs_threads", true),
+                            ("fc_rs_fs", false)] {
         let src = format!("{dir}/rs/{name}.rs");
         let bin = format!("{out}/{name}");
         println!("cargo:rerun-if-changed={src}");
@@ -1164,7 +1165,7 @@ fn main() {
         assert!(status.success(), "{name} guest build failed");
     }
     // M50 (spec §3f): the clean-failure fixtures cleanfail_e2e drives. cf_walls takes the hello_dyn
-    // recipe (plain -arch arm64, libSystem through real dyld) and cf_rs_fsync the hello_rust one.
+    // recipe (plain -arch arm64, libSystem through real dyld) and cf_rs_chroot the hello_rust one.
     // Named cf_, not fc_: firstcontact_e2e's one-row-per-fixture check reads every fc_ source.
     let src = format!("{dir}/c/cf_walls.c");
     let bin = format!("{out}/cf_walls");
@@ -1172,12 +1173,19 @@ fn main() {
     let status = Command::new("clang").args(["-arch", "arm64", "-o", &bin, &src])
         .status().expect("clang cf_walls");
     assert!(status.success(), "cf_walls guest build failed");
-    let src = format!("{dir}/rs/cf_rs_fsync.rs");
-    let bin = format!("{out}/cf_rs_fsync");
+    let src = format!("{dir}/rs/cf_rs_chroot.rs");
+    let bin = format!("{out}/cf_rs_chroot");
     println!("cargo:rerun-if-changed={src}");
     let status = Command::new(&rustc).args(["--target", "aarch64-apple-darwin", "-o", &bin, &src])
-        .status().expect("rustc cf_rs_fsync");
-    assert!(status.success(), "cf_rs_fsync guest build failed");
+        .status().expect("rustc cf_rs_chroot");
+    assert!(status.success(), "cf_rs_chroot guest build failed");
+    // M53 (spec §3b): posix_dyn, the hello_dyn recipe. fc_posix includes its source (build.rs's fc_ loop).
+    let src = format!("{dir}/c/posix_dyn.c");
+    let bin = format!("{out}/posix_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang").args(["-arch", "arm64", "-o", &bin, &src])
+        .status().expect("clang posix_dyn");
+    assert!(status.success(), "posix_dyn guest build failed");
     // M51: the fidelity fixtures, the hello_dyn recipe. Named fid_, not fc_: firstcontact_e2e's
     // one-row-per-fixture check reads every fc_ source.
     for name in ["fid_output", "fid_traps", "fid_frames", "fid_env", "fid_signals", "fid_badptr"] {

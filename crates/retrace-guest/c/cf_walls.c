@@ -13,12 +13,13 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/event.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t never = PTHREAD_COND_INITIALIZER;
 
-static void *fsync_worker(void *arg) { (void)arg; fsync(1); return NULL; }
+static void *chroot_worker(void *arg) { (void)arg; chroot("/nonexistent-cf"); return NULL; }
 
 // `deadlock`: waits on a condition nothing signals, while main joins it. Natively a hang.
 static void *forever(void *arg) {
@@ -32,16 +33,17 @@ int main(int argc, char **argv) {
     const char *mode = argc > 1 ? argv[1] : "";
     printf("cf: %s\n", mode);
     fflush(stdout);
-    if (!strcmp(mode, "fsync")) {
-        fsync(1);
-    } else if (!strcmp(mode, "threadfsync")) {
+    if (!strcmp(mode, "chroot")) {
+        chroot("/nonexistent-cf");
+    } else if (!strcmp(mode, "threadchroot")) {
         pthread_t t;
-        pthread_create(&t, NULL, fsync_worker, NULL);
+        pthread_create(&t, NULL, chroot_worker, NULL);
         pthread_join(t, NULL);
     } else if (!strcmp(mode, "pause")) {
         pause();
-    } else if (!strcmp(mode, "symlink")) {
-        symlink("cf_target", "cf-symlink");
+    } else if (!strcmp(mode, "socketpair")) {
+        int sv[2];
+        socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
     } else if (!strcmp(mode, "clocksleep")) {
         clock_serv_t clk;
         host_get_clock_service(mach_host_self(), SYSTEM_CLOCK, &clk);
