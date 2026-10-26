@@ -297,11 +297,13 @@ fn a_rust_program_that_calls_chroot_stops_at_one_clean_line() {
     assert_eq!(line, format!("retrace: unsupported: chroot (syscall 61) - see {WALLS}#syscalls"));
 }
 
-/// `pause()` waits for a signal nothing in retrace can deliver to a waiting program.
+/// `pause()` with nothing to signal it is the deadlock wall (M53 C6): D1's line, with a clause naming the
+/// thread that waits in `sigsuspend`. Natively this program hangs forever.
 #[test]
 fn a_program_that_pauses_for_a_signal_stops_at_one_clean_line() {
-    assert_guest_wall(retrace_guest::CF_WALLS, &["pause"], "cf: pause\n",
-        "sigsuspend (syscall 111) waits for a signal", "signals");
+    let line = assert_guest_wall(retrace_guest::CF_WALLS, &["pause"], "cf: pause\n",
+        "M14: DEADLOCK - every thread is blocked and nothing is left to wake one", "threads");
+    assert!(line.contains("; thread 0 waits in sigsuspend for a signal nothing can send - see "), "{line}");
 }
 
 /// `socketpair` has no row. (M52 §3e made `sched_yield` a modelled call, so this row replaced its wall, C7.)

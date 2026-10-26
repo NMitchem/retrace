@@ -5,7 +5,11 @@
 #define POSIX_DYN_LIB
 #include "posix_dyn.c"
 #include <poll.h>
+#include <signal.h>
 #include <sys/uio.h>
+
+static volatile sig_atomic_t alarmed;
+static void on_alarm(int sig) { (void)sig; alarmed = 1; }
 
 int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);
@@ -45,6 +49,19 @@ int main(void) {
         printf("poll ready rc=%d revents=0x%x\n", poll(&pf, 1, 0), (unsigned)pf.revents);
         close(pp[0]);
         close(pp[1]);
+    }
+    printf("-- alarm\n");
+    {
+        // M53 t5 (C8): alarm and pause, which a program with a timeout or a wait for a signal calls. The
+        // seconds left on the previous alarm, then a short timer that ends a pause through its handler.
+        signal(SIGALRM, on_alarm);
+        printf("alarm first=%u\n", alarm(5));
+        printf("alarm second=%u\n", alarm(0));
+        struct itimerval it = {{0, 0}, {0, 20000}};
+        setitimer(ITIMER_REAL, &it, NULL);
+        errno = 0;
+        int rc = pause();
+        printf("pause rc=%d errno=%d alarmed=%d\n", rc, errno, (int)alarmed);
     }
     printf("removed=%s\n", unlinkat(AT_FDCWD, dir, AT_REMOVEDIR) == 0 ? "yes" : "no");
     return 0;

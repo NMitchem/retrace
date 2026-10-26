@@ -1637,6 +1637,19 @@ pub const SYS_SIGPROCMASK: u64 = 48;
 pub const SYS_SIGPENDING: u64 = 52;
 pub const SYS_SIGALTSTACK: u64 = 53;
 pub const SYS_SIGSUSPEND: u64 = 111;
+/// `sigsuspend_nocancel` (M53 §3f): `pause()` and `sigsuspend()` issue one or the other.
+pub const SYS_SIGSUSPEND_NOCANCEL: u64 = 410;
+/// `setitimer(which, itv, oitv)` and `getitimer(which, itv)` (M53 §3f). **Never forwarded**: the
+/// host would arm retrace's own timer and its SIGALRM would end the recorder (C5).
+pub const SYS_SETITIMER: u64 = 83;
+pub const SYS_GETITIMER: u64 = 86;
+/// `which` of `setitimer`/`getitimer` (`sys/time.h`). Only `ITIMER_REAL` is modelled; the other two
+/// count CPU time, which the synthetic clock does not have.
+pub const ITIMER_REAL: u64 = 0;
+pub const ITIMER_VIRTUAL: u64 = 1;
+pub const ITIMER_PROF: u64 = 2;
+/// `SIGALRM`, the signal `ITIMER_REAL` raises.
+pub const SIGALRM: u64 = 14;
 pub const SYS_SIGRETURN: u64 = 184;
 pub const SYS_PTHREAD_KILL: u64 = 328;
 pub const SYS_PTHREAD_SIGMASK: u64 = 329;
@@ -1850,6 +1863,7 @@ pub fn is_signal_syscall(num: u64) -> bool {
             | SYS_SIGPENDING
             | SYS_SIGALTSTACK
             | SYS_SIGSUSPEND
+            | SYS_SIGSUSPEND_NOCANCEL
             | SYS_SIGRETURN
             | SYS_PTHREAD_KILL
             | SYS_PTHREAD_SIGMASK
@@ -2928,7 +2942,7 @@ mod tests {
 
     #[test]
     fn is_signal_syscall_covers_every_intercepted_number_and_nothing_else() {
-        for n in [37u64, 46, 48, 52, 53, 111, 184, 328, 329, 330, 520, 521] {
+        for n in [37u64, 46, 48, 52, 53, 111, 410, 184, 328, 329, 330, 520, 521] {
             assert!(is_signal_syscall(n), "{n} must be intercepted");
         }
         // getpid is NOT intercepted — it keeps forwarding, and the raise arm's self-check relies on

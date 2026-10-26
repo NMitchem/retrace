@@ -518,6 +518,16 @@ fn main() {
         .status().expect("clang pollsel_dyn");
     assert!(status.success(), "pollsel_dyn guest build failed");
 
+    // alarm_dyn: the M53 t5 fixture — ITIMER_REAL, alarm, pause, sigsuspend and an interrupted sleep.
+    // Same recipe as pollsel_dyn.
+    let src = format!("{}/c/alarm_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/alarm_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang alarm_dyn");
+    assert!(status.success(), "alarm_dyn guest build failed");
+
     // stall_dyn: the M52 §3i fixture — main spins on a flag a created thread would set. Same recipe
     // as hello_dyn; pthreads are in libSystem.
     let src = format!("{}/c/stall_dyn.c", env!("CARGO_MANIFEST_DIR"));
