@@ -92,7 +92,7 @@ behind it. These are the ones you'll hit first:
   (most of the rest start another process, which stops at a wall, or print host state).
 - Of the 33 small C, C++, Rust and Swift programs in the first-contact corpus
   (`firstcontact_e2e`), the kind a newcomer tries first, 31 record and replay as they run natively
-  (up from 27). <!-- <<FIGURE: M53 close census: the Apple sweep's 41 of 54 and 47, the first-contact 31 of 33 and tier 2, if M53's sweeps moved them; edit this list and the Apple line above to match, or delete this marker if they did not>> -->The other two are Swift programs that stop at a libdispatch call retrace does not model (a workloop, a workqueue opcode).
+  (up from 27). The other two are Swift programs that stop at a libdispatch call retrace does not model (a workloop, a workqueue opcode).
 - A recording holds the program's environment, so a recording you share shares it; run retrace under env -i to pass only what the program needs.
 - Traces are big: tens of MiB to over a GiB, uncompressed. node's `console.log(1)` is about 501 MiB
   because retrace backs V8's address-space reservations in full. The format isn't stable, and
