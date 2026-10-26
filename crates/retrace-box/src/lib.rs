@@ -6577,17 +6577,22 @@ impl Box_ {
                                               modelled", args[5]))));
             }
             if !(0..=FD_SETSIZE).contains(&nfds) { return Ok((EINVAL, true)); }
-            let timeout_ns = if args[4] == 0 { None } else {
+            let timeout_ns: Option<u64> = if args[4] == 0 { None } else {
                 let Some(t) = self.read_va_checked(args[4], 16) else { return Ok((EFAULT, true)) };
                 let sec = i64::from_le_bytes(t[..8].try_into().unwrap());
                 // A timeval's microseconds are 32 bits wide, a timespec's nanoseconds 64.
-                let (sub, unit, per_sec) = if is_pselect {
-                    (i64::from_le_bytes(t[8..].try_into().unwrap()), 1, 1_000_000_000)
+                // Ruling T4-timeout (pselbound.c, seltimeoutprobe.c): the kernel's own bounds. A
+                // timeval is valid for 0 <= sec <= 100,000,000 and 0 <= usec < 1,000,000; a timespec
+                // for 0 <= sec <= i32::MAX and 0 <= nsec <= 1,000,000,000 (1e9 itself is accepted).
+                let (sub, unit, max_sec, max_sub) = if is_pselect {
+                    (i64::from_le_bytes(t[8..].try_into().unwrap()), 1, i32::MAX as i64, 1_000_000_000)
                 } else {
-                    (i32::from_le_bytes(t[8..12].try_into().unwrap()) as i64, 1_000, 1_000_000)
+                    (i32::from_le_bytes(t[8..12].try_into().unwrap()) as i64, 1_000, 100_000_000, 999_999)
                 };
-                if sec < 0 || !(0..per_sec).contains(&sub) { return Ok((EINVAL, true)); }
-                Some(sec as u64 * 1_000_000_000 + sub as u64 * unit)
+                if !(0..=max_sec).contains(&sec) || !(0..=max_sub).contains(&sub) { return Ok((EINVAL, true)); }
+                (sec as u64).checked_mul(1_000_000_000).and_then(|n| n.checked_add(sub as u64 * unit))
+                    .ok_or_else(|| fail(wall("with a timeout that overflows nanoseconds".to_string())))
+                    .map(Some)?
             };
             let nfds = nfds as usize;
             let len = nfds.div_ceil(32) * 4;

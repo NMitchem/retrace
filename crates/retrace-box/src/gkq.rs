@@ -17,17 +17,13 @@ use retrace_arch::{Kevent, EVFILT_READ, EVFILT_USER, EVFILT_WRITE, EV_ADD, EV_CL
 pub const EV_DISABLE: u16 = 0x0008;
 /// `sizeof(struct kevent)` (SDK `sys/event.h`).
 pub const KEVENT_BYTES: usize = 32;
-/// A guest pipe's buffer: `EVFILT_WRITE`'s `data` on an empty pipe (t0 M3, `write-ready on an
-/// empty pipe`; `PIPE_SIZE` in the SDK, F9). The kernel grows a buffer under a large write; the
-/// model does not, and refuses a watched pipe that passes this (K1).
-pub const PIPE_CAPACITY: u64 = 16384;
+/// A new guest pipe's buffer: `EVFILT_WRITE`'s `data` on an empty pipe (t0 M3).
+pub const PIPE_SIZE: u64 = 16384;
+/// What the buffer grows to when a write takes the held bytes past `PIPE_SIZE` (Ruling T4-pipesize,
+/// `pipesizeprobe.c`: even one byte past it grows it, and it never shrinks).
+pub const PIPE_SIZE_GROWN: u64 = 65536;
 /// `PIPE_BUF` (SDK `sys/syslimits.h`): a write end is ready while this much room is left (F9).
 pub const PIPE_BUF: u64 = 512;
-/// The room a pipe has for `poll` and `select` (t0 M7: 65,536 bytes of 4,096-byte writes fill it, and
-/// a write end with 512 bytes free is writable while one with 511 is not). `PIPE_CAPACITY` above is
-/// what `EVFILT_WRITE` reports on an empty pipe; the kernel grows a buffer under writes, so the
-/// writability a poller sees runs to this size.
-pub const PIPE_POLL_CAPACITY: u64 = 65536;
 /// The bits of a knote's creating flags a delivery hands back (t0 M3, `read on the write end,
 /// reader closed`, whose knote was added `EV_ADD|EV_ENABLE`). Every measured delivery returns the
 /// add's flags verbatim (`detect`: `0x21`).
@@ -86,6 +82,18 @@ pub enum PollWait {
     Select { nfds: usize, vas: [u64; 3], rset: Vec<u8>, wset: Vec<u8> },
 }
 
+impl PollWait {
+    /// Does this wait watch descriptor `fd`?
+    fn watches(&self, fd: u64) -> bool {
+        match self {
+            PollWait::Poll { raw, .. } => raw.chunks_exact(8)
+                .any(|e| i32::from_le_bytes(e[..4].try_into().unwrap()) as i64 == fd as i64),
+            PollWait::Select { nfds, rset, wset, .. } => (fd as usize) < *nfds
+                && [rset, wset].iter().any(|s| s.get(fd as usize / 8).is_some_and(|b| b >> (fd % 8) & 1 != 0)),
+        }
+    }
+}
+
 /// What a pipe end is to a poller: whether it has anything to read, room to write, and whether the
 /// other end is gone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -108,6 +116,8 @@ pub struct Kqueue {
 struct Pipe {
     /// Unread bytes. `None` once a read returned more than the count, so the model lost it.
     count: Option<u64>,
+    /// The buffer's size: `PIPE_SIZE`, then `PIPE_SIZE_GROWN` for good once a write passes the first.
+    size: u64,
     /// Open guest descriptors on each end. A `dup` adds one, and the end closes at zero.
     readers: u32,
     writers: u32,
@@ -163,12 +173,7 @@ impl Pipes {
                 let p = self.pipes[&id];
                 if p.readers == 0 { return Ok(Some((EV_EOF, 0))); }
                 let count = p.count.ok_or_else(lost)?;
-                if count > PIPE_CAPACITY {
-                    return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
-                        "M48: pipe {fd}: {count} unread bytes exceed the measured {PIPE_CAPACITY}-byte \
-                         buffer: the kernel grows a pipe's buffer, which the model does not (t0 M3)")));
-                }
-                let room = PIPE_CAPACITY - count;
+                let room = p.size.checked_sub(count).ok_or_else(lost)?;
                 Ok((room >= PIPE_BUF).then_some((0, room as i64)))
             }
             // K3: libuv's uv__stream_try_select probe, never ready.
@@ -232,7 +237,7 @@ impl GuestKqueues {
         }
         let id = self.pipes.next;
         self.pipes.next += 1;
-        self.pipes.pipes.insert(id, Pipe { count: Some(0), readers: 0, writers: 0 });
+        self.pipes.pipes.insert(id, Pipe { count: Some(0), size: PIPE_SIZE, readers: 0, writers: 0 });
         self.pipes.bind(r, id, false);
         self.pipes.bind(w, id, true);
         Ok(())
@@ -244,6 +249,13 @@ impl GuestKqueues {
     /// once with EBADF, which is unmodelled (Ruling T0-M4). The close of another descriptor of the
     /// same kqueue is a plain close, and the waiter is not woken (t0 §M4).
     pub fn close(&mut self, fd: u64) -> Result<(), String> {
+        // Ruling T4-closepolled (a): what natively happens to a poller whose descriptor is closed under
+        // it is unmeasured.
+        if let Some((&tid, _)) = self.poll_waiters.iter().find(|(_, w)| w.watches(fd)) {
+            return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
+                "M53: close of descriptor {fd} while thread {tid} waits in poll or select on it: what the \
+                 waiter then sees is not modelled (Ruling T4-closepolled)")));
+        }
         if let Some(w) = self.kq_of(fd).and_then(|k| k.waiter).filter(|w| w.fd == fd) {
             return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
                 "M53: close of kqueue descriptor {fd} while thread {} waits in kevent on it: natively the \
@@ -284,6 +296,7 @@ impl GuestKqueues {
         let Some(&(id, true)) = self.pipes.ends.get(&fd) else { return Ok(()) };
         let p = self.pipes.pipes.get_mut(&id).expect("a bound end's pipe exists");
         p.count = p.count.map(|c| c + n);
+        if p.count.is_some_and(|c| c > PIPE_SIZE) { p.size = PIPE_SIZE_GROWN; }
         self.refresh()
     }
 
@@ -484,12 +497,9 @@ impl GuestKqueues {
             FdKind::PipeWrite(id) => {
                 let p = self.pipes.pipes[&id];
                 let count = p.count.ok_or_else(lost)?;
-                if count > PIPE_POLL_CAPACITY {
-                    return Err(format!("pipe {fd}: {count} unread bytes exceed the measured {PIPE_POLL_CAPACITY}-byte \
-                                        buffer, which the model does not grow"));
-                }
+                let room = p.size.checked_sub(count).ok_or_else(lost)?;
                 Ok(PipeState { write_end: true, readable: false,
-                               writable: p.readers > 0 && PIPE_POLL_CAPACITY - count >= PIPE_BUF,
+                               writable: p.readers > 0 && room >= PIPE_BUF,
                                other_closed: p.readers == 0 })
             }
             FdKind::Kqueue => Err("a kqueue, not a guest pipe".to_string()),
@@ -691,7 +701,7 @@ mod tests {
         let mut g = kq();
         g.pipe(5, 6).unwrap();
         g.apply(KQ, &[ch(5, EVFILT_READ, EV_ADD, 0, 0, 0xabc), ch(6, EVFILT_WRITE, EV_ADD, 0, 0, 0)]).unwrap();
-        let cap = PIPE_CAPACITY as i64;
+        let cap = PIPE_SIZE as i64;
         assert_eq!(g.take_events(KQ, 16).unwrap(), vec![ch(6, EVFILT_WRITE, EV_ADD, 0, cap, 0)],
             "an empty pipe: writable with the whole buffer, not readable");
         g.note_write(6, 5).unwrap();
@@ -702,7 +712,7 @@ mod tests {
         assert_eq!(g.pipe_count(5), Some(0));
         let filters = |g: &mut GuestKqueues| g.take_events(KQ, 16).unwrap().iter().map(|e| e.filter).collect::<Vec<_>>();
         assert_eq!(filters(&mut g), vec![EVFILT_WRITE], "drained: not readable");
-        g.note_write(6, PIPE_CAPACITY - (PIPE_BUF - 1)).unwrap();
+        g.note_write(6, PIPE_SIZE - (PIPE_BUF - 1)).unwrap();
         assert_eq!(filters(&mut g), vec![EVFILT_READ], "PIPE_BUF - 1 bytes of room: not writable");
     }
 
@@ -818,7 +828,7 @@ mod tests {
         assert_eq!(g.poll_ready(6, POLLOUT).unwrap(), 0x4);
         assert_eq!(g.poll_ready(6, POLLWRBAND).unwrap(), 0x100);
         assert_eq!(g.poll_ready(6, POLLIN).unwrap(), 0);
-        g.note_write(6, PIPE_POLL_CAPACITY - 512 - 3).unwrap();
+        g.note_write(6, PIPE_SIZE_GROWN - 512 - 3).unwrap();
         assert_eq!(g.poll_ready(6, POLLOUT).unwrap(), 0x4, "512 bytes free");
         g.note_write(6, 1).unwrap();
         assert_eq!(g.poll_ready(6, POLLOUT).unwrap(), 0, "511 bytes free");
@@ -859,5 +869,39 @@ mod tests {
         g.pipe(5, 6).unwrap();
         g.note_read(5, 1).unwrap();
         assert!(g.poll_ready(5, 1).unwrap_err().contains("byte count is unknown"), "a lost count is not guessed");
+    }
+
+    /// Ruling T4-pipesize: the buffer starts at 16,384 and grows to 65,536 once a write passes it,
+    /// never shrinking; room is size - held, ready at PIPE_BUF (`pipesizeprobe.c`).
+    #[test]
+    fn a_pipes_buffer_grows_once_and_the_write_filter_follows_it() {
+        let data = |g: &mut GuestKqueues| -> Option<i64> {
+            g.take_events(KQ, 16).unwrap().iter().find(|e| e.filter == EVFILT_WRITE).map(|e| e.data)
+        };
+        let fresh = || { let mut g = kq(); g.pipe(5, 6).unwrap(); g.apply(KQ, &[ch(6, EVFILT_WRITE, EV_ADD, 0, 0, 0)]).unwrap(); g };
+        let mut g = fresh();
+        assert_eq!(data(&mut g), Some(16384));
+        g.note_write(6, 15872).unwrap();
+        assert_eq!(data(&mut g), Some(512), "15,872 held: ready");
+        g.note_write(6, 1).unwrap();
+        assert_eq!(data(&mut g), None, "15,873 held: not ready");
+        g.note_write(6, 511).unwrap();
+        assert_eq!(data(&mut g), None, "16,384 held: not ready");
+        g.note_write(6, 1).unwrap();
+        assert_eq!(data(&mut g), Some(49151), "one byte more grows it");
+        g.note_write(6, 65536 - 16385).unwrap();
+        assert_eq!(data(&mut g), None, "full at 65,536");
+        g.note_read(5, 65536).unwrap();
+        assert_eq!(data(&mut g), Some(65536), "drained after growth: it stays grown");
+        g.note_write(6, 16384).unwrap();
+        assert_eq!(data(&mut g), Some(49152));
+        let mut g = fresh();
+        g.note_write(6, 20000).unwrap();
+        assert_eq!(data(&mut g), Some(45536), "one 20,000-byte write");
+        let mut g = fresh();
+        g.note_write(6, 16384).unwrap();
+        assert_eq!(data(&mut g), None, "4 x 4096: not ready");
+        g.note_write(6, 4096).unwrap();
+        assert_eq!(data(&mut g), Some(45056), "a fifth succeeds");
     }
 }

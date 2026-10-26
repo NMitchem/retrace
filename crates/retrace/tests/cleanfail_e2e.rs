@@ -319,6 +319,14 @@ fn a_poll_on_a_file_stops_at_one_clean_line() {
     assert_eq!(line, format!("retrace: unsupported: poll (syscall 230) on fd 4, a file, not a guest pipe - see {WALLS}#threads"));
 }
 
+/// M53 t4 (Ruling T4-closepolled): another thread closing the descriptor a blocked poller watches is
+/// unmeasured, so it is refused by value, as Task 3's close of a waited kqueue is.
+#[test]
+fn a_close_under_a_blocked_poll_stops_at_one_clean_line() {
+    assert_guest_wall(retrace_guest::POLLSEL_DYN, &["pollclose"], "pollsel: pollclose\n",
+        "M53: close of descriptor ", "threads");
+}
+
 /// D1: every thread blocked with nothing left to wake one. Natively this program hangs forever; under
 /// retrace it is a wall in `threads` whose line says so, and says to report it if it does not hang.
 #[test]

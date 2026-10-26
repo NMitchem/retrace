@@ -13,6 +13,7 @@
 //   pselect   cross's shape through pselect with a NULL mask.             rc=1 r=1
 //   pollfile  poll on a regular file: refused under retrace (not native-compared).
 //   pselmask  pselect with a signal mask: refused under retrace (not native-compared).
+//   pollclose a thread closes the read end main is polling: refused under retrace (not native-compared).
 #include <errno.h>
 #include <fcntl.h>
 #include <mach/mach_time.h>
@@ -175,6 +176,13 @@ static void *writer(void *a) {
     return NULL;
 }
 
+// Closes the descriptor g_w names after 50 ms (the write end of a watched pipe, or the watched end).
+static void *closer(void *a) {
+    usleep(50000);
+    close(g_w);
+    return NULL;
+}
+
 static int mode_cross(int sel) {
     int p[2];
     pipe(p);
@@ -191,6 +199,31 @@ static int mode_cross(int sel) {
         struct pollfd f = {p[0], POLLIN, 0};
         int rc = poll(&f, 1, -1);
         printf("rc=%d revents=0x%x\n", rc, (unsigned)(unsigned short)f.revents);
+    }
+    pthread_join(t, NULL);
+    // Ruling T4-closepolled (b): closing the OTHER end of a watched pipe is a pipe change that wakes
+    // the poller: the read end is ready (end of file), with POLLHUP beside POLLIN.
+    int q[2];
+    pipe(q);
+    g_w = q[1];
+    pthread_create(&t, NULL, closer, NULL);
+    if (sel) {
+        fd_set r;
+        FD_ZERO(&r);
+        FD_SET(q[0], &r);
+        int rc = pselect(q[0] + 1, &r, NULL, NULL, NULL, NULL);
+        printf("close: rc=%d r=%d\n", rc, FD_ISSET(q[0], &r) != 0);
+        // Ruling T4-timeout: a timespec's nanoseconds past 1e9 are EINVAL, even with a ready descriptor.
+        FD_ZERO(&r);
+        FD_SET(q[0], &r);
+        struct timespec bad = {0, 1000000001};
+        errno = 0;
+        rc = pselect(q[0] + 1, &r, NULL, NULL, &bad, NULL);
+        printf("bad timespec: rc=%d errno=%d\n", rc, rc < 0 ? errno : 0);
+    } else {
+        struct pollfd f = {q[0], POLLIN, 0};
+        int rc = poll(&f, 1, -1);
+        printf("close: rc=%d revents=0x%x\n", rc, (unsigned)(unsigned short)f.revents);
     }
     pthread_join(t, NULL);
     return 0;
@@ -251,6 +284,13 @@ static int mode_select(void) {
     S("nfds 1025", 1025, -1, -1, -1, &zero);
     struct timeval neg = {-1, 0};
     S("timeout -1 s", 0, -1, -1, -1, &neg);
+    // Ruling T4-timeout: a timeval's seconds past 100,000,000 are EINVAL even with a ready descriptor.
+    pipe(p);
+    write(p[1], "x", 1);
+    struct timeval big = {100000001, 0};
+    S("seconds 100000001, ready", p[0] + 1, p[0], -1, -1, &big);
+    struct timeval usec = {0, 1000000};
+    S("usec 1000000, ready", p[0] + 1, p[0], -1, -1, &usec);
     return 0;
 }
 
@@ -276,6 +316,19 @@ static int mode_pselmask(void) {
     return 0;
 }
 
+static int mode_pollclose(void) {
+    int p[2];
+    pipe(p);
+    g_w = p[0];
+    pthread_t t;
+    pthread_create(&t, NULL, closer, NULL);
+    struct pollfd f = {p[0], POLLIN, 0};
+    int rc = poll(&f, 1, -1);
+    printf("rc=%d\n", rc);
+    pthread_join(t, NULL);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IOLBF, 0);
     if (argc < 2) { fprintf(stderr, "usage: pollsel_dyn <mode>\n"); return 2; }
@@ -289,6 +342,7 @@ int main(int argc, char **argv) {
     if (!strcmp(m, "pselect")) return mode_cross(1);
     if (!strcmp(m, "pollfile")) return mode_pollfile();
     if (!strcmp(m, "pselmask")) return mode_pselmask();
+    if (!strcmp(m, "pollclose")) { printf("pollsel: pollclose\n"); return mode_pollclose(); }
     fprintf(stderr, "pollsel_dyn: unknown mode %s\n", m);
     return 2;
 }

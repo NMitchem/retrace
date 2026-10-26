@@ -90,7 +90,7 @@ fn a_poll_with_no_descriptors_sleeps_until_its_timeout() {
 #[test]
 fn a_poll_with_no_timeout_wakes_when_another_thread_writes() {
     let (out, _) = records_as_native("cross");
-    assert_eq!(out, "rc=1 revents=0x1\n");
+    assert_eq!(out, "rc=1 revents=0x1\nclose: rc=1 revents=0x11\n", "the writer's close wakes the poll with POLLHUP");
 }
 
 #[test]
@@ -107,6 +107,8 @@ fn select_answers_the_same_states_as_natively() {
         "select nfds -1 rc=-1 errno=22",
         "select nfds 1025 rc=-1 errno=22",
         "select timeout -1 s rc=-1 errno=22",
+        "select seconds 100000001, ready rc=-1 errno=22 r=1",
+        "select usec 1000000, ready rc=-1 errno=22 r=1",
         "timeval after: 0.080000\n",
     ] {
         assert!(out.contains(want), "missing {want:?} in:\n{out}");
@@ -116,7 +118,7 @@ fn select_answers_the_same_states_as_natively() {
 #[test]
 fn pselect_with_no_mask_waits_like_select() {
     let (out, _) = records_as_native("pselect");
-    assert_eq!(out, "rc=1 r=1\n");
+    assert_eq!(out, "rc=1 r=1\nclose: rc=1 r=1\nbad timespec: rc=-1 errno=22\n");
 }
 
 /// The wall line of `mode`: the recorder stops at it with exit 4, the guest prints nothing, and no
@@ -143,6 +145,15 @@ fn a_poll_on_a_file_is_refused_by_value() {
 fn a_pselect_with_a_signal_mask_is_refused_by_value() {
     let line = refused("pselmask");
     assert!(line.contains("pselect") && line.contains("a signal mask"), "{line}");
+}
+
+#[test]
+fn a_close_of_a_polled_descriptor_is_refused_by_value() {
+    let (rec, _) = record("pollclose");
+    assert_eq!(rec.code, Some(4), "{}", rec.stderr);
+    let line = rec.stderr.lines().find(|l| l.starts_with("retrace: unsupported: ")).expect("a wall line");
+    assert!(line.contains("close of descriptor ") && line.contains("while thread 0 waits in poll or select on it"), "{line}");
+    assert!(line.ends_with("#threads"), "{line}");
 }
 
 /// A checkpoint inside main's blocked poll, continued past the writer's `write`, must equal a cold
