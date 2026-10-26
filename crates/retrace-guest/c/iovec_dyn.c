@@ -63,6 +63,10 @@ static void mode_pos(void) {
     pipe(p);
     errno = 0; rc = preadv(p[0], r, 2, 0);
     printf("preadv(pipe) rc=%ld errno=%d\n", SHOW(rc));
+    // Only zero-length entries still reach the host's descriptor checks.
+    struct iovec zr[1] = {{q1, 0}};
+    errno = 0; rc = preadv(p[0], zr, 1, 0);
+    printf("preadv(pipe, zero-length) rc=%ld errno=%d\n", SHOW(rc));
     close(p[0]); close(p[1]);
     rm_file(fd);
 }
@@ -74,6 +78,10 @@ static void mode_console(void) {
     fflush(stdout);
     long rc = writev(1, o, 2);
     long rc2 = writev(2, e, 1);
+    // pwritev is not a console write: the host answers it (ESPIPE on a pipe), as natively.
+    errno = 0;
+    long rc3 = pwritev(1, o, 2, 0);
+    fprintf(stderr, "pwritev rc=%ld errno=%d\n", rc3, rc3 < 0 ? errno : 0);
     // The counts go to a file so that stdout and stderr hold only the bytes under test.
     int fd = open_file();
     dprintf(fd, "%ld %ld\n", rc, rc2);

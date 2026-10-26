@@ -47,6 +47,7 @@ fn pwritev_and_preadv_use_their_offset() {
         "got XYZWV offset=12",
         // The host kernel's own answers, through the forward.
         "preadv(off -1) rc=-1 errno=22", "preadv(pipe) rc=-1 errno=29",
+        "preadv(pipe, zero-length) rc=-1 errno=29",
     ]);
     let _ = std::fs::remove_file(&r.trace);
 }
@@ -58,16 +59,20 @@ fn a_console_writev_prints_on_record_and_on_both_replays() {
     let native = util::run_bounded(retrace_guest::IOVEC_DYN, &["console"], &[], BOUND);
     assert_eq!(native.code, Some(0), "native exits 0. stderr:\n{}", native.stderr);
     assert_eq!(String::from_utf8_lossy(&native.stdout), "ab\n");
-    assert_eq!(native.stderr, "e\n");
+    assert!(native.stderr.starts_with("e\npwritev rc="), "{}", native.stderr);
     let (rec, trace) = util::record_dynamic_args(retrace_guest::IOVEC_DYN, &["console"]);
     assert_eq!(rec.code, 0, "the recording exits 0. stderr:\n{}", rec.stderr);
     assert_eq!(String::from_utf8_lossy(&rec.stdout), "ab\n", "record prints the stdout entries");
-    assert_eq!(rec.stderr, "e\n", "record prints the stderr entry, and no line of retrace's own");
+    // pwritev is not a console write: its line is the host's answer (ESPIPE on a pipe), native's.
+    // Native's stdout here is run_bounded's capture file, where pwritev succeeds (rc=3, pwvprobe.c "a file");
+    // the recorder's stdout is a pipe, where the host answers ESPIPE. The recording carries the host's answer
+    // for the descriptor it really has, and replay reproduces it.
+    assert_eq!(rec.stderr, "e\npwritev rc=-1 errno=29\n", "record prints the stderr entry and the host's pwritev answer, and no line of retrace's own");
     for i in 0..2 {
         let rep = util::replay(&trace);
         assert_eq!(rep.code, 0, "replay {i} exits 0. stderr:\n{}", rep.stderr);
         assert_eq!(String::from_utf8_lossy(&rep.stdout), "ab\n", "replay {i} prints the stdout entries");
-        assert_eq!(rep.stderr, "e\n", "replay {i} prints the stderr entry");
+        assert_eq!(rep.stderr, rec.stderr, "replay {i} prints the stderr entry and the pwritev answer the recording holds");
     }
     // The landmark is a write-less one: the bytes are printed, never recorded as memory.
     let events = Reader::open(&trace).unwrap();

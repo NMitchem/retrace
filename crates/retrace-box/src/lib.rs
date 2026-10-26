@@ -6739,7 +6739,9 @@ impl Box_ {
                 "{what} with an unreachable entry after the first, on guest pipe fd {}: natively a pipe transfers \
                  only into entry 0 and drains nothing, which the pipe model cannot reproduce", args[0] as u32)));
         }
-        if writer {
+        // Only `writev` is a console write. `pwritev` on a console descriptor takes the forward, whose
+        // answer is native's (ESPIPE on a pipe, ENXIO on a tty; pwvprobe.c, Ruling T2-pwritev), as `pwrite`'s does.
+        if matches!(num, 121 | 412) {
             let stream = match self.fds.console_of(args[0]) {
                 Some(1) => Some(Stream::Stdout),
                 Some(2) => Some(Stream::Stderr),
@@ -6807,9 +6809,11 @@ impl Box_ {
             IovPrep::Answer(e) => Ok((e, true, Vec::new(), None)),
             IovPrep::Console { stream, bytes, ret, err } => Ok((ret, err, Vec::new(), Some((stream, bytes)))),
             IovPrep::Forward { spans, partial, total, reader } => {
-                if spans.is_empty() { return Ok((0, false, Vec::new(), None)); }
                 let mut host = args;
-                self.translate_fds(num, &mut host).expect("iovec_prepare checked the descriptor");
+                if let Err(e) = self.translate_fds(num, &mut host) { return Ok((e, true, Vec::new(), None)); }
+                // Every entry zero-length: forward one zero-length entry (a valid host base) so the
+                // host applies its descriptor and offset checks (preadv on a pipe is ESPIPE) (T2-m1).
+                let dummy = 0u8;
                 let mut array = Vec::with_capacity(spans.len() * 16);
                 let mut pres: Vec<Vec<u8>> = Vec::new();
                 for &(ipa, len) in &spans {
@@ -6819,10 +6823,14 @@ impl Box_ {
                     array.extend_from_slice(&(len as u64).to_le_bytes());
                     if reader { pres.push(unsafe { std::slice::from_raw_parts(hp, len) }.to_vec()); }
                 }
+                if spans.is_empty() {
+                    array.extend_from_slice(&(&dummy as *const u8 as u64).to_le_bytes());
+                    array.extend_from_slice(&0u64.to_le_bytes());
+                }
                 let mut sa = [0u64; 8];
                 sa[0] = host[0];
                 sa[1] = array.as_ptr() as u64;
-                sa[2] = spans.len() as u64;
+                sa[2] = spans.len().max(1) as u64;
                 if matches!(num, 540..=543) { sa[3] = args[3]; }
                 let (mut ret, _ret1, mut err) = unsafe { host_svc(num, sa) };
                 let mut writes = Vec::new();
