@@ -7,6 +7,7 @@
 //   outlives  the same, then close(kq), and d still holds the knote.     still=1
 //   fdclose   a pipe's read end watched through d, written, then closed: neither
 //             descriptor sees the knote any more.                                 knotes_after=0
+//   closewait a thread waits in kevent on kq, main closes kq: refused (T3-closewait), not native-compared.
 //   mio       mio's sequence (tokio-1.53.3 runtime/io/driver.rs, mio-1.2.4 kqueue selector), less
 //             Registry::register: kqueue, FD_CLOEXEC, two F_DUPFD_CLOEXEC copies at >= 3, a worker
 //             that sleeps 20 ms and wakes through the first copy with one EV_ADD|EV_ONESHOT
@@ -94,6 +95,29 @@ static int mode_mio(void) {
     return 0;
 }
 
+static void *closewait_waiter(void *arg) {
+    int q = *(int *)arg;
+    struct kevent out[1];
+    struct timespec two = {2, 0};
+    kevent(q, NULL, 0, out, 1, &two);
+    return NULL;
+}
+
+// Not a native comparison: natively the waiter wakes with EBADF. retrace refuses the close (T3-closewait).
+static int mode_closewait(void) {
+    int kq = kqueue();
+    int d = fcntl(kq, F_DUPFD_CLOEXEC, 0);
+    (void)d;
+    pthread_t t;
+    pthread_create(&t, NULL, closewait_waiter, &kq);
+    usleep(20000);
+    printf("closewait: closing\n");
+    close(kq);
+    pthread_join(t, NULL);
+    printf("closewait: done\n");
+    return 0;
+}
+
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IOLBF, 0);
     const char *m = argc > 1 ? argv[1] : "";
@@ -101,6 +125,7 @@ int main(int argc, char **argv) {
     if (!strcmp(m, "outlives")) return mode_shared(1);
     if (!strcmp(m, "fdclose")) return mode_fdclose();
     if (!strcmp(m, "mio")) return mode_mio();
+    if (!strcmp(m, "closewait")) return mode_closewait();
     printf("kqdup: unknown mode\n");
     return 2;
 }

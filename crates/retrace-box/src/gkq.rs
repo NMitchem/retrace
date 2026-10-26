@@ -356,6 +356,10 @@ impl GuestKqueues {
                     return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("{at}: an EV_ADD whose fflags carry a NOTE_FF* \
                                         operation: what the kernel then delivers as fflags is unmeasured")));
                 }
+                if c.fflags & NOTE_TRIGGER != 0 && flags & EV_DISABLE != 0 {
+                    return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("{at}: an EV_ADD carrying both EV_DISABLE and NOTE_TRIGGER: whether the \
+                                        trigger is held for a later EV_ENABLE is unmeasured")));
+                }
                 n.sfflags = c.fflags & NOTE_FFLAGSMASK;
                 // `kern_event.c:filt_userattach` (inferred from source): an add carrying NOTE_TRIGGER
                 // activates at once. mio's waker registers and wakes in this one change.
@@ -644,6 +648,7 @@ mod tests {
             (ch(1, EVFILT_TIMER, EV_ADD, 0, 0, 0), "filter -7 is not modelled"),
             (ch(1, EVFILT_USER, EV_ADD | EV_RECEIPT, 0, 0, 0), "flags 0x40 are not modelled"),
             (ch(1, EVFILT_USER, EV_ADD, NOTE_FFCOPY, 0, 0), "an EV_ADD whose fflags carry a NOTE_FF* operation"),
+            (ch(1, EVFILT_USER, EV_ADD | EV_DISABLE, NOTE_TRIGGER, 0, 0), "both EV_DISABLE and NOTE_TRIGGER"),
             (ch(1, EVFILT_READ, EV_ADD, 0, 0, 0), "not a guest pipe end"),
             (ch(KQ, EVFILT_READ, EV_ADD, 0, 0, 0), "filter -1 on Kqueue is not modelled"),
         ] {

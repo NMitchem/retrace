@@ -7385,7 +7385,7 @@ impl Box_ {
         self.deliver_kevent(kq, w).unwrap_or_else(|m| panic!("{m}"));
     }
 
-    /// M48 §3c: wake every thread blocked in `kevent` whose kqueue now holds an event, in kqueue fd
+    /// M48 §3c: wake every thread blocked in `kevent` whose kqueue now holds an event, in kqueue creation
     /// order: after a call's changes (a `NOTE_TRIGGER`), and after a pipe changed.
     fn wake_kevent_waiters(&mut self) -> Result<(), String> {
         for kq in self.gkq.ready_waiters() {

@@ -363,3 +363,12 @@ fn a_wall_prints_no_backtrace_even_with_rust_backtrace_set() {
     assert!(retrace_lines(&rec.stderr)[0].starts_with("retrace: unsupported: "), "{}", rec.stderr);
     let _ = std::fs::remove_file(&t);
 }
+
+/// T3-closewait: the close of the kqueue descriptor a thread waits in `kevent` on is refused, because
+/// natively the waiter wakes at once with EBADF. The refusal is raised through `note_fd_effects`
+/// after record appended the close's landmark, so replay must reach the incomplete line.
+#[test]
+fn closing_a_kqueue_descriptor_a_thread_waits_on_stops_at_one_clean_line_and_replays_to_its_end() {
+    assert_guest_wall(retrace_guest::KQDUP_DYN, &["closewait"], "closewait: closing\n",
+        "M53: close of kqueue descriptor ", "threads");
+}
