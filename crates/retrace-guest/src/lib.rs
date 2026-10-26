@@ -462,6 +462,8 @@ pub const CF_WALLS_SRC: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/c/cf_walls.
 pub const CF_RS_CHROOT: &str = concat!(env!("OUT_DIR"), "/cf_rs_chroot");
 /// M53 (spec §3b): the POSIX file and process calls, one mode each, picked by argv[1] (see the source).
 pub const POSIX_DYN: &str = concat!(env!("OUT_DIR"), "/posix_dyn");
+/// M53 (spec §3c): the iovec calls, one mode each, picked by argv[1] (see the source).
+pub const IOVEC_DYN: &str = concat!(env!("OUT_DIR"), "/iovec_dyn");
 /// M53: `posix_dyn`'s modes in sequence, one directory, as a first-contact C program.
 pub const FC_POSIX: &str = concat!(env!("OUT_DIR"), "/fc_posix");
 /// M53: `std::fs` end to end, as a first-contact Rust program.

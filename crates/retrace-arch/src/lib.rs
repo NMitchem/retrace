@@ -2425,6 +2425,15 @@ pub fn sandbox_check_continuity(operation: &[u8]) -> Result<u64, String> {
 // `tests/nodeshapes.rs` re-reads both at test time. The psynch values are libpthread-539.100.4's
 // (the guest's own version, M48 plan fact F1): `kern/synch_internal.h` and `kern/kern_internal.h`.
 
+/// M53 §3c: the iovec calls, `readv` (120), `writev` (121), their `_nocancel` twins (411, 412) and
+/// `preadv`, `pwritev` with theirs (540-543). Translated by `Box_::guest_iovec`, never forwarded as
+/// the guest issued them: each `iov_base` is a guest address the host kernel would reject.
+pub fn is_iovec(num: u64) -> bool {
+    matches!(num, 120 | 121 | 411 | 412 | 540..=543)
+}
+/// `IOV_MAX` (`sys/syslimits.h`): the most entries one iovec call takes (t0 M3: 1024 is accepted, 1025 is EINVAL).
+pub const IOV_MAX: u64 = 1024;
+
 /// `kevent` (SDK `SYS_kevent 363`). Emulated since M48 (§3b), never forwarded: forwarded, it acts
 /// on a kqueue retrace never created, and a filter that blocks would block the RECORDER. The
 /// generic forward arm asserts it away, as it does `kevent_qos`.
@@ -2734,6 +2743,14 @@ pub fn stage2_abort_as_stage1(esr_el2: u64, guest_cpsr: u64) -> Result<u64, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// M53 §3c: the iovec set is the eight SDK numbers, and `IOV_MAX` is the measured limit.
+    #[test]
+    fn is_iovec_names_the_eight_iovec_numbers() {
+        for n in [120, 121, 411, 412, 540, 541, 542, 543] { assert!(is_iovec(n), "{n}"); }
+        for n in [3, 4, 27, 28, 119, 122, 410, 413, 539, 544] { assert!(!is_iovec(n), "{n}"); }
+        assert_eq!(IOV_MAX, 1024);
+    }
 
     /// M50 §3c (B3): the check refuses exactly the numbers `forwarded_shape` cannot forward, and
     /// nothing it can, so its panic is unreachable from a guest.

@@ -1186,6 +1186,13 @@ fn main() {
     let status = Command::new("clang").args(["-arch", "arm64", "-o", &bin, &src])
         .status().expect("clang posix_dyn");
     assert!(status.success(), "posix_dyn guest build failed");
+    // M53 t2 (spec §3c): iovec_dyn, the hello_dyn recipe.
+    let src = format!("{dir}/c/iovec_dyn.c");
+    let bin = format!("{out}/iovec_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang").args(["-arch", "arm64", "-o", &bin, &src])
+        .status().expect("clang iovec_dyn");
+    assert!(status.success(), "iovec_dyn guest build failed");
     // M51: the fidelity fixtures, the hello_dyn recipe. Named fid_, not fc_: firstcontact_e2e's
     // one-row-per-fixture check reads every fc_ source.
     for name in ["fid_output", "fid_traps", "fid_frames", "fid_env", "fid_signals", "fid_badptr"] {

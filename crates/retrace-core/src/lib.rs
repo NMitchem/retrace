@@ -1552,6 +1552,21 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                     .map_err(|e| format!("append flock: {e}"))?; count += 1;
                 b.set_x0_err_and_return(ret, err);
             }
+            // M53 §3c: readv, writev, preadv and pwritev translate their iovecs (Box_::guest_iovec). The
+            // host kernel would take each iov_base as a host address: a forwarded writev answered
+            // EFAULT and its bytes were lost, and readv was refused. A console writev is a console
+            // write, printed here and forwarded nowhere, as the write arm above does; any other call
+            // is forwarded once through a host iovec array and a reader's writes are each span's
+            // changed bytes. This arm sits before the generic arm, whose assert makes that a checked fact.
+            // Replay's mirror calls the same Box_::iovec_prepare with the same arguments.
+            Stop::Syscall { num, args } if retrace_arch::is_iovec(num) => {
+                let (ret, err, writes, console_write) = b.guest_iovec(num, args).map_err(wall_or_bug)?;
+                if let Some((stream, bytes)) = console_write { console.write(stream, &bytes); }
+                w.append(&Event::Syscall { num, args, ret, ret1: 0, err, writes, thread })
+                    .map_err(|e| format!("append iovec: {e}"))?; count += 1;
+                b.set_x0_err_and_return(ret, err);
+                b.note_fd_effects(num, args, ret, 0, err).map_err(wall_or_bug)?;
+            }
             // M48 §3e: every SDK psynch number is EMULATED, never forwarded (see Box_::guest_psynch).
             // Forwarded, a psynch call acts on the HOST's psynch state keyed by retrace's own
             // addresses, blocking or waking the recorder. One arm serves them all: cvwait, cvsignal and
@@ -1850,6 +1865,10 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                     "thread_selfid (372) reached the generic forward arm — it must be answered above (M52 §3c).");
                 assert!(num != retrace_arch::SYS_KEVENT,
                     "kevent (363) reached the generic forward arm — it must be emulated above (M48 §3c).");
+                // M53 §3c: the iovec calls are translated above. Forwarded as issued, the host kernel
+                // reads each iov_base as a host address.
+                assert!(!retrace_arch::is_iovec(num),
+                    "iovec syscall {num} reached the generic forward arm — it must be translated above (M53 §3c).");
                 // M48 §3e: every psynch call is handled above, modelled or refused by value. Forwarded,
                 // it acts on the HOST's psynch state keyed by retrace's own addresses, blocking or
                 // waking the recorder.
@@ -3235,6 +3254,39 @@ impl ReplaySession {
                                 }
                                 self.b.set_x0_err_and_return(*ret, *err);
                                 return self.finish_event();
+                            }
+                            // M53 §3c: the iovec arm's mirror (symmetry rule 1): the same box method with the
+                            // same arguments, so the same pages are made present and the same answer is
+                            // recomputed. It inherits the arm-top `verify_thread` and adds none. A console
+                            // writev prints again and its answer is compared; an answer given before any
+                            // forward is compared with the recording; a forwarded call falls through to the
+                            // generic tail, which applies the recorded writes and return and moves a pipe's
+                            // count. A refusal is a divergence naming the call, never a panic.
+                            if retrace_arch::is_iovec(num) {
+                                match self.b.iovec_prepare(num, args) {
+                                    Err(m) => return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "{} refused on replay, though the recording accepted it \
+                                         — replay diverged before this landmark: {m}",
+                                        retrace_arch::syscall_display(num)) }),
+                                    Ok(retrace_box::IovPrep::Answer(e)) => {
+                                        if *ret1 != 0 || !refusal_recorded(*ret, *err, writes, e, true) {
+                                            return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                                "{} answers errno {e} before any forward, but the recording has \
+                                                 ret={ret:#x} err={err} with {} write(s)",
+                                                retrace_arch::syscall_display(num), writes.len()) });
+                                        }
+                                    }
+                                    Ok(retrace_box::IovPrep::Console { stream, bytes, ret: r, err: e }) => {
+                                        if (r, e) != (*ret, *err) || *ret1 != 0 || !writes.is_empty() {
+                                            return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                                "{} to a console: replay answers {r:#x} (err={e}), the recording has \
+                                                 ret={ret:#x} err={err} with {} write(s)",
+                                                retrace_arch::syscall_display(num), writes.len()) });
+                                        }
+                                        self.console.write(stream, &bytes);
+                                    }
+                                    Ok(retrace_box::IovPrep::Forward { .. }) => {}
+                                }
                             }
                             // M48 §3c: the record arm's mirror (symmetry rule 1): the same method
                             // with the same arguments, beside M45's so it inherits the arm-top

@@ -14,6 +14,7 @@ pub mod thread;
 pub mod kq;
 pub mod jit;
 pub mod gkq;
+pub mod iov;
 pub mod psynch;
 pub mod sleep;
 pub mod sema;
@@ -759,12 +760,13 @@ const PTHREAD_KPORT_OFF: u64 = 0xf8;
 const PTHREAD_TID_OFF: u64 = 0xd8;
 
 /// M48 §3c: `kqueue` and the `writev` pair (SDK `sys/syscall.h`), which `Box_::note_fd_effects`
-/// reads. `writev` is forwarded (its row is `NestedSource`), so its return moves a pipe's count as
-/// `write`'s does. `readv` needs no entry: its row is `NestedDest`, which the generic arm refuses
-/// (`writes_via_nested_pointer`), so it never completes.
+/// reads. M53 §3c translates the iovec calls (`Box_::guest_iovec`), so `writev`'s return moves a
+/// pipe's count as `write`'s does and `readv`'s as `read`'s.
 const SYS_KQUEUE: u64 = 362;
 const SYS_WRITEV: u64 = 121;
 const SYS_WRITEV_NOCANCEL: u64 = 412;
+const SYS_READV: u64 = 120;
+const SYS_READV_NOCANCEL: u64 = 411;
 
 /// Byte offset of the thread-specific-data base inside libpthread's `pthread` struct. The kernel
 /// sets `TPIDRRO_EL0 = pthread + 0xe0` when it starts a thread; libpthread reads it back the other
@@ -973,6 +975,21 @@ pub struct FdTable {
     slots: Vec<FdSlot>,
     host: Vec<Option<i32>>,
 }
+
+/// M53 §3c: what `Box_::iovec_prepare` decided for an iovec call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IovPrep {
+    /// Answered before anything is forwarded: this errno.
+    Answer(u64),
+    /// A write to a console slot: print `bytes` on `stream`, answer `(ret, err)`, forward nothing.
+    Console { stream: Stream, bytes: Vec<u8>, ret: u64, err: bool },
+    /// Forward `spans` once. `partial`: an entry after these was unreachable, so a full transfer
+    /// (`total` bytes) answers `EFAULT`. `reader`: the kernel stores into the spans.
+    Forward { spans: Vec<(u64, usize)>, partial: bool, total: u64, reader: bool },
+}
+
+/// `Box_::guest_iovec`'s answer: `(ret, err, writes, console write)`.
+pub type IovDone = (u64, bool, Vec<Region>, Option<(Stream, Vec<u8>)>);
 
 /// M51 §3e: which of the program's two console streams a write goes to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6460,7 +6477,8 @@ impl Box_ {
             n if retrace_arch::is_close_syscall(n) => self.gkq.close(args[0]),
             n if n == retrace_arch::SYS_DUP || n == retrace_arch::SYS_DUP2 || retrace_arch::is_fcntl_dupfd(n, &args) =>
                 self.gkq.dup(args[0], ret),
-            retrace_arch::SYS_READ | retrace_arch::SYS_READ_NOCANCEL => self.gkq.note_read(args[0], ret),
+            retrace_arch::SYS_READ | retrace_arch::SYS_READ_NOCANCEL | SYS_READV | SYS_READV_NOCANCEL =>
+                self.gkq.note_read(args[0], ret),
             n if retrace_arch::is_write_syscall(n) || n == SYS_WRITEV || n == SYS_WRITEV_NOCANCEL =>
                 self.gkq.note_write(args[0], ret),
             // Not in the fd set: no effect, and no wake (see the doc above).
@@ -6668,6 +6686,162 @@ impl Box_ {
                 "flock (syscall 131) on fd {} would wait for a lock another descriptor holds", args[0] as u32)));
         }
         Ok((ret, err))
+    }
+
+    /// M53 §3c: what `readv`, `writev`, `preadv` and `pwritev` do, decided from the guest's memory and
+    /// the box's tables, before anything is forwarded. Record and replay both call it, with the same
+    /// arguments (symmetry rule 1): record goes on to forward what `Forward` names; replay compares
+    /// the answers it can recompute and applies the recording for the rest. It makes every page the
+    /// call touches present, on both sides alike.
+    ///
+    /// The order follows xnu's `readv`/`writev`/`preadv`/`pwritev` (`bsd/kern/sys_generic.c`; inferred
+    /// from source, t0 M3 measured the answers and not their order): the count (`EINVAL`), the iovec
+    /// `copyin` (`EFAULT`), the residual-length check (a negative `iov_len`, or a total past `INT_MAX`,
+    /// `EINVAL`), then the descriptor (`EBADF`), and only then the entries, which the kernel touches as
+    /// it transfers. A zero-length entry is dropped before it is examined (t0 M3 item 2).
+    ///
+    /// An unreachable entry (t0 M3 item 3): the first non-empty entry answers `EFAULT` with nothing
+    /// forwarded; a later one forwards the reachable prefix and answers `EFAULT` if the prefix
+    /// transferred in full (a short transfer stops before the kernel reaches the bad entry). On a guest
+    /// pipe end that is a wall: natively a pipe `readv` fills entry 0 and drains nothing, which the
+    /// pipe-count model cannot reproduce.
+    pub fn iovec_prepare(&mut self, num: u64, args: [u64; 8]) -> Result<IovPrep, String> {
+        use retrace_arch::{EFAULT, EINVAL};
+        let what = retrace_arch::syscall_display(num);
+        let writer = matches!(num, 121 | 412 | 541 | 543);
+        let cnt = args[2] as i32;
+        if cnt <= 0 || cnt as u64 > retrace_arch::IOV_MAX { return Ok(IovPrep::Answer(EINVAL)); }
+        let n = cnt as usize * 16;
+        let Some(arr) = self.present_read_span(args[1], n).ok().and_then(|()| self.read_va_checked(args[1], n)) else {
+            return Ok(IovPrep::Answer(EFAULT));
+        };
+        let entries = iov::decode(&arr);
+        let mut total: u128 = 0;
+        for &(_, len) in &entries {
+            if (len as i64) < 0 { return Ok(IovPrep::Answer(EINVAL)); }
+            total += len as u128;
+        }
+        if total > i32::MAX as u128 { return Ok(IovPrep::Answer(EINVAL)); }
+        // `is_open`, not `host`: replay's table has the slots and no host descriptors.
+        if (args[0] as i32) < 0 || !self.fds.is_open(args[0]) { return Ok(IovPrep::Answer(EBADF)); }
+        let write = !writer;
+        let (reach, partial) = match iov::plan(&entries, |b, l| self.iov_span(b, l, write)) {
+            Ok(_) => (&entries[..], false),
+            Err(i) => (&entries[..i], true),
+        };
+        let spans = iov::plan(reach, |b, l| self.iov_span(b, l, write))
+            .expect("the entries before the first unreachable one are reachable");
+        if spans.is_empty() && partial { return Ok(IovPrep::Answer(EFAULT)); }
+        let reach_total: u64 = reach.iter().map(|e| e.1).sum();
+        let kind = self.gkq.kind_of(args[0]);
+        if partial && matches!(kind, gkq::FdKind::PipeRead(_) | gkq::FdKind::PipeWrite(_)) {
+            return Err(retrace_arch::wall(retrace_arch::WallCategory::Syscalls, format!(
+                "{what} with an unreachable entry after the first, on guest pipe fd {}: natively a pipe transfers \
+                 only into entry 0 and drains nothing, which the pipe model cannot reproduce", args[0] as u32)));
+        }
+        if writer {
+            let stream = match self.fds.console_of(args[0]) {
+                Some(1) => Some(Stream::Stdout),
+                Some(2) => Some(Stream::Stderr),
+                _ => None,
+            };
+            if let Some(stream) = stream {
+                let mut bytes = Vec::with_capacity(reach_total as usize);
+                for &(base, len) in reach {
+                    bytes.extend(self.read_va_checked(base, len as usize)
+                        .expect("iov_span made this entry present and readable"));
+                }
+                let (ret, err) = if partial { (EFAULT, true) } else { (reach_total, false) };
+                return Ok(IovPrep::Console { stream, bytes, ret, err });
+            }
+        }
+        if spans.len() as u64 > retrace_arch::IOV_MAX {
+            return Err(retrace_arch::wall(retrace_arch::WallCategory::Syscalls, format!(
+                "{what} splits into more than {} host entries (the guest's {} entries cross backings)",
+                retrace_arch::IOV_MAX, entries.len())));
+        }
+        Ok(IovPrep::Forward { spans, partial, total: reach_total, reader: !writer })
+    }
+
+    /// `[va, va + len)` as host-contiguous `(ipa, len)` spans, each page made present first and
+    /// checked for the access the call makes (`write`: the kernel stores into it). `None` if the
+    /// program could not reach all of it natively. An entry that crosses a backing boundary, or one
+    /// whose pages are not ipa-contiguous (an M39 alias), comes back as more than one span.
+    fn iov_span(&mut self, va: u64, len: u64, write: bool) -> Option<Vec<(u64, usize)>> {
+        let end = va.checked_add(len)?;
+        let g = GRANULE as u64;
+        let mut out: Vec<(u64, usize)> = Vec::new();
+        let mut a = va;
+        while a < end {
+            self.present_page(a, write).ok()?;
+            let (mut ipa, _) = self.va_leaf(a)?;
+            let piece = (((a | (g - 1)) + 1).min(end) - a) as usize;
+            let mut left = piece;
+            while left > 0 {
+                let (_, avail) = self.host_span(ipa)?;
+                let m = left.min(avail);
+                let joins = match out.last() {
+                    Some(&(lipa, llen)) => lipa + llen as u64 == ipa && self.host_span(lipa)?.1 >= llen + m,
+                    None => false,
+                };
+                if joins { out.last_mut().unwrap().1 += m; } else { out.push((ipa, m)); }
+                ipa += m as u64;
+                left -= m;
+            }
+            a += piece as u64;
+        }
+        Some(out)
+    }
+
+    /// M53 §3c: `readv`, `writev`, `preadv` and `pwritev` on record: `iovec_prepare`'s answer, with a
+    /// `Forward` carried out. Returns `(ret, err, writes, console)`; a console write is printed by the
+    /// caller and forwards nothing.
+    ///
+    /// A forward hands the host kernel one iovec array of host pointers into the spans, once. A reader's
+    /// writes are each span's `changed_span` against its pre-image, so an entry of any size is covered
+    /// whole: the array bounds the kernel, so no window, clamp or guard band is needed. The descriptor
+    /// is translated as every forwarded call's is.
+    pub fn guest_iovec(&mut self, num: u64, args: [u64; 8])
+        -> Result<IovDone, String> {
+        match self.iovec_prepare(num, args)? {
+            IovPrep::Answer(e) => Ok((e, true, Vec::new(), None)),
+            IovPrep::Console { stream, bytes, ret, err } => Ok((ret, err, Vec::new(), Some((stream, bytes)))),
+            IovPrep::Forward { spans, partial, total, reader } => {
+                if spans.is_empty() { return Ok((0, false, Vec::new(), None)); }
+                let mut host = args;
+                self.translate_fds(num, &mut host).expect("iovec_prepare checked the descriptor");
+                let mut array = Vec::with_capacity(spans.len() * 16);
+                let mut pres: Vec<Vec<u8>> = Vec::new();
+                for &(ipa, len) in &spans {
+                    let (hp, avail) = self.host_span(ipa).expect("iov_span made this span present");
+                    assert!(avail >= len, "iov_span returned a span longer than its backing");
+                    array.extend_from_slice(&(hp as u64).to_le_bytes());
+                    array.extend_from_slice(&(len as u64).to_le_bytes());
+                    if reader { pres.push(unsafe { std::slice::from_raw_parts(hp, len) }.to_vec()); }
+                }
+                let mut sa = [0u64; 8];
+                sa[0] = host[0];
+                sa[1] = array.as_ptr() as u64;
+                sa[2] = spans.len() as u64;
+                if matches!(num, 540..=543) { sa[3] = args[3]; }
+                let (mut ret, _ret1, mut err) = unsafe { host_svc(num, sa) };
+                let mut writes = Vec::new();
+                if reader {
+                    for (&(ipa, len), pre) in spans.iter().zip(&pres) {
+                        let (hp, _) = self.host_span(ipa).expect("present above");
+                        let post = unsafe { std::slice::from_raw_parts(hp, len) };
+                        if let Some(span) = Self::changed_span(pre, post) {
+                            writes.push(Region { ipa: ipa + span.start as u64, bytes: post[span].to_vec() });
+                        }
+                    }
+                }
+                if partial && !err && ret == total {
+                    ret = retrace_arch::EFAULT;
+                    err = true;
+                }
+                Ok((ret, err, writes, None))
+            }
+        }
     }
 
     /// M47 §3c: `madvise(addr, len, behav)` (75), **modelled, never forwarded**. Forwarded, the

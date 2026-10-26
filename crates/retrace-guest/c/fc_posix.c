@@ -4,6 +4,7 @@
 // sequence (that file's header says what each prints), then the removal of the directory.
 #define POSIX_DYN_LIB
 #include "posix_dyn.c"
+#include <sys/uio.h>
 
 int main(void) {
     setvbuf(stdout, NULL, _IOLBF, 0);
@@ -13,6 +14,24 @@ int main(void) {
     for (unsigned i = 0; i < sizeof modes / sizeof *modes; i++) {
         printf("-- %s\n", modes[i]);
         run_mode(modes[i]);
+    }
+    printf("-- iovec\n");
+    {
+        // M53 t2 (C8): writev and readv, which a program that gathers its output or scatters its input
+        // calls, are translated. One file in the directory, three entries each way.
+        char path_[256];
+        snprintf(path_, sizeof path_, "%s/iov", dir);
+        int fd = open(path_, O_RDWR | O_CREAT | O_TRUNC, 0644);
+        char a[3] = "abc", b[4] = "defg", c[5] = "hijkl";
+        struct iovec w[3] = {{a, 3}, {b, 4}, {c, 5}};
+        printf("writev rc=%ld\n", (long)writev(fd, w, 3));
+        lseek(fd, 0, SEEK_SET);
+        char x[3] = {0}, y[4] = {0}, z[5] = {0};
+        struct iovec r[3] = {{x, 3}, {y, 4}, {z, 5}};
+        printf("readv rc=%ld\n", (long)readv(fd, r, 3));
+        printf("%.3s|%.4s|%.5s\n", x, y, z);
+        close(fd);
+        unlink(path_);
     }
     printf("removed=%s\n", unlinkat(AT_FDCWD, dir, AT_REMOVEDIR) == 0 ? "yes" : "no");
     return 0;
