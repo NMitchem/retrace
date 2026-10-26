@@ -263,6 +263,15 @@ int main(int argc, char **argv) {
         errno = 0;
         rc = getitimer(7, &cur);
         printf("getitimer which 7 rc=%d errno=%d\n", rc, rc < 0 ? errno : 0);
+        // Ruling T5-badsig: a signal outside 0..=31 is EINVAL, before any target logic.
+        errno = 0;
+        rc = kill(getpid(), 32);
+        printf("kill 32 rc=%d errno=%d\n", rc, rc < 0 ? errno : 0);
+        errno = 0;
+        rc = kill(getpid(), -1);
+        printf("kill -1 rc=%d errno=%d\n", rc, rc < 0 ? errno : 0);
+        rc = pthread_kill(pthread_self(), 32);
+        printf("pthread_kill 32 rc=%d\n", rc);
     } else if (!strcmp(mode, "long")) {
         alarm(60);
         errno = 0;

@@ -147,7 +147,7 @@ fn an_alarm_ends_a_sleep_early() {
 #[test]
 fn a_bad_timer_argument_is_einval_as_natively() {
     let (out, _) = records_as_native("einval");
-    assert_eq!(out, "alarm einval\nusec 1000000 rc=-1 errno=22\nsec -1 rc=-1 errno=22\nwhich 7 rc=-1 errno=22\ngetitimer which 7 rc=-1 errno=22\n");
+    assert_eq!(out, "alarm einval\nusec 1000000 rc=-1 errno=22\nsec -1 rc=-1 errno=22\nwhich 7 rc=-1 errno=22\ngetitimer which 7 rc=-1 errno=22\nkill 32 rc=-1 errno=22\nkill -1 rc=-1 errno=22\npthread_kill 32 rc=22\n");
 }
 
 #[test]

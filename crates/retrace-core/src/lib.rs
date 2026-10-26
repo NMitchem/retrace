@@ -1310,6 +1310,15 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                 b.set_x0_err_and_return(ret, err);
             }
 
+            // M53 §3f (Ruling T5-badsig): a signal outside 0..=31 is EINVAL as natively, before the pid or the
+            // target is looked at. One landmark, no delivery. Replay's mirror asks the same function.
+            Stop::Syscall { num, args }
+                if (num == retrace_arch::SYS_KILL || num == retrace_arch::SYS_PTHREAD_KILL) && Box_::invalid_signal(args[1]) => {
+                w.append(&Event::Syscall { num, args, ret: retrace_arch::EINVAL, ret1: 0, err: true, writes: vec![], thread })
+                    .map_err(|e| format!("append bad signal: {e}"))?; count += 1;
+                b.set_x0_err_and_return(retrace_arch::EINVAL, true);
+            }
+
             // The raise path. `kill(pid, sig)` and `__pthread_kill(port, sig)` differ only in how
             // the target is validated; the disposition decision below is shared.
             Stop::Syscall { num, args }
@@ -2451,7 +2460,15 @@ impl ReplaySession {
                     // correctly: without the sigaction mirror this table would still read Dfl for
                     // SIGABRT and would wrongly terminate a guest that had ignored it.
                     // M51 §3g (C4): signal 0 is answered, not raised; the generic dispatch below applies the answer.
-                    if (num == retrace_arch::SYS_KILL || num == retrace_arch::SYS_PTHREAD_KILL) && args[1] != 0 {
+                    if (num == retrace_arch::SYS_KILL || num == retrace_arch::SYS_PTHREAD_KILL) && Box_::invalid_signal(args[1]) {
+                        // M53 Ruling T5-badsig: record answered EINVAL; the generic dispatch applies it, once
+                        // the recorded answer is checked to be that.
+                        match self.events.get(self.idx) {
+                            Some(Event::Syscall { ret, err, .. }) if *ret == retrace_arch::EINVAL && *err => {}
+                            other => return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                "a signal outside 0..=31 ({:#x}) is EINVAL, but the recording has {other:?}", args[1]) }),
+                        }
+                    } else if (num == retrace_arch::SYS_KILL || num == retrace_arch::SYS_PTHREAD_KILL) && args[1] != 0 {
                         // M16 Task 8: resolve the TARGET by the same route record used — the same
                         // `Box_` methods with the same arguments (symmetry rule 1), which is what
                         // makes "both sides pick the same thread" true by construction. Recomputed,

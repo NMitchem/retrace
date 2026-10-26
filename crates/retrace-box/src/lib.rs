@@ -6959,6 +6959,11 @@ impl Box_ {
         0
     }
 
+    /// M53 §3f (Ruling T5-badsig, t0 badsigprobe): `kill` and `__pthread_kill` answer `EINVAL` for a
+    /// signal outside 0..=31 (`int` in `x1`: -1 arrives as 0xffffffff), before any target logic. Both
+    /// dispatch arms ask this one function (symmetry rule 1).
+    pub fn invalid_signal(sig: u64) -> bool { sig as u32 > 31 }
+
     /// M53 §3f: what raising `sig` on `tid` does, as the one answer the `kill` and `__pthread_kill` arms
     /// (record and replay) and the timer share. The mask is asked first (M16), then the state:
     /// - a thread blocked in a sleep or `sigsuspend` is ended by a signal with a handler (`Interrupt`),
