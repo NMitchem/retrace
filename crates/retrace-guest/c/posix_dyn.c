@@ -353,6 +353,98 @@ static void mode_flockwait(void) {
     clear_dir(dir);
 }
 
+// A four-argument syscall issued directly, errno as libc sets it: the stat64 _extended calls have no
+// wrapper that reaches them with a NULL xsecurity (statx_np always passes a filesec).
+static long raw4(long num, long a0, long a1, long a2, long a3) {
+    register long x0 __asm__("x0") = a0;
+    register long x1 __asm__("x1") = a1;
+    register long x2 __asm__("x2") = a2;
+    register long x3 __asm__("x3") = a3;
+    register long x16 __asm__("x16") = num;
+    long failed;
+    __asm__ volatile("svc #0x80\n\tcset %4, cs" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3), "=r"(failed)
+                     : "r"(x16) : "memory", "cc");
+    if (failed) { errno = (int)x0; return -1; }
+    return x0;
+}
+
+// M53 t6: setpriority and getpriority. 19 is the maximum nice value and always permitted, so the lines
+// do not depend on the nice value the process inherited.
+static void mode_prio(void) {
+    R("setpriority(19)", setpriority(PRIO_PROCESS, 0, 19));
+    errno = 0;
+    printf("getpriority=%d\n", getpriority(PRIO_PROCESS, 0));
+    R("setpriority(bad which)", setpriority(99, 0, 0));
+    R("getpriority(bad which)", getpriority(99, 0));
+}
+
+// M53 t6: stat64_extended (341), lstat64_extended (342), fstat64_extended (343): once with a NULL
+// xsecurity and size pointer, once with a buffer and its size, and once failing. Only stable fields.
+static void show_ext(const char *name, long rc, int e, struct stat *st, size_t sz, int sized) {
+    printf("%s rc=%ld errno=%d", name, rc, rc < 0 ? e : 0);
+    if (rc == 0) printf(" fmt=%o size=%lld", st->st_mode & S_IFMT, (long long)st->st_size);
+    if (sized) printf(" xsize=%ld", (long)sz);
+    printf("\n");
+}
+
+static void mode_ext(void) {
+    char p[256], missing[256], ln[256], label[96];
+    path(p, sizeof p, "f1");
+    path(missing, sizeof missing, "nothere");
+    path(ln, sizeof ln, "l1");
+    close(make_file("f1", "hello"));
+    symlink("f1", ln);
+    int fd = open(p, O_RDONLY);
+    struct stat st;
+    char buf[1024];
+    size_t sz;
+    long rc;
+    long calls[2] = {341, 342};
+    const char *names[2] = {"stat64_extended", "lstat64_extended"};
+    for (int i = 0; i < 2; i++) {
+        const char *target = i ? ln : p;
+        memset(&st, 0, sizeof st);
+        errno = 0;
+        rc = raw4(calls[i], (long)target, (long)&st, 0, 0);
+        snprintf(label, sizeof label, "%s(NULL xsecurity)", names[i]);
+        show_ext(label, rc, errno, &st, 0, 0);
+        memset(&st, 0, sizeof st);
+        memset(buf, 0x5a, sizeof buf);
+        sz = sizeof buf;
+        errno = 0;
+        rc = raw4(calls[i], (long)target, (long)&st, (long)buf, (long)&sz);
+        snprintf(label, sizeof label, "%s(buffer)", names[i]);
+        show_ext(label, rc, errno, &st, sz, 1);
+        sz = sizeof buf;
+        errno = 0;
+        rc = raw4(calls[i], (long)missing, (long)&st, (long)buf, (long)&sz);
+        snprintf(label, sizeof label, "%s(missing)", names[i]);
+        show_ext(label, rc, errno, &st, sz, 0);
+    }
+    // A buffer shorter than the 44-byte filesec: the call still succeeds and the size written back is
+    // the size needed; the buffer's first bytes are what the kernel left (measured, not printed).
+    sz = 8;
+    errno = 0;
+    rc = raw4(341, (long)p, (long)&st, (long)buf, (long)&sz);
+    show_ext("stat64_extended(short buffer)", rc, errno, &st, sz, 1);
+    memset(&st, 0, sizeof st);
+    errno = 0;
+    rc = raw4(343, fd, (long)&st, 0, 0);
+    show_ext("fstat64_extended(NULL xsecurity)", rc, errno, &st, 0, 0);
+    memset(&st, 0, sizeof st);
+    memset(buf, 0x5a, sizeof buf);
+    sz = sizeof buf;
+    errno = 0;
+    rc = raw4(343, fd, (long)&st, (long)buf, (long)&sz);
+    show_ext("fstat64_extended(buffer)", rc, errno, &st, sz, 1);
+    sz = sizeof buf;
+    errno = 0;
+    rc = raw4(343, 99, (long)&st, (long)buf, (long)&sz);
+    show_ext("fstat64_extended(bad fd)", rc, errno, &st, sz, 0);
+    close(fd);
+    clear_dir(dir);
+}
+
 static void run_mode(const char *mode) {
     if (!strcmp(mode, "files")) mode_files();
     else if (!strcmp(mode, "links")) mode_links();
@@ -364,6 +456,8 @@ static void run_mode(const char *mode) {
     else if (!strcmp(mode, "ids")) mode_ids();
     else if (!strcmp(mode, "ports")) mode_ports();
     else if (!strcmp(mode, "flockwait")) mode_flockwait();
+    else if (!strcmp(mode, "prio")) mode_prio();
+    else if (!strcmp(mode, "ext")) mode_ext();
     else { printf("posix: unknown mode\n"); exit(2); }
 }
 

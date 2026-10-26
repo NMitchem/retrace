@@ -111,6 +111,29 @@ fn a_clone_and_the_xattr_calls_answer_as_natively() {
 }
 
 #[test]
+fn setpriority_and_the_extended_stat_calls_answer_as_natively() {
+    // 19 is the maximum nice value, always permitted, so the lines do not depend on the inherited one.
+    as_natively("prio", &[
+        "setpriority(19) rc=0 errno=0", "getpriority=19",
+        "setpriority(bad which) rc=-1 errno=22", "getpriority(bad which) rc=-1 errno=22",
+    ]);
+    // A NULL xsecurity writes only the struct stat; a buffer also gets the filesec, whose size (44, a
+    // file with no ACL) is written back, a short buffer included; the errors are the plain stat's.
+    as_natively("ext", &[
+        "stat64_extended(NULL xsecurity) rc=0 errno=0 fmt=100000 size=5",
+        "stat64_extended(buffer) rc=0 errno=0 fmt=100000 size=5 xsize=44",
+        "stat64_extended(short buffer) rc=0 errno=0 fmt=100000 size=5 xsize=44",
+        "stat64_extended(missing) rc=-1 errno=2",
+        "lstat64_extended(NULL xsecurity) rc=0 errno=0 fmt=120000 size=2",
+        "lstat64_extended(buffer) rc=0 errno=0 fmt=120000 size=2 xsize=44",
+        "lstat64_extended(missing) rc=-1 errno=2",
+        "fstat64_extended(NULL xsecurity) rc=0 errno=0 fmt=100000 size=5",
+        "fstat64_extended(buffer) rc=0 errno=0 fmt=100000 size=5 xsize=44",
+        "fstat64_extended(bad fd) rc=-1 errno=9",
+    ]);
+}
+
+#[test]
 fn a_mach_port_destruct_answers_as_natively() {
     // Construct, destruct (0), destruct again (KERN_INVALID_NAME, 17): the trap is forwarded, and
     // replay applies the recorded answers.

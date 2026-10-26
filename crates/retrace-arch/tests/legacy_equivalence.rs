@@ -200,6 +200,10 @@ pub const EXPECTED_DIFFS: &[(u64, View, &str)] = &[
     (241, View::DestBuffer, "flistxattr's namebuff is a Dest of x2 bytes (t0 M2) — M53; unexercised"),
     (236, View::ReadsGuestBuffer, "setxattr reads value for size bytes, capped only at INT_MAX (t0 M2) — M53; unexercised"),
     (237, View::ReadsGuestBuffer, "fsetxattr reads value for size bytes (t0 M2) — M53; unexercised"),
+    (343, View::FdOperands, "fstat64_extended(fd, ub, xsecurity, xsecurity_size) — M53 t6; unexercised"),
+    (341, View::DestBuffer, "stat64_extended's xsecurity is a Dest whose length is the size_t behind x3 (measured, t6) — M53 t6; unexercised"),
+    (342, View::DestBuffer, "lstat64_extended's xsecurity is a Dest whose length is the size_t behind x3 (measured, t6) — M53 t6; unexercised"),
+    (343, View::DestBuffer, "fstat64_extended's xsecurity is a Dest whose length is the size_t behind x3 (measured, t6) — M53 t6; unexercised"),
 ];
 
 /// The BSD numbers, the mach traps (negative, as the two's-complement `u64` the trap carries), and

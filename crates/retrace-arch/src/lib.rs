@@ -947,6 +947,20 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // getpgid(pid_t pid) / getsid(pid_t pid) / getpriority(int which, id_t who)
         151 | 310 => row!(P, [Scalar]),
         100 => row!(P, [Scalar, Scalar]),
+        // setpriority(int which, id_t who, int prio) (bsd/kern/kern_resource.c, syscalls.master 96):
+        // three values, no pointer. Added with getpriority (100, above) by M53 t6.
+        96 => row!(P, [Scalar, Scalar, Scalar]),
+        // stat64_extended(user_addr_t path, user_addr_t ub, user_addr_t xsecurity, user_addr_t
+        // xsecurity_size) (341) and lstat64_extended (342); fstat64_extended(int fd, ub, xsecurity,
+        // xsecurity_size) (343) (syscalls.master). `ub` is a struct stat64, a fixed 144 bytes
+        // (sys/stat.h) the kernel always writes on success. `xsecurity` is a kauth_filesec buffer
+        // bounded by the size_t at `xsecurity_size`, which is read and written back: Dest with its
+        // length behind x3, sysctl's `oldp`/`oldlenp` shape. MEASURED, not read (no xnu source on the
+        // machine; t6): a NULL xsecurity and size pointer writes only `ub`; a 1024-byte buffer gets the
+        // 44-byte filesec of a file with no ACL and 44 is written back; a size of 8 still succeeds and
+        // writes 44 back. A NULL length pointer reads as 0 (`oldlen_at`), a window of the heuristic's size.
+        341 | 342 => row!(P, [Path, Ptr, Dest(DerefU64(3)), Ptr]),
+        343 => row!(P, [Fd, Ptr, Dest(DerefU64(3)), Ptr]),
         // The xattr family (sys/xattr.h). `name` is copied into char[XATTR_MAXNAMELEN + 1 = 128], so
         // at most 128 bytes (bsd/vfs/vfs_syscalls.c). A value or name list is as long as the caller
         // says (the kernel clamps at XATTR_MAXSIZE = INT32_MAX, above the window): Dest to read,
@@ -1417,7 +1431,7 @@ pub fn ptr_use(num: u64, i: usize) -> Option<PtrUse> {
         // kevent `eventlist`; readlink `buf`; shared_region_check_np `start_address`; csrctl `useraddr`;
         // fsgetpath `buf`.
         (SYS_RECVFROM | SYS_RECVFROM_NOCANCEL, 4 | 5) | (337, 3) | (SYS_FSTAT | SYS_FSTAT64, 1)
-        | (SYS_FSTATFS64, 1) | (SYS_FSTATAT64, 2) | (SYS_STATFS64, 1) | (338 | 340, 1)
+        | (SYS_FSTATFS64, 1) | (SYS_FSTATAT64, 2) | (SYS_STATFS64, 1) | (338 | 340, 1) | (341..=343, 1 | 3)
         | (SYS_GETDIRENTRIES64, 3) | (SYS_FGETATTRLIST, 2) | (220, 2) | (SYS_SYSCTL | SYS_SYSCTLBYNAME, 3)
         | (286, 0 | 1) | (49, 0) | (116, 0..=2) | (117, 1) | (SYS_GETRLIMIT, 1) | (500, 0)
         | (SYS_SIGACTION, 2) | (SYS_SIGPROCMASK | SYS_PTHREAD_SIGMASK, 2) | (SYS_SIGPENDING, 0)
