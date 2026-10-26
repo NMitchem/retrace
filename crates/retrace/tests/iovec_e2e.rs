@@ -56,18 +56,18 @@ fn pwritev_and_preadv_use_their_offset() {
 fn a_console_writev_prints_on_record_and_on_both_replays() {
     // Natively the bytes reach stdout and stderr. Before M53 they were lost: a forwarded writev
     // answered EFAULT and printed nothing.
-    let native = util::run_bounded(retrace_guest::IOVEC_DYN, &["console"], &[], BOUND);
+    // Native runs with a pipe for stdout, as the recorder's is (run_bounded's own is a capture file, where
+    // pwritev succeeds): /bin/sh honours pipefail, so the guest's exit code survives the `cat`.
+    let native = util::run_bounded("/bin/sh",
+        &["-c", r#"set -o pipefail; "$0" console | cat"#, retrace_guest::IOVEC_DYN], &[], BOUND);
     assert_eq!(native.code, Some(0), "native exits 0. stderr:\n{}", native.stderr);
     assert_eq!(String::from_utf8_lossy(&native.stdout), "ab\n");
-    assert!(native.stderr.starts_with("e\npwritev rc="), "{}", native.stderr);
+    assert_eq!(native.stderr, "e\npwritev rc=-1 errno=29\n", "native: pwritev on a pipe is ESPIPE");
     let (rec, trace) = util::record_dynamic_args(retrace_guest::IOVEC_DYN, &["console"]);
     assert_eq!(rec.code, 0, "the recording exits 0. stderr:\n{}", rec.stderr);
     assert_eq!(String::from_utf8_lossy(&rec.stdout), "ab\n", "record prints the stdout entries");
-    // pwritev is not a console write: its line is the host's answer (ESPIPE on a pipe), native's.
-    // Native's stdout here is run_bounded's capture file, where pwritev succeeds (rc=3, pwvprobe.c "a file");
-    // the recorder's stdout is a pipe, where the host answers ESPIPE. The recording carries the host's answer
-    // for the descriptor it really has, and replay reproduces it.
-    assert_eq!(rec.stderr, "e\npwritev rc=-1 errno=29\n", "record prints the stderr entry and the host's pwritev answer, and no line of retrace's own");
+    // pwritev is not a console write: its line is the host's answer, native's (ESPIPE on a pipe).
+    assert_eq!(rec.stderr, native.stderr, "record prints the stderr entry and the pwritev answer native gives, and no line of retrace's own");
     for i in 0..2 {
         let rep = util::replay(&trace);
         assert_eq!(rep.code, 0, "replay {i} exits 0. stderr:\n{}", rep.stderr);
