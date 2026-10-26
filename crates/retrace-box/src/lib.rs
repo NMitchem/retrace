@@ -1462,6 +1462,8 @@ pub fn subtract_range_for_test(table: &mut Vec<(u64, u64)>, addr: u64, len: u64)
 /// M27 guard band past the window, M28/M30 shrunk band length). Factored out at M30 because the
 /// fifth field pushed the inline tuple over clippy's type-complexity threshold.
 type Window = (u64, usize, Vec<u8>, Vec<u8>, usize);
+/// M53 §3e: `(ret, err, writes)` of a `poll` or `select` answer, the writes being `(guest VA, bytes)`.
+type PollAnswer = (u64, bool, Vec<(u64, Vec<u8>)>);
 
 /// M50 (spec §3b, R2): whether this process may create a VM. The CLI asks before it loads a guest
 /// or opens a trace, so a missing `com.apple.security.hypervisor` entitlement is one line and exit
@@ -6485,7 +6487,8 @@ impl Box_ {
             _ => return Ok(()),
         };
         effect.map_err(fail)?;
-        self.wake_kevent_waiters().map_err(fail)
+        self.wake_kevent_waiters().map_err(fail)?;
+        self.wake_poll_waiters().map_err(fail)
     }
 
     /// M48 (header, "Delivery happens at the wake"; §11a item 6): make `tid`, blocked in a timed-wait
@@ -6514,6 +6517,200 @@ impl Box_ {
             ctx.regs.cpsr = (ctx.regs.cpsr & !retrace_arch::PSTATE_C) | c;
         }
         Ok(())
+    }
+
+    /// M53 §3e: `poll`, `select` and `pselect` (and their `_nocancel` twins) over guest pipes,
+    /// **modelled, never forwarded**. Forwarded, the host kernel would poll its own descriptors by
+    /// the guest's numbers and a wait would block the recorder; the arms that call this sit before
+    /// the generic arm, whose assert makes that a checked fact. Every descriptor the call names must
+    /// be a guest pipe end (`GuestKqueues::pipe_state`); a closed one answers `POLLNVAL` (poll) or
+    /// `EBADF` (select), and any other is refused by value, naming the call and the descriptor.
+    ///
+    /// In order:
+    /// 1. The arguments are validated and the array or sets read through `read_va_checked`. The
+    ///    reply's pages are checked with `prepare_reply`.
+    /// 2. Each descriptor is answered from the pipe's state (`poll_ready`, or `select`'s own rule).
+    /// 3. If anything is ready, or the timeout is 0, the answers are written and their count
+    ///    returned.
+    /// 4. Otherwise the caller blocks as `BlockReason::Poll`, with a deadline of `now_guest()` plus
+    ///    the timeout in ticks (none for an infinite one: a NULL `select` timeout or any negative
+    ///    `poll` timeout), and the landmark returns 0. The real answer is written at the wake
+    ///    (`deliver_wake`): by `wake_poll_waiters` when a pipe change readies a descriptor, or by
+    ///    `poll_timed_out` at the deadline, which answers 0 and clears every `revents` or set.
+    ///
+    /// `pselect` with a signal mask is refused until the mask swap is modelled (§3e). Returns
+    /// `(ret, err)`. Both dispatch arms call this with the same `(num, args)` (symmetry rule 1) and
+    /// nothing is recorded (R3): the answers are functions of guest memory, the guest clock and box
+    /// state.
+    pub fn guest_poll(&mut self, num: u64, args: [u64; 8]) -> Result<(u64, bool), String> {
+        const EBADF: u64 = 9;
+        const EFAULT: u64 = 14;
+        const EINVAL: u64 = 22;
+        // The longest pollfd array refused rather than guessed: unmeasured past it.
+        const MAX_POLL_FDS: u32 = 4096;
+        // `FD_SETSIZE`: `select` takes `nfds` up to it (t0 M7: 1025 is EINVAL).
+        const FD_SETSIZE: i32 = 1024;
+        let name = retrace_arch::syscall_display(num);
+        let wall = |why: String| retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("M53: {name} {why}"));
+        let fail = |why: String| format!("{why}. args=[{}]", Self::fmt_args(args));
+        let is_poll = matches!(num, retrace_arch::SYS_POLL | retrace_arch::SYS_POLL_NOCANCEL);
+        // 1. The arguments, and the timeout in nanoseconds (None: infinite).
+        let (spec, timeout_ns) = if is_poll {
+            let (va, nfds, ms) = (args[0], args[1] as u32, args[2] as u32 as i32);
+            if nfds > i32::MAX as u32 { return Ok((EINVAL, true)); }
+            if nfds > MAX_POLL_FDS {
+                return Err(fail(wall(format!("with nfds {nfds}: a longer array than the {MAX_POLL_FDS} entries \
+                                              measured is not modelled"))));
+            }
+            let len = nfds as usize * 8;
+            let raw = if len == 0 { vec![] } else {
+                match self.read_va_checked(va, len) { Some(b) => b, None => return Ok((EFAULT, true)) }
+            };
+            if len > 0 && !self.prepare_reply(va, len) { return Ok((EFAULT, true)); }
+            // Any negative timeout is infinite (t0 M7).
+            (gkq::PollWait::Poll { va, raw }, (ms >= 0).then(|| ms as u64 * 1_000_000))
+        } else {
+            let nfds = args[0] as u32 as i32;
+            let is_pselect = matches!(num, retrace_arch::SYS_PSELECT | retrace_arch::SYS_PSELECT_NOCANCEL);
+            if is_pselect && args[5] != 0 {
+                return Err(fail(wall(format!("with a signal mask at {:#x}: swapping the mask for the wait is not \
+                                              modelled", args[5]))));
+            }
+            if !(0..=FD_SETSIZE).contains(&nfds) { return Ok((EINVAL, true)); }
+            let timeout_ns = if args[4] == 0 { None } else {
+                let Some(t) = self.read_va_checked(args[4], 16) else { return Ok((EFAULT, true)) };
+                let sec = i64::from_le_bytes(t[..8].try_into().unwrap());
+                // A timeval's microseconds are 32 bits wide, a timespec's nanoseconds 64.
+                let (sub, unit, per_sec) = if is_pselect {
+                    (i64::from_le_bytes(t[8..].try_into().unwrap()), 1, 1_000_000_000)
+                } else {
+                    (i32::from_le_bytes(t[8..12].try_into().unwrap()) as i64, 1_000, 1_000_000)
+                };
+                if sec < 0 || !(0..per_sec).contains(&sub) { return Ok((EINVAL, true)); }
+                Some(sec as u64 * 1_000_000_000 + sub as u64 * unit)
+            };
+            let nfds = nfds as usize;
+            let len = nfds.div_ceil(32) * 4;
+            let mut sets: [Vec<u8>; 3] = Default::default();
+            for (i, set) in sets.iter_mut().enumerate() {
+                let va = args[1 + i];
+                if va == 0 { continue; }
+                *set = match self.read_va_checked(va, len) { Some(b) => b, None => return Ok((EFAULT, true)) };
+            }
+            for i in 0..3 {
+                if args[1 + i] != 0 && len > 0 && !self.prepare_reply(args[1 + i], len) { return Ok((EFAULT, true)); }
+            }
+            // The except set is never reported, but its descriptors must be valid (EBADF, sets untouched).
+            for fd in 0..nfds {
+                if Self::set_has(&sets[2], fd) && !self.fds.is_open(fd as u64) { return Ok((EBADF, true)); }
+            }
+            let [rset, wset, _] = sets;
+            (gkq::PollWait::Select { nfds, vas: [args[1], args[2], args[3]], rset, wset }, timeout_ns)
+        };
+        // 2. The answers.
+        let (rc, err, writes) = self.poll_answer(&name, &spec)?;
+        if err { return Ok((rc, true)); }
+        // 3. Ready, or a poll that does not wait.
+        if rc > 0 || timeout_ns == Some(0) {
+            for (va, bytes) in &writes {
+                self.write_va_committing(*va, bytes).map_err(|m| fail(format!("{name}: reply at {va:#x}: {m}")))?;
+            }
+            return Ok((rc, false));
+        }
+        // 4. Block. 24 MHz, so ns * 3 / 125 ticks (F6).
+        let deadline = timeout_ns.map(|ns| self.now_guest().saturating_add(sleep::ns_to_ticks(ns)));
+        self.gkq.set_poll_waiter(self.threads.current(), spec);
+        self.threads.block(thread::BlockReason::Poll { deadline });
+        Ok((0, false))
+    }
+
+    /// Is bit `fd` of the little-endian `fd_set` bytes `set` on? An empty (NULL) set has none.
+    fn set_has(set: &[u8], fd: usize) -> bool { set.get(fd / 8).is_some_and(|b| b >> (fd % 8) & 1 != 0) }
+
+    /// M53 §3e: what `spec` is answered now: `(ret, err, writes)`, the writes being `(guest VA, bytes)`
+    /// for the array or sets. `err` is `select`'s `EBADF` for a closed descriptor, with no writes (the
+    /// sets stay as passed). `Err` is the refusal of a descriptor that is not a guest pipe end, or of a
+    /// `select` set that asks a pipe end for the other direction. Pure: it changes nothing.
+    fn poll_answer(&self, name: &str, spec: &gkq::PollWait) -> Result<PollAnswer, String> {
+        let not_pipe = |fd: u64, tail: String| retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
+            "{name} on fd {fd}, {tail}"));
+        match spec {
+            gkq::PollWait::Poll { va, raw } => {
+                let mut out = raw.clone();
+                let mut count = 0;
+                for (i, e) in raw.chunks_exact(8).enumerate() {
+                    let fd = i32::from_le_bytes(e[..4].try_into().unwrap());
+                    let events = u16::from_le_bytes(e[4..6].try_into().unwrap());
+                    // A negative descriptor is skipped, and its revents rewritten to 0 (t0 M7).
+                    let revents = if fd < 0 { 0 } else if !self.fds.is_open(fd as u64) { retrace_arch::POLLNVAL } else {
+                        self.gkq.poll_ready(fd as u64, events).map_err(|t| not_pipe(fd as u64, t))?
+                    };
+                    if revents != 0 { count += 1; }
+                    out[i * 8 + 6..i * 8 + 8].copy_from_slice(&revents.to_le_bytes());
+                }
+                Ok((count, false, if raw.is_empty() { vec![] } else { vec![(*va, out)] }))
+            }
+            gkq::PollWait::Select { nfds, vas, rset, wset } => {
+                let len = nfds.div_ceil(32) * 4;
+                let mut rout = vec![0u8; len];
+                let mut wout = vec![0u8; len];
+                let mut count = 0;
+                for fd in 0..*nfds {
+                    let (inr, inw) = (Self::set_has(rset, fd), Self::set_has(wset, fd));
+                    if !inr && !inw { continue; }
+                    if !self.fds.is_open(fd as u64) { return Ok((9, true, vec![])); }
+                    let st = self.gkq.pipe_state(fd as u64).map_err(|t| not_pipe(fd as u64, t))?;
+                    if inr {
+                        if st.write_end {
+                            return Err(not_pipe(fd as u64, "a write end in the read set: not modelled".to_string()));
+                        }
+                        if st.readable { rout[fd / 8] |= 1 << (fd % 8); count += 1; }
+                    }
+                    if inw {
+                        if !st.write_end {
+                            return Err(not_pipe(fd as u64, "a read end in the write set: not modelled".to_string()));
+                        }
+                        // Unlike poll, a write end whose reader closed is writable (t0 M7).
+                        if st.writable || st.other_closed { wout[fd / 8] |= 1 << (fd % 8); count += 1; }
+                    }
+                }
+                let mut writes = vec![];
+                for (i, bytes) in [rout, wout, vec![0u8; len]].into_iter().enumerate() {
+                    if vas[i] != 0 && len > 0 { writes.push((vas[i], bytes)); }
+                }
+                Ok((count, false, writes))
+            }
+        }
+    }
+
+    /// M53 §3e: wake every thread blocked in `poll` or `select` that a pipe change made ready, in
+    /// thread order, each with its answer written at the wake. After every call `note_fd_effects`
+    /// models. A descriptor closed under a `select` wakes it with `EBADF`.
+    fn wake_poll_waiters(&mut self) -> Result<(), String> {
+        for (tid, spec) in self.gkq.poll_waiters() {
+            let (rc, err, writes) = self.poll_answer("poll or select", &spec)?;
+            if rc == 0 && !err { continue; }
+            self.gkq.take_poll_waiter(tid);
+            self.deliver_wake(tid, rc, err, &writes)?;
+        }
+        Ok(())
+    }
+
+    /// M53 §3e: `tid`'s `poll` or `select` reached its deadline: it answers 0, and the array's
+    /// `revents` or the sets are cleared, as the kernel leaves them. Below the trace, so a refusal
+    /// (K8's pending signal) panics with its text on both sides alike (R5).
+    fn poll_timed_out(&mut self, tid: usize) {
+        let spec = self.gkq.take_poll_waiter(tid).unwrap_or_else(|| panic!(
+            "M53: thread {tid} is blocked in poll or select, which records no such waiter"));
+        let writes = match spec {
+            gkq::PollWait::Poll { va, mut raw } => {
+                for e in raw.chunks_exact_mut(8) { e[6..8].fill(0); }
+                if raw.is_empty() { vec![] } else { vec![(va, raw)] }
+            }
+            gkq::PollWait::Select { nfds, vas, .. } => (0..3).filter(|&i| vas[i] != 0 && nfds > 0)
+                .map(|i| (vas[i], vec![0u8; nfds.div_ceil(32) * 4])).collect(),
+        };
+        self.deliver_wake(tid, 0, false, &writes).unwrap_or_else(|m| panic!("{m}"));
     }
 
     /// M48 §3e (P1): the psynch condition-variable calls, emulated and never forwarded. Forwarded, a
@@ -7370,6 +7567,7 @@ impl Box_ {
                 thread::ThreadState::Blocked(thread::BlockReason::Cv { addr, .. }) => self.cv_timed_out(tid, addr),
                 thread::ThreadState::Blocked(thread::BlockReason::Sleep { .. }) => self.sleep_timed_out(tid),
                 thread::ThreadState::Blocked(thread::BlockReason::Sem { .. }) => self.sem_timed_out(tid),
+                thread::ThreadState::Blocked(thread::BlockReason::Poll { .. }) => self.poll_timed_out(tid),
                 s => unreachable!("M48: due_waiters returned thread {tid} in {s:?}, which has no deadline"),
             }
         }

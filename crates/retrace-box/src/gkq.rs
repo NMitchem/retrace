@@ -23,6 +23,11 @@ pub const KEVENT_BYTES: usize = 32;
 pub const PIPE_CAPACITY: u64 = 16384;
 /// `PIPE_BUF` (SDK `sys/syslimits.h`): a write end is ready while this much room is left (F9).
 pub const PIPE_BUF: u64 = 512;
+/// The room a pipe has for `poll` and `select` (t0 M7: 65,536 bytes of 4,096-byte writes fill it, and
+/// a write end with 512 bytes free is writable while one with 511 is not). `PIPE_CAPACITY` above is
+/// what `EVFILT_WRITE` reports on an empty pipe; the kernel grows a buffer under writes, so the
+/// writability a poller sees runs to this size.
+pub const PIPE_POLL_CAPACITY: u64 = 65536;
 /// The bits of a knote's creating flags a delivery hands back (t0 M3, `read on the write end,
 /// reader closed`, whose knote was added `EV_ADD|EV_ENABLE`). Every measured delivery returns the
 /// add's flags verbatim (`detect`: `0x21`).
@@ -68,6 +73,27 @@ pub struct Waiter {
     /// The guest VA of its event list.
     pub events: u64,
     pub nevents: usize,
+}
+
+/// What a thread blocked in `poll` or `select` waits on, parsed at the call (M53 §3e). The reply
+/// goes to the same addresses when the wait ends.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PollWait {
+    /// `poll`: the `pollfd` array at `va`, as the guest passed it (8 bytes an entry).
+    Poll { va: u64, raw: Vec<u8> },
+    /// `select` and `pselect`: the guest VAs of the three sets (0 for a NULL set), `nfds`, and the
+    /// read and write sets as passed (`ceil(nfds / 32) * 4` bytes each).
+    Select { nfds: usize, vas: [u64; 3], rset: Vec<u8>, wset: Vec<u8> },
+}
+
+/// What a pipe end is to a poller: whether it has anything to read, room to write, and whether the
+/// other end is gone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PipeState {
+    pub write_end: bool,
+    pub readable: bool,
+    pub writable: bool,
+    pub other_closed: bool,
 }
 
 /// One guest kqueue.
@@ -161,6 +187,8 @@ pub struct GuestKqueues {
     fd_kq: BTreeMap<u64, u64>,
     next_id: u64,
     pipes: Pipes,
+    /// Threads blocked in `poll` or `select`, by thread (M53 §3e).
+    poll_waiters: BTreeMap<usize, PollWait>,
     /// The activation counter, one for every kqueue, so the order is total.
     seq: u64,
 }
@@ -440,6 +468,68 @@ impl GuestKqueues {
         Ok(out)
     }
 
+    /// What `fd` is to a poller, or the refusal's tail for a descriptor that is not a guest pipe end
+    /// (M53 §3e; the caller names the call and the descriptor). `Err` also reports a byte count the
+    /// model lost, as `Pipes::ready` does.
+    pub fn pipe_state(&self, fd: u64) -> Result<PipeState, String> {
+        let lost = || format!("pipe {fd}: the byte count is unknown: a read returned more bytes than the model \
+                               counted, so a write reached the pipe by a path note_fd_effects does not see");
+        match self.kind_of(fd) {
+            FdKind::PipeRead(id) => {
+                let p = self.pipes.pipes[&id];
+                let count = p.count.ok_or_else(lost)?;
+                let closed = p.writers == 0;
+                Ok(PipeState { write_end: false, readable: count >= 1 || closed, writable: false, other_closed: closed })
+            }
+            FdKind::PipeWrite(id) => {
+                let p = self.pipes.pipes[&id];
+                let count = p.count.ok_or_else(lost)?;
+                if count > PIPE_POLL_CAPACITY {
+                    return Err(format!("pipe {fd}: {count} unread bytes exceed the measured {PIPE_POLL_CAPACITY}-byte \
+                                        buffer, which the model does not grow"));
+                }
+                Ok(PipeState { write_end: true, readable: false,
+                               writable: p.readers > 0 && PIPE_POLL_CAPACITY - count >= PIPE_BUF,
+                               other_closed: p.readers == 0 })
+            }
+            FdKind::Kqueue => Err("a kqueue, not a guest pipe".to_string()),
+            FdKind::Other => Err("a file, not a guest pipe".to_string()),
+        }
+    }
+
+    /// `poll`'s `revents` for descriptor `fd` asked about `events` (t0 M7, Ruling T0-M7: computed from
+    /// the requested bits and the pipe's state, never a fixed pair). A requested read-ish bit reports
+    /// itself when the pipe is readable or its other end is closed; a requested write-ish bit reports
+    /// `POLLOUT` (`POLLWRBAND` reports `0x100`) when the pipe is writable and nothing otherwise;
+    /// `POLLHUP` is added when the other end is closed and some bit but `POLLERR` was requested.
+    /// `POLLERR` is never reported on a pipe. `Err` is `pipe_state`'s refusal.
+    pub fn poll_ready(&self, fd: u64, events: u16) -> Result<u16, String> {
+        use retrace_arch::{POLLERR, POLLHUP, POLLIN, POLLOUT, POLLPRI, POLLRDBAND, POLLRDNORM, POLLWRBAND, POLLWRNORM};
+        let st = self.pipe_state(fd)?;
+        let mut r = 0;
+        for bit in [POLLIN, POLLPRI, POLLRDNORM, POLLRDBAND] {
+            if events & bit != 0 && (st.readable || st.other_closed) { r |= bit; }
+        }
+        if st.writable {
+            if events & (POLLOUT | POLLWRNORM) != 0 { r |= POLLOUT; }
+            if events & POLLWRBAND != 0 { r |= POLLWRBAND; }
+        }
+        if st.other_closed && events & !POLLERR != 0 { r |= POLLHUP; }
+        Ok(r)
+    }
+
+    pub fn set_poll_waiter(&mut self, tid: usize, w: PollWait) {
+        let old = self.poll_waiters.insert(tid, w);
+        assert!(old.is_none(), "M53: thread {tid} blocked in poll twice");
+    }
+
+    pub fn take_poll_waiter(&mut self, tid: usize) -> Option<PollWait> { self.poll_waiters.remove(&tid) }
+
+    /// The threads blocked in `poll` or `select`, with what they wait on, in thread order.
+    pub fn poll_waiters(&self) -> Vec<(usize, PollWait)> {
+        self.poll_waiters.iter().map(|(&t, w)| (t, w.clone())).collect()
+    }
+
     pub fn waiter(&self, kq: u64) -> Option<Waiter> { self.kq_of(kq).and_then(|k| k.waiter) }
 
     /// Record `w` as `kq`'s waiter. `Box_::guest_kevent` refuses a second one first (K2).
@@ -704,5 +794,70 @@ mod tests {
         let e = g.take_events(KQ, 4).unwrap();
         assert_eq!((e.len(), e[0].fflags), (1, 5));
         assert!(g.knote(KQ, ID, EVFILT_USER).is_none(), "EV_ONESHOT drops it at delivery");
+    }
+
+    /// The probe's `EV`: IN|OUT|PRI|ERR|HUP|NVAL|RDNORM|WRNORM.
+    const EVERY_BIT: u16 = 0x1 | 0x4 | 0x2 | 0x8 | 0x10 | 0x20 | 0x40;
+
+    /// t0 M7: `revents` follows the requested bits and the pipe's state, never a fixed pair.
+    #[test]
+    fn poll_ready_answers_each_pipe_state_by_the_requested_bits() {
+        use retrace_arch::{POLLERR, POLLHUP, POLLIN, POLLOUT, POLLPRI, POLLRDBAND, POLLRDNORM, POLLWRBAND, POLLWRNORM};
+        let mut g = GuestKqueues::default();
+        g.pipe(5, 6).unwrap();
+        for bit in [POLLIN, POLLPRI, POLLOUT, POLLRDNORM, POLLRDBAND, POLLWRNORM, POLLWRBAND, POLLERR, POLLHUP] {
+            assert_eq!(g.poll_ready(5, bit).unwrap(), 0, "an empty read end, bit {bit:#x}");
+        }
+        g.note_write(6, 3).unwrap();
+        assert_eq!(g.poll_ready(5, POLLIN).unwrap(), 0x1);
+        assert_eq!(g.poll_ready(5, POLLIN | POLLOUT).unwrap(), 0x1, "POLLOUT is not reported for a read end");
+        assert_eq!(g.poll_ready(5, 0).unwrap(), 0, "nothing requested, nothing reported");
+        assert_eq!(g.poll_ready(5, EVERY_BIT).unwrap(), 0x43);
+        assert_eq!(g.poll_ready(5, POLLRDBAND).unwrap(), 0x80);
+        // The write end: room, then exactly 512 bytes of it, then 511.
+        assert_eq!(g.poll_ready(6, POLLOUT).unwrap(), 0x4);
+        assert_eq!(g.poll_ready(6, POLLWRBAND).unwrap(), 0x100);
+        assert_eq!(g.poll_ready(6, POLLIN).unwrap(), 0);
+        g.note_write(6, PIPE_POLL_CAPACITY - 512 - 3).unwrap();
+        assert_eq!(g.poll_ready(6, POLLOUT).unwrap(), 0x4, "512 bytes free");
+        g.note_write(6, 1).unwrap();
+        assert_eq!(g.poll_ready(6, POLLOUT).unwrap(), 0, "511 bytes free");
+        g.note_write(6, 511).unwrap();
+        assert_eq!(g.poll_ready(6, POLLOUT).unwrap(), 0, "full");
+        // The writer closes: the read end reports HUP beside the bit it was asked about.
+        g.close(6).unwrap();
+        assert_eq!(g.poll_ready(5, POLLIN).unwrap(), 0x11);
+        assert_eq!(g.poll_ready(5, POLLPRI).unwrap(), 0x12);
+        assert_eq!(g.poll_ready(5, POLLRDNORM).unwrap(), 0x50);
+        assert_eq!(g.poll_ready(5, POLLOUT).unwrap(), 0x10);
+        assert_eq!(g.poll_ready(5, POLLHUP).unwrap(), 0x10);
+        assert_eq!(g.poll_ready(5, POLLERR).unwrap(), 0, "POLLERR is never reported on a pipe");
+        assert_eq!(g.poll_ready(5, 0).unwrap(), 0);
+    }
+
+    /// t0 M7: a write end whose reader closed answers POLLHUP alone for a write request, and POLLIN
+    /// with it for a read request; `select` treats the same end as writable (`other_closed`).
+    #[test]
+    fn a_write_end_with_its_reader_closed_polls_as_hup() {
+        use retrace_arch::{POLLIN, POLLOUT};
+        let mut g = GuestKqueues::default();
+        g.pipe(5, 6).unwrap();
+        g.close(5).unwrap();
+        assert_eq!(g.poll_ready(6, POLLOUT).unwrap(), 0x10);
+        assert_eq!(g.poll_ready(6, POLLIN).unwrap(), 0x11);
+        assert_eq!(g.poll_ready(6, 0).unwrap(), 0);
+        let st = g.pipe_state(6).unwrap();
+        assert!(st.write_end && st.other_closed && !st.writable);
+    }
+
+    /// A descriptor that is not a guest pipe end is the caller's refusal, named by kind.
+    #[test]
+    fn poll_ready_refuses_a_descriptor_that_is_not_a_guest_pipe_end() {
+        let mut g = kq();
+        assert_eq!(g.poll_ready(9, 1).unwrap_err(), "a file, not a guest pipe");
+        assert_eq!(g.poll_ready(KQ, 1).unwrap_err(), "a kqueue, not a guest pipe");
+        g.pipe(5, 6).unwrap();
+        g.note_read(5, 1).unwrap();
+        assert!(g.poll_ready(5, 1).unwrap_err().contains("byte count is unknown"), "a lost count is not guessed");
     }
 }

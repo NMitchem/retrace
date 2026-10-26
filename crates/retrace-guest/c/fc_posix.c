@@ -4,6 +4,7 @@
 // sequence (that file's header says what each prints), then the removal of the directory.
 #define POSIX_DYN_LIB
 #include "posix_dyn.c"
+#include <poll.h>
 #include <sys/uio.h>
 
 int main(void) {
@@ -32,6 +33,18 @@ int main(void) {
         printf("%.3s|%.4s|%.5s\n", x, y, z);
         close(fd);
         unlink(path_);
+    }
+    printf("-- poll\n");
+    {
+        // M53 t4 (C8): poll on a pipe, which an event loop's wakeup pipe is. Empty, then written.
+        int pp[2];
+        pipe(pp);
+        struct pollfd pf = {pp[0], POLLIN, 0};
+        printf("poll empty rc=%d\n", poll(&pf, 1, 0));
+        write(pp[1], "x", 1);
+        printf("poll ready rc=%d revents=0x%x\n", poll(&pf, 1, 0), (unsigned)pf.revents);
+        close(pp[0]);
+        close(pp[1]);
     }
     printf("removed=%s\n", unlinkat(AT_FDCWD, dir, AT_REMOVEDIR) == 0 ? "yes" : "no");
     return 0;

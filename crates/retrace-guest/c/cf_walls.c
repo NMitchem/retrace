@@ -7,6 +7,8 @@
 #include <mach/clock.h>
 #include <mach/mach.h>
 #include <mach/mach_time.h>
+#include <fcntl.h>
+#include <poll.h>
 #include <pthread.h>
 #include <sched.h>
 #include <signal.h>
@@ -43,6 +45,10 @@ int main(int argc, char **argv) {
     } else if (!strcmp(mode, "socketpair")) {
         int sv[2];
         socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+    } else if (!strcmp(mode, "pollfile")) {
+        // M53 t4 (C1): poll on a regular file is outside the pipe model, refused by value.
+        struct pollfd f = {open("/etc/hosts", O_RDONLY), POLLIN, 0};
+        poll(&f, 1, 0);
     } else if (!strcmp(mode, "clocksleep")) {
         clock_serv_t clk;
         host_get_clock_service(mach_host_self(), SYSTEM_CLOCK, &clk);

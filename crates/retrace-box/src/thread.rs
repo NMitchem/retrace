@@ -133,6 +133,11 @@ pub enum BlockReason {
     /// instant between the trap and the settle that ends it (`ThreadTable::end_yield`, called by
     /// `Box_::schedule_after_block`), so it carries nothing and no other event can see it.
     Yield,
+    /// M53 §3e: blocked in `poll`, `select` or `pselect` over guest pipes. `deadline` is on the guest
+    /// clock, or `None` for an infinite timeout. The descriptors and the reply's address live in
+    /// `gkq`, not here, so the variant stays `Copy`. Woken by a pipe change that makes one ready
+    /// (`Box_::wake_poll_waiters`) or by its deadline (`Box_::poll_timed_out`).
+    Poll { deadline: Option<u64> },
 }
 
 impl BlockReason {
@@ -142,7 +147,7 @@ impl BlockReason {
     pub fn deadline(&self) -> Option<u64> {
         match *self {
             BlockReason::Kevent { deadline, .. } | BlockReason::Cv { deadline, .. }
-            | BlockReason::Sem { deadline, .. } => deadline,
+            | BlockReason::Sem { deadline, .. } | BlockReason::Poll { deadline } => deadline,
             BlockReason::Sleep { deadline } => Some(deadline),
             BlockReason::Join { .. } | BlockReason::Wait { .. } | BlockReason::Parked | BlockReason::Yield
             | BlockReason::Mutex { .. } => None,
@@ -533,8 +538,8 @@ impl ThreadTable {
         }
         assert!(matches!(self.threads[tid].state,
                 ThreadState::Blocked(BlockReason::Kevent { .. } | BlockReason::Cv { .. } | BlockReason::Sleep { .. }
-                    | BlockReason::Sem { .. } | BlockReason::Mutex { .. })),
-            "M48: wake of thread {tid}, which is {:?}, not blocked in a psynch, kevent, sleep or semaphore wait",
+                    | BlockReason::Sem { .. } | BlockReason::Mutex { .. } | BlockReason::Poll { .. })),
+            "M48: wake of thread {tid}, which is {:?}, not blocked in a psynch, kevent, poll, sleep or semaphore wait",
             self.threads[tid].state);
         self.threads[tid].state = ThreadState::Runnable;
         Ok(())

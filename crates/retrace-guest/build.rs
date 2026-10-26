@@ -508,6 +508,16 @@ fn main() {
         .status().expect("clang kqdup_dyn");
     assert!(status.success(), "kqdup_dyn guest build failed");
 
+    // pollsel_dyn: the M53 t4 fixture — poll, select and pselect over guest pipes. Same recipe as
+    // kqdup_dyn.
+    let src = format!("{}/c/pollsel_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/pollsel_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang pollsel_dyn");
+    assert!(status.success(), "pollsel_dyn guest build failed");
+
     // stall_dyn: the M52 §3i fixture — main spins on a flag a created thread would set. Same recipe
     // as hello_dyn; pthreads are in libSystem.
     let src = format!("{}/c/stall_dyn.c", env!("CARGO_MANIFEST_DIR"));

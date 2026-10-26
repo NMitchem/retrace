@@ -310,6 +310,15 @@ fn a_socketpair_stops_at_one_clean_line() {
     assert_guest_wall(retrace_guest::CF_WALLS, &["socketpair"], "cf: socketpair\n", "socketpair (syscall 135)", "syscalls");
 }
 
+/// M53 t4 (C1): `poll` on a regular file is outside the pipe model and refused by value, naming the
+/// call and the descriptor (the guest's number for it, 4 under retrace).
+#[test]
+fn a_poll_on_a_file_stops_at_one_clean_line() {
+    let line = assert_guest_wall(retrace_guest::CF_WALLS, &["pollfile"], "cf: pollfile\n",
+        "poll (syscall 230) on fd 4, a file, not a guest pipe", "threads");
+    assert_eq!(line, format!("retrace: unsupported: poll (syscall 230) on fd 4, a file, not a guest pipe - see {WALLS}#threads"));
+}
+
 /// D1: every thread blocked with nothing left to wake one. Natively this program hangs forever; under
 /// retrace it is a wall in `threads` whose line says so, and says to report it if it does not hang.
 #[test]

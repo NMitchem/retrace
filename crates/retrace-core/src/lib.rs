@@ -1539,6 +1539,17 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                     .map_err(|e| format!("append kevent: {e}"))?; count += 1;
                 b.set_x0_err_and_return(rc, err);
             }
+            // M53 §3e: poll, select and pselect are EMULATED over guest pipes, never forwarded (see
+            // Box_::guest_poll). Forwarded, the host kernel would poll its own descriptors and a wait
+            // would block the recorder. `writes` is empty and that is deliberate (R3): the pollfd array
+            // or the sets, now or at a later wake, are box output the mirror recomputes from the same
+            // guest memory and box state; the exit-time full-memory comparison still covers every byte.
+            Stop::Syscall { num, args } if retrace_arch::is_poll_family(num) => {
+                let (rc, err) = b.guest_poll(num, args).map_err(wall_or_bug)?;
+                w.append(&Event::Syscall { num, args, ret: rc, ret1: 0, err, writes: vec![], thread })
+                    .map_err(|e| format!("append poll: {e}"))?; count += 1;
+                b.set_x0_err_and_return(rc, err);
+            }
             // M53 §3g: flock is forwarded with LOCK_NB added (Box_::forward_flock), so the recorder
             // never waits; a call that would wait is a wall. The landmark carries the GUEST's args
             // (C4), not the host's `op | LOCK_NB`, and replay's generic dispatch applies the answer.
@@ -1865,6 +1876,8 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                     "thread_selfid (372) reached the generic forward arm — it must be answered above (M52 §3c).");
                 assert!(num != retrace_arch::SYS_KEVENT,
                     "kevent (363) reached the generic forward arm — it must be emulated above (M48 §3c).");
+                assert!(!retrace_arch::is_poll_family(num),
+                    "poll, select or pselect reached the generic forward arm — it must be emulated above (M53 §3e).");
                 // M53 §3c: the iovec calls are translated above. Forwarded as issued, the host kernel
                 // reads each iov_base as a host address.
                 assert!(!retrace_arch::is_iovec(num),
@@ -3311,6 +3324,28 @@ impl ReplaySession {
                                 if *ret1 != 0 || !writes.is_empty() {
                                     return Err(Divergence { landmark: self.idx, pc, detail: format!(
                                         "kevent recorded ret1={ret1:#x} with {} writes; the model records neither", writes.len()) });
+                                }
+                                self.b.set_x0_err_and_return(*ret, *err);
+                                return self.finish_event();
+                            }
+                            // M53 §3e: the poll family's mirror (symmetry rule 1): the same method with the
+                            // same arguments as the record arm, beside kevent's, so it inherits the arm-top
+                            // `verify_thread` and adds none. A refusal is a divergence, never a panic.
+                            if retrace_arch::is_poll_family(num) {
+                                let name = retrace_arch::syscall_display(num);
+                                let (rc, e) = match self.b.guest_poll(num, args) {
+                                    Ok(r) => r,
+                                    Err(m) => return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "{name} refused on replay, though the recording accepted it \
+                                         — replay diverged before this landmark: {m}") }),
+                                };
+                                if (rc, e) != (*ret, *err) {
+                                    return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "{name} rc mismatch: replay {rc:#x} (err={e}) != recorded {ret:#x} (err={err})") });
+                                }
+                                if *ret1 != 0 || !writes.is_empty() {
+                                    return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "{name} recorded ret1={ret1:#x} with {} writes; the model records neither", writes.len()) });
                                 }
                                 self.b.set_x0_err_and_return(*ret, *err);
                                 return self.finish_event();

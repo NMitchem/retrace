@@ -2431,6 +2431,29 @@ pub fn sandbox_check_continuity(operation: &[u8]) -> Result<u64, String> {
 pub fn is_iovec(num: u64) -> bool {
     matches!(num, 120 | 121 | 411 | 412 | 540..=543)
 }
+/// M53 §3e: `poll` (230) and `_nocancel` (417), `select` (93, 407), `pselect` (394, 395). Emulated in the
+/// box over guest pipes (`Box_::guest_poll`), never forwarded: the host kernel would poll its own
+/// descriptors, and a wait would block the recorder. None has an `arg_kinds` row (C5).
+pub const SYS_POLL: u64 = 230;
+pub const SYS_POLL_NOCANCEL: u64 = 417;
+pub const SYS_SELECT: u64 = 93;
+pub const SYS_SELECT_NOCANCEL: u64 = 407;
+pub const SYS_PSELECT: u64 = 394;
+pub const SYS_PSELECT_NOCANCEL: u64 = 395;
+pub fn is_poll_family(num: u64) -> bool {
+    matches!(num, SYS_POLL | SYS_POLL_NOCANCEL | SYS_SELECT | SYS_SELECT_NOCANCEL | SYS_PSELECT | SYS_PSELECT_NOCANCEL)
+}
+/// The SDK's `poll.h` event bits (`POLLWRNORM` is `POLLOUT`).
+pub const POLLIN: u16 = 0x0001;
+pub const POLLPRI: u16 = 0x0002;
+pub const POLLOUT: u16 = 0x0004;
+pub const POLLERR: u16 = 0x0008;
+pub const POLLHUP: u16 = 0x0010;
+pub const POLLNVAL: u16 = 0x0020;
+pub const POLLRDNORM: u16 = 0x0040;
+pub const POLLRDBAND: u16 = 0x0080;
+pub const POLLWRNORM: u16 = POLLOUT;
+pub const POLLWRBAND: u16 = 0x0100;
 /// `IOV_MAX` (`sys/syslimits.h`): the most entries one iovec call takes (t0 M3: 1024 is accepted, 1025 is EINVAL).
 pub const IOV_MAX: u64 = 1024;
 

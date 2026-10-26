@@ -275,6 +275,9 @@ pub const KQ_DYN: &str = concat!(env!("OUT_DIR"), "/kq_dyn");
 /// M53 t3: a duplicated guest kqueue by mode — `shared`, `outlives`, `fdclose`, `mio` (see the
 /// source's header).
 pub const KQDUP_DYN: &str = concat!(env!("OUT_DIR"), "/kqdup_dyn");
+/// M53 t4: poll, select and pselect over guest pipes by mode — `states`, `nval`, `sleep`, `cross`,
+/// `timeout`, `select`, `pselect`, `pollfile`, `pselmask` (see the source's header).
+pub const POLLSEL_DYN: &str = concat!(env!("OUT_DIR"), "/pollsel_dyn");
 /// M52 §3i: main spins on a flag a created thread would set; natively it exits 0 at once, under
 /// retrace's cooperative scheduler it never finishes (see the source's header).
 pub const STALL_DYN: &str = concat!(env!("OUT_DIR"), "/stall_dyn");
@@ -732,6 +735,13 @@ mod tests {
     fn kq_dyn_guest_parses() {
         // M48: proves the build.rs wiring and the path constant; behaviour is kq_e2e's.
         let l = parse_macho(&std::fs::read(KQ_DYN).unwrap());
+        assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
+    }
+
+    #[test]
+    fn pollsel_dyn_guest_parses() {
+        // M53 t4: proves the build.rs wiring and the path constant; behaviour is pollsel_e2e's.
+        let l = parse_macho(&std::fs::read(POLLSEL_DYN).unwrap());
         assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
     }
 
