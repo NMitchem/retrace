@@ -87,7 +87,7 @@ behind it. These are the ones you'll hit first:
   or an inherited descriptor runs.
 - A syscall or Mach message retrace has no model for stops the recording with one line naming
   it, `retrace: unsupported: …`, and exit status 4; [`docs/walls.md`](docs/walls.md) explains each
-  kind. In the latest sweep, 41 of the 54 Apple binaries in the committed sample recorded and
+  kind. In the latest sweep, 43 of the 54 Apple binaries in the committed sample recorded and
   replayed with native's stdout, stderr and exit status, and 47 recorded and replayed identically
   (most of the rest start another process, which stops at a wall, or print host state).
 - Of the 35 small C, C++, Rust and Swift programs in the first-contact corpus

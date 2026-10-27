@@ -52,6 +52,13 @@
 #   RETRACE_SWEEP_STDERR=1      M51 (spec §3j): a row whose stderr differs from native's fails,
 #                               `FAIL … (stderr differs from native)`. Tier 2 sets it; the Apple sweep's
 #                               rows were never curated for stderr, so it only logs the column.
+#   RETRACE_SWEEP_ENV=<names>   variables a row may see beside SWEEP_ENV's, space-separated (a census
+#                               list holding `fc_env` needs `FC_ENV_PROBE`). See clean_run.
+#
+# Since the M53 scrub every run of a row, native, record and replay, starts under `env -i` with only
+# SWEEP_ENV's variables and RETRACE_SWEEP_ENV's, at the caller's values; retrace's own two runs also
+# get the caller's RETRACE_*, which the recorder strips from the guest's environment. Nothing else of
+# the caller's environment reaches a row.
 #
 # M49 (spec §3c): a list line may carry arguments after the path, each preceded by a TAB. They are
 # passed verbatim: the line is split on TAB only, with globbing off, and never evaluated by a shell,
@@ -155,6 +162,34 @@ run_timeout() {
     return "$_tmo_status"
 }
 
+# The M53 scrub: a row's environment. Before it every run inherited the caller's, so the `env` and
+# `printenv` rows' kept evidence carried whatever token or key the caller's environment held,
+# verbatim, and native and the guest saw different variables (the harness's own `_` and `OLDPWD`,
+# Ruling T8-env, and a different order). The names a row may see are listed, never the ones it may
+# not: a list of secrets' names misses the next one. `__CF_USER_TEXT_ENCODING` is left out on
+# purpose: CoreFoundation rewrites a value it does not expect (Claude Code's `0x0:0:0`) to
+# `0x<uid>:0x0:0x0` inside the recorder before the guest's environment is built, so the guest saw
+# the rewritten value and native the original (measured; unset, neither sees one).
+SWEEP_ENV='PATH HOME USER LOGNAME SHELL TMPDIR TERM LANG LC_ALL LC_CTYPE TZ'
+
+# clean_run native|retrace|recorder CMD… — exec CMD under `env -i` with each variable of SWEEP_ENV and
+# RETRACE_SWEEP_ENV that the caller has set, in that order; retrace's runs add the caller's RETRACE_*
+# after them, and `recorder` prints `recpid=` first (see the record invocation). `env -i` is the last
+# exec before CMD, so no shell between them adds a variable of its own. It execs, so it is only ever
+# run_timeout's backgrounded command, whose pid is then CMD's own and the one the watchdog kills.
+clean_run() {
+    _mode=$1; shift; _ncmd=$#
+    _names="$SWEEP_ENV ${RETRACE_SWEEP_ENV:-}"
+    [ "$_mode" = native ] || _names="$_names $(env | sed -n 's/^\(RETRACE_[A-Za-z0-9_]*\)=.*/\1/p')"
+    for _v in $_names; do
+        eval "[ -z \"\${$_v+x}\" ] || set -- \"\$@\" \"$_v=\${$_v}\""
+    done
+    # The assignments went on after CMD; rotate CMD's words behind them.
+    while [ "$_ncmd" -gt 0 ]; do set -- "$@" "$1"; shift; _ncmd=$((_ncmd-1)); done
+    [ "$_mode" = recorder ] && exec sh -c 'echo "recpid=$$" >&2; exec env -i "$@"' sh "$@"
+    exec env -i "$@"
+}
+
 # M36: keep_row <result> [fault] — copy this row's evidence when asked, then emit the ROW line.
 # Evidence is kept for every result that is not a clean PASS; the optional second argument marks
 # an identical-fault PASS, whose evidence is kept too (its crash is the thing to read). Reads the
@@ -252,8 +287,8 @@ while IFS= read -r g <&3; do
     # so guest-dependent; see docs/sweep-evidence/2026-09-13-m36/README.md. M36 measured three
     # regimes, docs/sweep-evidence/2026-09-13-m36/). Print it into rec.err before the recorder
     # prints anything,
-    # from the shell that becomes the recorder — M34's probe shape. run_timeout launches "$@"
-    # verbatim, so the `sh` it backgrounds is the process that `exec`s into the recorder: the pid
+    # from the shell that becomes the recorder — M34's probe shape. run_timeout backgrounds
+    # clean_run, which execs that `sh`, which execs `env -i`, which execs the recorder: the pid
     # it printed IS the recorder's, and the watchdog's kill still lands on the recorder.
     # M49: with RETRACE_SWEEP_NATIVE, the row runs natively first, under the same watchdog and
     # with the same /dev/null stdin; its exit code is the shell's (128 + signo for a signal death,
@@ -265,14 +300,14 @@ while IFS= read -r g <&3; do
         # 15 GB file, filling the disk. A run past the limit dies of SIGXFSZ (rc 153) and its row fails,
         # as it always has. Only the native run is bounded: the recorder's trace is written by the
         # same process.
-        ( ulimit -f 32768; run_timeout "$g" "$@" ) >"$TMP/nat.out" 2>"$TMP/nat.err" </dev/null; nrc=$?
+        ( ulimit -f 32768; run_timeout clean_run native "$g" "$@" ) >"$TMP/nat.out" 2>"$TMP/nat.err" </dev/null; nrc=$?
         [ -e "$TMP/.timedout" ] && nrc=timeout
     fi
     if [ "$nargs" -eq 0 ]; then
-        run_timeout sh -c 'echo "recpid=$$" >&2; exec "$0" record-dyn "$1" -o "$2"' "$BIN" "$g" "$TMP/t.bin" >"$TMP/rec.out" 2>"$TMP/rec.err" </dev/null; rc=$?
+        run_timeout clean_run recorder "$BIN" record-dyn "$g" -o "$TMP/t.bin" >"$TMP/rec.out" 2>"$TMP/rec.err" </dev/null; rc=$?
     else
         # M49: the same shape, with the row's arguments after `--`, the CLI's guest-argv separator.
-        run_timeout sh -c 'echo "recpid=$$" >&2; b=$0; g=$1; t=$2; shift 2; exec "$b" record-dyn "$g" -o "$t" -- "$@"' "$BIN" "$g" "$TMP/t.bin" "$@" >"$TMP/rec.out" 2>"$TMP/rec.err" </dev/null; rc=$?
+        run_timeout clean_run recorder "$BIN" record-dyn "$g" -o "$TMP/t.bin" -- "$@" >"$TMP/rec.out" 2>"$TMP/rec.err" </dev/null; rc=$?
     fi
     recpid=$(grep -a '^recpid=' "$TMP/rec.err" | head -1 | cut -d= -f2)
     native=""
@@ -337,7 +372,7 @@ while IFS= read -r g <&3; do
     if [ -n "$rec_bug" ]; then
         echo "FAIL $row (retrace bug on record: $rec_bug)"; fail=$((fail+1)); keep_row FAIL; continue
     fi
-    run_timeout "$BIN" replay "$TMP/t.bin" >"$TMP/rp.out" 2>"$TMP/rp.err" </dev/null; rp=$?
+    run_timeout clean_run retrace "$BIN" replay "$TMP/t.bin" >"$TMP/rp.out" 2>"$TMP/rp.err" </dev/null; rp=$?
     rp_line=$(grep -a -m1 'DIVERGENCE at landmark' "$TMP/rp.err" | cut -c1-200)
     case "$rp_line" in
         'DIVERGENCE at landmark '*) landmark=$(printf '%s' "$rp_line" | sed 's/^DIVERGENCE at landmark \([0-9]*\).*/\1/') ;;

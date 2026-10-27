@@ -115,7 +115,7 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
   stepping changes, each asserting lldb does not loop; it skips loudly without lldb, and its CPython
   test without Homebrew Python), `apple_walls_e2e` (Apple binaries by path: M44's
   `ls_records_and_replays` and `ed_records_and_replays` run beside `launchctl`'s; the other seven
-  are parked at their measured walls), `skiplines` (M44: the skip-line detector and its control), `kqinit_e2e` (M45: libdispatch's
+  are parked at their measured walls), `skiplines` (M44: the skip-line detector and its control), `evidence_secrets` (the M53 scrub: no file under `docs/` holds a credential, a credential-named variable's value or a known token prefix, each reported by name and never by value; and its control), `kqinit_e2e` (M45: libdispatch's
   workqueue-kqueue init, `kevent_qos` with `KEVENT_FLAG_WORKQ`, issued by hand from `kqinit_dyn.c`
   and emulated as one measured shape; asserts the landmark, the refusals by value, a rewritten
   return replay must name, and seeks across it), `gcdtimer_e2e` (M46: libdispatch's
