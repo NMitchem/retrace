@@ -340,7 +340,7 @@ fn lldb_steps_a_blocked_thread_into_another_threads_breakpoint_and_one_that_is_n
     // thread's frame and its later `thread list` row at the pc it had BEFORE the step, though the
     // server's reply named the new one (measured with the server's replies logged: `vCont;s:2`
     // answered `thread-pcs:…,1804ecc18` and `20:` the same, and lldb still listed `…ecc14`; the
-    // packet sequences of passing and failing runs are identical). It happens at ff2dd84, before
+    // packet sequences of passing and failing runs are identical). It happens at 932ab9f, before
     // M52, so it is not a server or recording change. B6(b) undone is deterministic: the step is
     // refused in place and EVERY session lists the old pc. So one repeat tells the two apart, and
     // the row must be wrong in both sessions to fail.
