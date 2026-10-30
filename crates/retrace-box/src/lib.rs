@@ -2647,7 +2647,16 @@ impl Box_ {
         // Frozen commpage copies (see COMMPAGE_IPA / COMMPAGE2_IPA): SAFETY — each is a live RO
         // kernel mapping at this exact VA in every process; read one granule of each.
         for &cp in &[COMMPAGE_IPA, COMMPAGE2_IPA] {
-            let bytes = unsafe { std::slice::from_raw_parts(cp as *const u8, GRANULE) }.to_vec();
+            let mut bytes = unsafe { std::slice::from_raw_parts(cp as *const u8, GRANULE) }.to_vec();
+            if cp == COMMPAGE_IPA {
+                // M54 t0b: +0x88 is -(the host's accumulated sleep time) in ticks. The guest's
+                // `mach_absolute_time` is `synthetic_tsc + this`, and `synthetic_tsc` starts at 2^32, so
+                // a host that has slept more than 2^32 ticks (~3 min) wrapped the guest clock below zero
+                // and broke every timed wait that compares or converts it (fc_sw_sleep, fc_rs_threads
+                // after a sleep on an unchanged tree). Pin it: the guest clock then starts at the
+                // synthetic start on every host, which also keeps host history out of the snapshot.
+                bytes[0x88..0x90].fill(0);
+            }
             map(&vm, &mut backings, cp, &bytes, GRANULE);
         }
         // Thread-pointer TSD region (see TSD_IPA): a zeroed region spanning below+above the thread
