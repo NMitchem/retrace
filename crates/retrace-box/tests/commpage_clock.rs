@@ -15,3 +15,18 @@ fn the_guest_clock_does_not_carry_the_hosts_sleep_offset() {
     let w = u64::from_le_bytes(b.read_guest(COMMPAGE_IPA + 0x88, 8).try_into().unwrap());
     assert_eq!(w, 0, "commpage +0x88 (timebase offset) must be host-independent, was {w:#x}");
 }
+
+// Host-independent guard: the load-time test above passes without the fix on a host that never
+// slept (its +0x88 is already 0). This one feeds the pin the measured word.
+#[test]
+fn the_pin_zeroes_only_the_timebase_offset_word() {
+    let mut g = vec![0u8; 0x4000];
+    for (i, b) in g.iter_mut().enumerate() { *b = (i % 251) as u8 | 1; }
+    g[0x88..0x90].copy_from_slice(&0xfffffc6a9fc326d2u64.to_le_bytes());
+    let before = g.clone();
+    retrace_box::pin_commpage_timebase_offset(&mut g);
+    assert_eq!(&g[0x88..0x90], &[0u8; 8]);
+    for i in 0..g.len() {
+        if !(0x88..0x90).contains(&i) { assert_eq!(g[i], before[i], "byte {i:#x} changed"); }
+    }
+}

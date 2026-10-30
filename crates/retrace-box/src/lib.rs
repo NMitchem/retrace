@@ -182,6 +182,18 @@ pub const COMMPAGE_IPA: u64 = 0x0000_000F_FFFF_C000;
 /// `mach_absolute_time` adds to the counter it reads (t0 M1(c)). The commpage is a copy frozen at
 /// load and restored from the snapshot, so this word is identical on every rebuild path.
 const COMMPAGE_TIMEBASE_OFFSET_IPA: u64 = COMMPAGE_IPA + 0x88;
+/// M54 t0b: pin the frozen commpage copy's `_COMM_PAGE_TIMEBASE_OFFSET` (`COMMPAGE_TIMEBASE_OFFSET_IPA`)
+/// to 0. The live word is -(the host's accumulated sleep time) in ticks. The guest's
+/// `mach_absolute_time` is `synthetic_tsc + this` and `synthetic_tsc` starts at 2^32, so a host that
+/// has slept more than 2^32 ticks (~3 min) wrapped the guest clock below zero and broke every timed
+/// wait that compares or converts it (fc_sw_sleep, fc_rs_threads). `Box_::timebase_offset` reads the
+/// same word back from guest memory, so the write and read sides share one constant. Only this word
+/// is pinned: `+0x98` (the continuous-time offset) is a positive sleep total that never wraps and
+/// rides in the snapshot, so it stays as the host has it (Ruling T0b-a).
+pub fn pin_commpage_timebase_offset(granule: &mut [u8]) {
+    let at = (COMMPAGE_TIMEBASE_OFFSET_IPA - COMMPAGE_IPA) as usize;
+    granule[at..at + 8].fill(0);
+}
 /// M48 §2c: the two commpage words `pthread_jit_write_protect_np` loads and `msr`s into
 /// `S3_6_C15_C1_5` (`pthread-jit-disasm.txt`): `+0x110` write-enables the thread's `MAP_JIT`
 /// pages and `+0x118`, eight bytes on, protects them (t0 M1(c)). Frozen with the rest of the
@@ -2649,13 +2661,8 @@ impl Box_ {
         for &cp in &[COMMPAGE_IPA, COMMPAGE2_IPA] {
             let mut bytes = unsafe { std::slice::from_raw_parts(cp as *const u8, GRANULE) }.to_vec();
             if cp == COMMPAGE_IPA {
-                // M54 t0b: +0x88 is -(the host's accumulated sleep time) in ticks. The guest's
-                // `mach_absolute_time` is `synthetic_tsc + this`, and `synthetic_tsc` starts at 2^32, so
-                // a host that has slept more than 2^32 ticks (~3 min) wrapped the guest clock below zero
-                // and broke every timed wait that compares or converts it (fc_sw_sleep, fc_rs_threads
-                // after a sleep on an unchanged tree). Pin it: the guest clock then starts at the
-                // synthetic start on every host, which also keeps host history out of the snapshot.
-                bytes[0x88..0x90].fill(0);
+                // M54 t0b: see pin_commpage_timebase_offset.
+                pin_commpage_timebase_offset(&mut bytes);
             }
             map(&vm, &mut backings, cp, &bytes, GRANULE);
         }
