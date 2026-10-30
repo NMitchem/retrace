@@ -1900,6 +1900,17 @@ pub fn exec_refusal_errno(num: u64) -> Option<u64> {
     match num { SYS_EXECVE | SYS_POSIX_SPAWN => Some(14), _ => None }
 }
 
+/// M54 t2: `POSIX_SPAWN_SETEXEC` in `psa_flags`: the spawn replaces the calling image instead of
+/// starting a child (measured, t0 §M3).
+pub const POSIX_SPAWN_SETEXEC: u16 = 0x0040;
+
+/// M54 t2: whether a `posix_spawn`'s attributes ask for exec-in-place. `desc_flags` is the
+/// `psa_flags` the descriptor's `attrp` points at, or `None` for a NULL descriptor or a NULL
+/// `attrp`, which has no flags and so starts a child.
+pub fn spawn_is_setexec(desc_flags: Option<u16>) -> bool {
+    desc_flags.is_some_and(|f| f & POSIX_SPAWN_SETEXEC != 0)
+}
+
 /// M47 §3e: `fork` (2) is REFUSED, never forwarded, with `EAGAIN` (35), the errno `fork(2)`
 /// documents for a process limit reached, so the guest takes a failure path libc and its callers
 /// already have (R2): libc's `fork` calls `cerror`, then its parent handlers, and returns −1
@@ -2973,6 +2984,10 @@ mod tests {
         assert_eq!(exec_refusal_errno(SYS_EXECVE), Some(14));
         assert_eq!(exec_refusal_errno(SYS_POSIX_SPAWN), Some(14));
         assert_eq!(exec_refusal_errno(SYS_OPEN), None);
+        assert!(!spawn_is_setexec(None));
+        assert!(!spawn_is_setexec(Some(0)));
+        assert!(spawn_is_setexec(Some(0x0040)));
+        assert!(spawn_is_setexec(Some(0x0140)));
         assert_eq!((SYS_EXECVE, SYS_POSIX_SPAWN), (59, 244));
     }
 

@@ -280,6 +280,14 @@ fn a_program_that_calls_chroot_stops_at_one_clean_line() {
     assert!(replay.contains("it ends at landmark"), "{replay}");
 }
 
+/// M54 t2: a `posix_spawn` that would start a child is a ProcessCreation wall, not M38's EFAULT.
+#[test]
+fn a_child_posix_spawn_ends_the_recording_at_one_clean_line() {
+    let (line, _) = assert_guest_wall_both(retrace_guest::FC_SPAWN_CHILD, &[], "parent: spawning\n",
+        "posix_spawn of a child process (syscall 244)", "process-creation");
+    assert_eq!(line, format!("retrace: unsupported: posix_spawn of a child process (syscall 244) - see {WALLS}#process-creation"));
+}
+
 /// Review Focus 2: the wall on a thread that is not main. The output main printed still comes first,
 /// and the line is the same line: it names the call, never the thread.
 #[test]

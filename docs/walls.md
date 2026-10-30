@@ -69,10 +69,16 @@ system services, such as I/O Kit or an XPC service, reach this.
 
 ## Process creation
 
-The program tried to wait for another process, with `wait4` or `waitid`, or to start one in a way
-retrace does not refuse. retrace records one process. A refused `fork`, `posix_spawn` or `execve`
-returns an error to the program instead (see above); what the program does next with that error is
-up to it, and a shell that then waits for its child stops here.
+The program tried to wait for another process, with `wait4` or `waitid`, or to start one. retrace
+records one process, so a `posix_spawn` that starts a child ends the recording here; that is
+retrace's limit, and the same call can succeed natively. A `posix_spawn` with `POSIX_SPAWN_SETEXEC`
+and an `execve` replace the image instead and are refused as before, and `fork` returns `EAGAIN`.
+What the program does next with that error is up to it, and a shell that then waits for its child
+stops here.
+
+With Xcode selected, `/usr/bin/git`, `/usr/bin/python3` and the other xcrun shims run
+`xcodebuild -license check` as a child first, which ends at this wall. Run the tool itself
+(`$(xcrun -f git)`) or select the Command Line Tools (`DEVELOPER_DIR=/Library/Developer/CommandLineTools`).
 
 ## Signals
 

@@ -354,6 +354,18 @@ fn mach2_unreachable(b: &mut Box_, m: &machmsg::Msg2, route: &machmsg::Route) ->
     None
 }
 
+/// M54 t2: the `psa_flags` of a `posix_spawn`'s descriptor (`args[2]`: `attr_size` at +0, `attrp` at
+/// +8; `psa_flags` is a `short` at the attr's +0, t0 §M3). `Some(None)` is a NULL descriptor or NULL
+/// `attrp` (no flags); `None` is a descriptor or attr the program could not have read.
+fn spawn_flags(b: &Box_, desc: u64) -> Option<Option<u16>> {
+    if desc == 0 { return Some(None); }
+    let d = b.read_va_checked(desc, 16)?;
+    let attrp = u64::from_le_bytes(d[8..16].try_into().unwrap());
+    if attrp == 0 { return Some(None); }
+    let f = b.read_va_checked(attrp, 2)?;
+    Some(Some(u16::from_le_bytes([f[0], f[1]])))
+}
+
 /// M50 §3c (B1): a box refusal reaching the record loop. A wall, marked at its site (Task 4 marks
 /// M2's wall rows), passes through so `?` ends the recording with it; any other text is a retrace
 /// bug and panics, as every one of these sites did before M50.
@@ -1820,6 +1832,16 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
             // is the only guard (the bsdthread_create precedent). Constant return, no writes, so
             // replay recomputes and byte-compares (symmetry rule 1, the standard posture). The
             // errno is the one the forward produced before M38, for continuity (spec R4).
+            // M54 t2: a posix_spawn that starts a CHILD is a ProcessCreation wall: retrace records one
+            // process. Read the descriptor's attrp and psa_flags through the checked reader; an
+            // unreadable one falls through to the EFAULT arm below (unchanged landmark). The recording
+            // ends here, so replay has no mirror to this arm.
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_POSIX_SPAWN
+                && spawn_flags(&b, args[2]).is_some_and(|f| !retrace_arch::spawn_is_setexec(f)) => {
+                return Err(retrace_arch::wall(retrace_arch::WallCategory::ProcessCreation,
+                    "posix_spawn of a child process (syscall 244)"));
+            }
+
             Stop::Syscall { num, args } if retrace_arch::exec_refusal_errno(num).is_some() => {
                 let e = retrace_arch::exec_refusal_errno(num).unwrap();
                 // exec_refusal_errno is EFAULT (14) for both execve and posix_spawn (M38 R4).

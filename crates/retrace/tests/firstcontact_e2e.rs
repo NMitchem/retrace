@@ -76,6 +76,9 @@ const ROWS: &[Row] = &[
     Row { name: "fc_fileio", bin: retrace_guest::FC_FILEIO, args: &[], expect: Expect::Pass },
     // M53 t1: the filesystem and process calls the census's rows cover, in one directory.
     Row { name: "fc_posix", bin: retrace_guest::FC_POSIX, args: &[], expect: Expect::Pass },
+    // M54 t2: a posix_spawn that starts a child is a ProcessCreation wall (was M38's EFAULT).
+    Row { name: "fc_spawn_child", bin: retrace_guest::FC_SPAWN_CHILD, args: &[],
+          expect: Expect::Refused("retrace: unsupported: posix_spawn of a child process (syscall 244)") },
     // M51 §3f: the program gets the recorder's environment, which is ENV, as native gets it.
     Row { name: "fc_env", bin: retrace_guest::FC_ENV, args: &["one", "two words"], expect: Expect::Pass },
     // M51 (R8): __builtin_trap(), the brk class without swiftc. Joins in Task 3, where it passes (C9).

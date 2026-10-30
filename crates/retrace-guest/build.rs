@@ -1159,7 +1159,7 @@ fn main() {
     let dir = env!("CARGO_MANIFEST_DIR");
     for name in ["fc_null_load", "fc_null_store", "fc_null_call", "fc_munmapped", "fc_low_store",
                  "fc_stack_overflow", "fc_uaf", "fc_assert", "fc_sleep", "fc_usleep", "fc_nanosleep",
-                 "fc_mutex", "fc_fileio", "fc_env", "fc_c_trap", "fc_signal", "fc_posix"] {
+                 "fc_mutex", "fc_fileio", "fc_env", "fc_c_trap", "fc_signal", "fc_posix", "fc_spawn_child"] {
         let src = format!("{dir}/c/{name}.c");
         let bin = format!("{out}/{name}");
         println!("cargo:rerun-if-changed={src}");

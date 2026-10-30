@@ -1002,3 +1002,5 @@ mod fat_tests {
                    "an x86_64+arm64 universal must yield the plain-arm64 slice");
     }
 }
+/// M54 t2: a `posix_spawn` of a real child (`/bin/echo`), which is a ProcessCreation wall.
+pub const FC_SPAWN_CHILD: &str = concat!(env!("OUT_DIR"), "/fc_spawn_child");
