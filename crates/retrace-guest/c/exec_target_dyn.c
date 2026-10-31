@@ -5,8 +5,8 @@
 //                            pid is the one thing that differs between runs)
 //   X=<hex of getenv("X") or "unset">
 //   pid_same=<yes|no>        only when argv[1] starts "pid:" (the caller's pid, passed through exec)
-//   fd <n> <file|fifo|other> for each open descriptor 3..15
-//   pipe=<hex>               a non-blocking read of fd 5, when fd 5 is a FIFO
+//   fd <n> <file|fifo|other> for each open descriptor 16..39
+//   pipe=<hex>               a non-blocking read of fd 20, when fd 20 is a FIFO
 // Hex keeps a byte string that is not UTF-8 (the `bytes` mode's "\xff\xfe") exact in the comparison.
 #include <fcntl.h>
 #include <stdio.h>
@@ -16,18 +16,16 @@
 #include <unistd.h>
 
 
-// Under retrace a guest starts with a descriptor a native process does not have: dyld's /dev/dtracehelper,
-// opened FD_CLOEXEC at the lowest free number, and each new image's dyld opens it again. Exec closes every
-// FD_CLOEXEC descriptor, so none can be inherited and closing the ones found here changes nothing natively; it
-// lets the descriptor numbers and the listing compare with native. Exec itself is the subject of this fixture.
-static void drop_stray(void) {
-    for (int fd = 3; fd < 16; fd++) { int fl = fcntl(fd, F_GETFD); if (fl >= 0 && (fl & FD_CLOEXEC)) close(fd); }
-}
+// Under retrace a guest starts with a descriptor a native process does not have, and so does every new image:
+// libsystem's `socket(AF_UNIX, SOCK_DGRAM)` takes the lowest free number (3), gets `fcntl(F_SETFD, FD_CLOEXEC)`,
+// `connect`s to /var/run/syslog and `sendto`s once. A native run has no such socket: its first `open` returns 3,
+// where under retrace it returns 4. That is a divergence retrace has (ledgered separately as F1), described here
+// and not diagnosed. So nothing below checks a descriptor the stray could take: the stage-1 fixture places every descriptor it
+// tests at 20 or above, and this target closes nothing before it looks.
 
 static void hex(const char *s, size_t n) { for (size_t i = 0; i < n; i++) printf("%02x", (unsigned char)s[i]); }
 
 int main(int argc, char **argv) {
-    drop_stray();
     printf("target argc=%d\n", argc);
     for (int i = 1; i < argc; i++) {
         if (strncmp(argv[i], "pid:", 4) == 0) { printf("argv[%d]=pid\n", i); continue; }
@@ -37,18 +35,18 @@ int main(int argc, char **argv) {
     printf("X="); if (x) hex(x, strlen(x)); else printf("unset"); printf("\n");
     if (argc > 1 && strncmp(argv[1], "pid:", 4) == 0)
         printf("pid_same=%s\n", atoi(argv[1] + 4) == (int)getpid() ? "yes" : "no");
-    int fifo5 = 0;
-    for (int fd = 3; fd < 16; fd++) {
+    int fifo20 = 0;
+    for (int fd = 16; fd < 40; fd++) {   // above the stray's number
         struct stat st;
         if (fstat(fd, &st) != 0) continue;
         const char *k = S_ISFIFO(st.st_mode) ? "fifo" : S_ISREG(st.st_mode) ? "file" : "other";
         printf("fd %d %s\n", fd, k);
-        if (fd == 5 && S_ISFIFO(st.st_mode)) fifo5 = 1;
+        if (fd == 20 && S_ISFIFO(st.st_mode)) fifo20 = 1;
     }
-    if (fifo5) {
+    if (fifo20) {
         char buf[64];
-        fcntl(5, F_SETFL, O_NONBLOCK);
-        ssize_t n = read(5, buf, sizeof buf);
+        fcntl(20, F_SETFL, O_NONBLOCK);
+        ssize_t n = read(20, buf, sizeof buf);
         printf("pipe="); if (n > 0) hex(buf, (size_t)n); printf("\n");
     }
     return 0;

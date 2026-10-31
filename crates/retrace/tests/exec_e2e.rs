@@ -61,16 +61,16 @@ fn an_execve_runs_the_new_image_as_natively() {
     let target = retrace_guest::EXEC_TARGET_DYN;
     // Every row of spec 2b's execve column.
     let (out, t) = as_natively(&["execve"], false);
-    has(&out, "stage1 fds keep=3 cloexec=4 pipe=5,6 kq=7");
+    has(&out, "stage1 fds keep=20 cloexec=21 pipe=22,23 kq=24");
     has(&out, "pid_same=yes");
     has(&out, "tid_changed=yes");
     has(&out, "argv[3]=<a b>"); has(&out, "argv[4]=<>");
-    has(&out, "fd 3 open (file) cloexec=0");            // a plain descriptor survives
-    has(&out, "fd 5 open (fifo) cloexec=0"); has(&out, "fd 6 open (fifo) cloexec=0"); // both pipe ends
-    has(&out, "fd 9 open cloexec=0");                    // dup2(1, 9): open, FD_CLOEXEC clear
-    lacks_prefix(&out, "fd 4 ");                         // the O_CLOEXEC file is closed
-    lacks_prefix(&out, "fd 7 ");                         // the kqueue is closed
-    lacks_prefix(&out, "fd 11 ");                        // dup2(1, 11) + FD_CLOEXEC is closed
+    has(&out, "fd 20 open (file) cloexec=0");            // a plain descriptor survives
+    has(&out, "fd 22 open (fifo) cloexec=0"); has(&out, "fd 23 open (fifo) cloexec=0"); // both pipe ends
+    has(&out, "fd 25 open (file) cloexec=0");                  // dup2(1, 25): open, FD_CLOEXEC clear
+    lacks_prefix(&out, "fd 21 ");                         // the O_CLOEXEC file is closed
+    lacks_prefix(&out, "fd 24 ");                         // the kqueue is closed
+    lacks_prefix(&out, "fd 26 ");                        // dup2(1, 26) + FD_CLOEXEC is closed
     has(&out, "USR1 DFL"); has(&out, "USR2 IGN");        // a handler resets, an ignore stays
     has(&out, "mask HUP=1 INT=0 USR2=0");                // the mask is kept
     has(&out, "pending HUP=1 USR2=0");                   // and so is a masked pending signal, not delivered
@@ -82,10 +82,10 @@ fn an_execve_runs_the_new_image_as_natively() {
     if let Event::Exec { path, image, dylinker, closed, thread, .. } = &ev[0] {
         assert_eq!(path.as_slice(), retrace_guest::EXECSELF_DYN.as_bytes(), "the path as the guest passed it");
         assert!(image.len() > 1000 && dylinker.len() > 1_000_000, "the image and dyld travel in the event");
-        // The close set is the host's answer: the O_CLOEXEC file (4) and the FD_CLOEXEC alias (11), and
-        // nothing that survives. (The kqueue, 7, is closed by rule whether or not its host fd says so.)
-        assert!(closed.contains(&4) && closed.contains(&11), "the O_CLOEXEC file and the FD_CLOEXEC alias: {closed:?}");
-        assert!(closed.iter().all(|f| ![0, 1, 2, 3, 5, 6, 9].contains(f)), "no survivor is closed: {closed:?}");
+        // The close set is the host's answer: the O_CLOEXEC file (21) and the FD_CLOEXEC alias (26), and
+        // nothing that survives. (The kqueue, 24, is closed by rule whether or not its host fd says so.)
+        assert!(closed.contains(&21) && closed.contains(&26), "the O_CLOEXEC file and the FD_CLOEXEC alias: {closed:?}");
+        assert!(closed.iter().all(|f| ![0, 1, 2, 20, 22, 23, 25].contains(f)), "no survivor is closed: {closed:?}");
         assert_eq!(*thread, 0);
     } else { unreachable!() }
     let _ = std::fs::remove_file(&t);
@@ -111,7 +111,7 @@ fn an_execve_runs_the_new_image_as_natively() {
 
     // A pipe's bytes survive: the target reads what the program wrote before the exec.
     let (out, t) = as_natively(&["pipe", target], false);
-    has(&out, "fd 4 fifo"); has(&out, "fd 5 fifo"); has(&out, "pipe=68656c6c6f");
+    has(&out, "fd 20 fifo"); has(&out, "fd 21 fifo"); has(&out, "pipe=68656c6c6f");
     let _ = std::fs::remove_file(&t);
 }
 

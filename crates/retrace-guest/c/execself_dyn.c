@@ -13,7 +13,7 @@
 //                                       retrace refuses it by value (Ruling T3-a)
 //   execself_dyn relpath <dir>          chdir to <dir>, then execve("./exec_target_dyn") (the target is there)
 //   execself_dyn bytes <target>         argv "\xff\xfe", env X=\x80 into the target
-//   execself_dyn pipe <target>          writes "hello" to a pipe whose read end is fd 5, then the target
+//   execself_dyn pipe <target>          writes "hello" to a pipe whose read end is fd 20, then the target
 //   execself_dyn chain <n>              execs itself with n-1 until 0, then prints "chain done"
 //   execself_dyn errs <dir> <target>    execve's errors, one `<name> errno=<n>` line each
 //   execself_dyn copy <path>            execs <path> (the no-disk guard)
@@ -37,14 +37,16 @@ static char *self;
 static const char *kind = "execve";
 static void h(int s) { (void)s; }
 
-// Under retrace a guest starts with a descriptor a native process does not have: dyld's /dev/dtracehelper,
-// opened FD_CLOEXEC at the lowest free number, and each new image's dyld opens it again. Exec closes every
-// FD_CLOEXEC descriptor, so none can be inherited and closing the ones found here changes nothing natively; it
-// lets the descriptor numbers and the listing compare with native. Exec itself is the subject of this fixture.
+// Under retrace a guest starts with a descriptor a native process does not have, and so does every new image:
+// libsystem's `socket(AF_UNIX, SOCK_DGRAM)` takes the lowest free number (3), gets `fcntl(F_SETFD, FD_CLOEXEC)`,
+// `connect`s to /var/run/syslog and `sendto`s once. A native run has no such socket: its first `open` returns 3,
+// where under retrace it returns 4. That is a divergence retrace has (ledgered separately as F1), described here
+// and not diagnosed. So nothing below checks a descriptor the stray could take: stage 1 places every descriptor it
+// tests at 20 or above, and stage 2 closes nothing before it looks.
+// Stage 1 only, before it creates anything: drop the stray so the descriptor numbers other modes print match native.
 static void drop_stray(void) {
     for (int fd = 3; fd < 16; fd++) { int fl = fcntl(fd, F_GETFD); if (fl >= 0 && (fl & FD_CLOEXEC)) close(fd); }
 }
-
 
 static uint64_t tid_now(void) { uint64_t t = 0; pthread_threadid_np(NULL, &t); return t; }
 
@@ -61,10 +63,9 @@ static void stage2(int argc, char **argv) {
         if (strncmp(argv[i], "pid:", 4) == 0) { printf("pid_same=%s\n", atoi(argv[i] + 4) == (int)getpid() ? "yes" : "no"); continue; }
         printf("argv[%d]=<%s>\n", i, argv[i]);
     }
-    for (int fd = 3; fd < 16; fd++) {
+    for (int fd = 20; fd < 32; fd++) {   // only the numbers stage 1 placed; the stray cannot be here
         int fl = fcntl(fd, F_GETFD);
         if (fl < 0) continue;
-        if (fd >= 8) { printf("fd %d open cloexec=%d\n", fd, fl & FD_CLOEXEC); continue; }
         struct stat st; fstat(fd, &st);
         printf("fd %d open (%s) cloexec=%d\n", fd, S_ISFIFO(st.st_mode) ? "fifo" : S_ISREG(st.st_mode) ? "file" : "other", fl & FD_CLOEXEC);
     }
@@ -140,9 +141,9 @@ static void errs(const char *dir, const char *target) {
 }
 
 int main(int argc, char **argv) {
-    drop_stray();
     self = argv[0];
     if (argc > 1 && strcmp(argv[1], "stage2") == 0) { stage2(argc, argv); return 0; }
+    drop_stray();
     const char *mode = argc > 1 ? argv[1] : "execve";
     if (strcmp(mode, "chain") == 0) {
         int n = argc > 2 ? atoi(argv[2]) : 0;
@@ -171,8 +172,8 @@ int main(int argc, char **argv) {
     }
     if (strcmp(mode, "pipe") == 0) {
         int p[2]; pipe(p);
-        dup2(p[0], 5); close(p[0]);
-        write(p[1], "hello", 5);
+        dup2(p[0], 20); close(p[0]); dup2(p[1], 21); close(p[1]);
+        write(21, "hello", 5);
         char *nargv[] = { argv[2], NULL }; char *nenv[] = { NULL };
         execve(argv[2], nargv, nenv);
         printf("exec failed: errno=%d\n", errno); return 1;
@@ -205,8 +206,13 @@ int main(int argc, char **argv) {
     int cx = open("/etc/hosts", O_RDONLY | O_CLOEXEC);          // closed by exec
     int pp[2]; pipe(pp);                                        // survive
     int kq = kqueue();                                          // closed by exec
-    dup2(1, 9);                                                 // a console alias: open, FD_CLOEXEC clear
-    dup2(1, 11); fcntl(11, F_SETFD, FD_CLOEXEC);                // a console alias with FD_CLOEXEC: closed
+    // Move each to 20.. so stage 2 can check them without the stray's number in the way.
+    dup2(keep, 20); close(keep); dup2(cx, 21); close(cx); dup2(pp[0], 22); close(pp[0]); dup2(pp[1], 23); close(pp[1]);
+    dup2(kq, 24); close(kq);
+    keep = 20; cx = 21; pp[0] = 22; pp[1] = 23; kq = 24;
+    fcntl(21, F_SETFD, FD_CLOEXEC);                             // dup2 clears it; open(O_CLOEXEC)'s intent, restated
+    dup2(1, 25);                                                // a console alias: open, FD_CLOEXEC clear
+    dup2(1, 26); fcntl(26, F_SETFD, FD_CLOEXEC);                // a console alias with FD_CLOEXEC: closed
     printf("stage1 fds keep=%d cloexec=%d pipe=%d,%d kq=%d\n", keep, cx, pp[0], pp[1], kq);
     signal(SIGUSR1, h); signal(SIGUSR2, SIG_IGN);
     sigset_t m; sigemptyset(&m); sigaddset(&m, SIGHUP); sigprocmask(SIG_BLOCK, &m, 0);
