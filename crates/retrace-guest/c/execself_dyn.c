@@ -18,6 +18,8 @@
 //   execself_dyn spawn-refuse <attr> [target]
 //                                       setpgroup, setsid, resetids, noaslr, port, x86pref (and sched, suspended, flag 200)
 //   execself_dyn spawn-fail <n> [target] the failing spawn n (the table at spawn_fail below), its errno and the state after
+//   execself_dyn spawn-openx            T4-i: O_CLOEXEC open actions at the lowest free slot (closed) and not (kept); a doomed slot
+//                                       replaced by a dup2 action and then closed (ok)
 //   execself_dyn relpath <dir>          chdir to <dir>, then execve("./exec_target_dyn") (the target is there)
 //   execself_dyn bytes <target>         argv "\xff\xfe", env X=\x80 into the target
 //   execself_dyn pipe <target>          writes "hello" to a pipe whose read end is fd 20, then the target
@@ -77,6 +79,9 @@ static void stage2(int argc, char **argv) {
         int fl = fcntl(fd, F_GETFD);
         if (fl < 0) continue;
         struct stat st; fstat(fd, &st);
+        // The stray syslog socket (F1) takes the lowest free number in the new image, and a descriptor a test closed at
+        // exec can leave that number inside this range: a native process has no socket, so it is not printed.
+        if (S_ISSOCK(st.st_mode)) continue;
         printf("fd %d open (%s) cloexec=%d\n", fd, S_ISFIFO(st.st_mode) ? "fifo" : S_ISREG(st.st_mode) ? "file" : "other", fl & FD_CLOEXEC);
     }
     struct sigaction sa;
@@ -176,6 +181,20 @@ static int spawn_modes(const char *mode, int argc, char **argv) {
         do_spawn(&attr, &fa, self);
         return 1;
     }
+    if (strcmp(mode, "spawn-openx") == 0) {
+        printf("stage1 kind=%s\n", kind);
+        // Fill 3..19, so 20 is the lowest free slot whatever the stray descriptor did (it was dropped at the start).
+        for (int fd = 3; fd < 20; fd++) { if (dup(0) != fd) { printf("filler landed elsewhere\n"); exit(3); } }
+        int a = open("/etc/hosts", O_RDONLY); dup2(a, 23); close(a);              // 23: plain
+        a = open("/etc/hosts", O_RDONLY); dup2(a, 24); close(a); fcntl(24, F_SETFD, FD_CLOEXEC); // 24: doomed
+        posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETEXEC);
+        posix_spawn_file_actions_addopen(&fa, 20, "/etc/hosts", O_RDONLY | O_CLOEXEC, 0);  // lowest free: closed at exec
+        posix_spawn_file_actions_addopen(&fa, 22, "/etc/hosts", O_RDONLY | O_CLOEXEC, 0);  // not (21 is): kept
+        posix_spawn_file_actions_adddup2(&fa, 23, 24);                                     // replaces the doomed slot
+        posix_spawn_file_actions_addclose(&fa, 24);                                        // ok, then closed
+        do_spawn(&attr, &fa, self);
+        return 1;
+    }
     if (strcmp(mode, "spawn-hup") == 0) {
         printf("stage1 kind=%s\n", kind);
         sigset_t m; sigemptyset(&m); sigaddset(&m, SIGHUP); sigprocmask(SIG_BLOCK, &m, 0);
@@ -213,6 +232,7 @@ static int spawn_modes(const char *mode, int argc, char **argv) {
         // 1 open of a missing path, 2 close of a closed fd, 3 dup2 from a closed fd, 4 chdir to a missing
         // directory, 5 fchdir of a bad fd, 6 a binpref for x86_64 against a plain arm64 image (EBADARCH),
         // 7 close of a closed fd with a missing image (the action's errno beats the image),
+        // 10 close of a descriptor close-on-exec before the spawn (EBADF under SETEXEC), 11 a dup2 from one (EBADF),
         // 8 every action succeeds, then the image is missing (nothing persists), 9 the same, then not executable.
         char cwd0[1024]; getcwd(cwd0, sizeof cwd0);
         int pp[2]; int a = open("/etc/hosts", O_RDONLY | O_CLOEXEC); dup2(a, 21); close(a); fcntl(21, F_SETFD, FD_CLOEXEC);
@@ -225,6 +245,8 @@ static int spawn_modes(const char *mode, int argc, char **argv) {
         case 4: posix_spawn_file_actions_addchdir(&fa, "/nonexistent/dir"); break;
         case 5: posix_spawn_file_actions_addfchdir_np(&fa, 77); break;
         case 6: { cpu_type_t t = CPU_TYPE_X86_64; size_t k; posix_spawnattr_setbinpref_np(&attr, 1, &t, &k); } break;
+        case 10: posix_spawn_file_actions_addclose(&fa, 21); break;
+        case 11: posix_spawn_file_actions_adddup2(&fa, 21, 27); break;
         case 7: posix_spawn_file_actions_addclose(&fa, 77); image = "/nonexistent/tgt"; break;
         case 8: case 9:
             posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETEXEC | POSIX_SPAWN_CLOEXEC_DEFAULT);

@@ -60,15 +60,42 @@ fn attr_init_byte(off: usize) -> u8 {
 
 /// The field of A's table that holds attr byte `off`.
 fn attr_field(off: usize) -> String {
+    // Offsets from xnu `spawn_internal.h` (docs/sweep-evidence/.../xnu-spawn_internal.h-main-2025-10-04.h), laid out
+    // by C alignment; the measured ones (0x38, 0x44..0x4f, 0x70..0x7f, the 0xc0 end) agree with `attrdump.txt`.
     match off {
         0x0c..=0x0f => "psa_pgroup".into(),
         0x20..=0x23 => "psa_pcontrol".into(),
         0x24..=0x27 => "psa_apptype".into(),
+        0x28..=0x2f => "psa_cpumonitor_percent".into(),
+        0x30..=0x37 => "psa_cpumonitor_interval".into(),
         0x38..=0x3f => "psa_reserved".into(),
+        0x40..=0x41 => "psa_jetsam_flags".into(),
         0x44..=0x47 => "psa_priority".into(),
         0x48..=0x4b => "psa_memlimit_active".into(),
         0x4c..=0x4f => "psa_memlimit_inactive".into(),
-        o => format!("attribute byte {o:#x}"),
+        0x50..=0x57 => "psa_qos_clamp".into(),
+        0x58..=0x5b => "psa_darwin_role".into(),
+        0x5c..=0x5f => "psa_thread_limit".into(),
+        0x60..=0x67 => "psa_max_addr".into(),
+        0x68 => "psa_no_smt".into(),
+        0x69 => "psa_tecs".into(),
+        0x6c..=0x6f => "psa_platform".into(),
+        0x80..=0x83 => "psa_options".into(),
+        0x84..=0x87 => "psa_port_soft_limit".into(),
+        0x88..=0x8b => "psa_port_hard_limit".into(),
+        0x8c..=0x8f => "psa_filedesc_soft_limit".into(),
+        0x90..=0x93 => "psa_filedesc_hard_limit".into(),
+        0x94..=0x97 => "psa_crash_behavior".into(),
+        0x98..=0x9b => "psa_dataless_iopolicy".into(),
+        0xa0..=0xa7 => "psa_crash_behavior_deadline".into(),
+        0xa8 => "psa_launch_type".into(),
+        0xaa..=0xab => "psa_sec_flags".into(),
+        0xac..=0xaf => "psa_crash_count".into(),
+        0xb0..=0xb3 => "psa_throttle_timeout".into(),
+        0xb4..=0xb7 => "psa_kqworkloop_soft_limit".into(),
+        0xb8..=0xbb => "psa_kqworkloop_hard_limit".into(),
+        0xbc..=0xbf => "psa_conclave_mem_limit".into(),
+        o => format!("padding byte {o:#x}"),
     }
 }
 
@@ -160,6 +187,9 @@ pub enum SlotEffect { Close(u64), Dup(u64, u64) }
 pub struct SpawnState {
     pub fds: FdTable,
     pub cloexec: BTreeSet<u32>,
+    /// T4-h: the slots close-on-exec BEFORE the spawn that no action has replaced yet. Under SETEXEC a close,
+    /// dup2 source or inherit of one is EBADF (measured); an open or dup2 into its slot undoes it.
+    pub doomed: BTreeSet<u32>,
     pub kq: BTreeSet<u64>,
     pub named: BTreeSet<u32>,
     pub effects: Vec<SlotEffect>,
@@ -169,7 +199,7 @@ pub struct SpawnState {
 
 impl SpawnState {
     pub fn new(fds: FdTable, cloexec: BTreeSet<u32>, kq: BTreeSet<u64>) -> SpawnState {
-        SpawnState { fds, cloexec, kq, named: BTreeSet::new(), effects: Vec::new(), displaced: Vec::new() }
+        SpawnState { doomed: cloexec.clone(), fds, cloexec, kq, named: BTreeSet::new(), effects: Vec::new(), displaced: Vec::new() }
     }
 
     /// Run `actions` in order. `host(i, action, source_host)` does action `i`'s host work and returns the
@@ -185,14 +215,18 @@ impl SpawnState {
                 FileAction::Open { fd, oflag, .. } => {
                     if bad(*fd) { return Err(fail(EBADF)); }
                     let h = host(i, a, None).map_err(fail)?;
+                    // T4-i (measured): xnu opens at the lowest free slot and dup2s to the target, which clears
+                    // close-on-exec, so O_CLOEXEC sticks only when the target IS the lowest free slot.
+                    let lowest = (0u64..).find(|&g| !self.fds.is_open(g)).unwrap_or(0);
                     self.displaced.extend(self.fds.set_open(u64::from(*fd), h));
-                    if oflag & 0x0100_0000 != 0 { self.cloexec.insert(*fd); } else { self.cloexec.remove(fd); }
+                    if oflag & 0x0100_0000 != 0 && u64::from(*fd) == lowest { self.cloexec.insert(*fd); } else { self.cloexec.remove(fd); }
+                    self.doomed.remove(fd);
                     self.kq.remove(&u64::from(*fd));
                     self.named.insert(*fd);
                     self.effects.push(SlotEffect::Close(u64::from(*fd)));
                 }
                 FileAction::Close { fd } => {
-                    if !self.fds.is_open(u64::from(*fd)) { return Err(fail(EBADF)); }
+                    if !self.fds.is_open(u64::from(*fd)) || self.doomed.contains(fd) { return Err(fail(EBADF)); }
                     self.displaced.extend(self.fds.host(u64::from(*fd)));
                     self.fds.close(u64::from(*fd));
                     self.cloexec.remove(fd);
@@ -200,20 +234,21 @@ impl SpawnState {
                     self.effects.push(SlotEffect::Close(u64::from(*fd)));
                 }
                 FileAction::Dup2 { from, to } => {
-                    if !self.fds.is_open(u64::from(*from)) || bad(*to) { return Err(fail(EBADF)); }
+                    if !self.fds.is_open(u64::from(*from)) || self.doomed.contains(from) || bad(*to) { return Err(fail(EBADF)); }
                     if from == to { self.named.insert(*to); continue; }
                     let src = self.fds.host(u64::from(*from));
                     let h = host(i, a, src).map_err(fail)?;
                     let (_, displaced) = self.fds.dup2(u64::from(*from), u64::from(*to), h).map_err(fail)?;
                     self.displaced.extend(displaced);
                     self.cloexec.remove(to);
+                    self.doomed.remove(to);
                     if self.kq.contains(&u64::from(*from)) { self.kq.insert(u64::from(*to)); } else { self.kq.remove(&u64::from(*to)); }
                     self.named.insert(*to);
                     self.effects.push(SlotEffect::Dup(u64::from(*from), u64::from(*to)));
                 }
                 FileAction::Inherit { fd } => {
                     // R-M1a (measured): inherit does not clear FD_CLOEXEC; a close-on-exec descriptor is EBADF.
-                    if !self.fds.is_open(u64::from(*fd)) || self.cloexec.contains(fd) { return Err(fail(EBADF)); }
+                    if !self.fds.is_open(u64::from(*fd)) || self.doomed.contains(fd) { return Err(fail(EBADF)); }
                     if self.kq.contains(&u64::from(*fd)) {
                         return Err(SpawnFail::Wall(retrace_arch::wall(WallCategory::ProcessCreation, spawn_wall(
                             &format!("an inherit action on descriptor {fd}, a guest kqueue")))));
@@ -430,8 +465,10 @@ impl Box_ {
         let res = st.run(&plan.actions, &mut |i, a, src| match a {
             FileAction::Open { path, oflag, mode, .. } => {
                 let c = std::ffi::CString::new(path.clone()).map_err(|_| 2u64)?;
-                // SAFETY: open(2) on a NUL-terminated path with the guest's own flags and mode.
-                let h = unsafe { libc::open(c.as_ptr(), *oflag, *mode as libc::c_uint) };
+                // SAFETY: open(2) on a NUL-terminated path with the guest's flags and mode, less O_CLOEXEC: whether the
+                // slot is close-on-exec is `SpawnState::run`'s rule (it lands in place or not), carried to replay by
+                // the recorded close set (`Event::Exec.closed`), never by the host flag.
+                let h = unsafe { libc::open(c.as_ptr(), *oflag & !0x0100_0000, *mode as libc::c_uint) };
                 if h < 0 { return Err(errno()); }
                 host_new[i] = Some(h);
                 Ok(Some(h))
@@ -705,7 +742,7 @@ mod tests {
         // sigdefault bytes with the flag clear are not the default.
         let mut a = attr(0x40);
         a[4] = 1;
-        assert!(why(&desc(0), &a).contains("attribute byte 0x4"), "{}", why(&desc(0), &a));
+        assert!(why(&desc(0), &a).contains("padding byte 0x4"), "{}", why(&desc(0), &a));
         // A second binary preference, and the wrong block size.
         let mut a = attr(0x40);
         a[0x14] = 1;
@@ -760,5 +797,38 @@ mod tests {
         assert_eq!(st.run(&[FileAction::Inherit { fd: 0 }, FileAction::Inherit { fd: 3 }], &mut |_, _, _| Ok(None)), Ok(()));
         assert_eq!(st.closed(retrace_arch::POSIX_SPAWN_CLOEXEC_DEFAULT), vec![1, 2, 4]);
         assert_eq!(st.closed(0), vec![4], "without the flag, only the FD_CLOEXEC slots");
+    }
+
+    // T4-h, measured: a descriptor close-on-exec before the spawn is doomed; a close, a dup2 source or an inherit
+    // of it is EBADF until an action replaces it.
+    #[test]
+    fn a_descriptor_close_on_exec_before_the_spawn_is_doomed() {
+        let mk = || { let mut f = FdTable::new(); for _ in 0..9 { f.alloc(); } SpawnState::new(f, [9u32].into_iter().collect(), BTreeSet::new()) };
+        let ok = &mut |_: usize, _: &FileAction, _: Option<i32>| Ok(None);
+        assert_eq!(mk().run(&[FileAction::Close { fd: 9 }], ok), Err(SpawnFail::Errno(0, 9)));
+        assert_eq!(mk().run(&[FileAction::Dup2 { from: 9, to: 10 }], ok), Err(SpawnFail::Errno(0, 9)));
+        assert_eq!(mk().run(&[FileAction::Dup2 { from: 9, to: 9 }], ok), Err(SpawnFail::Errno(0, 9)));
+        assert_eq!(mk().run(&[FileAction::Inherit { fd: 9 }], ok), Err(SpawnFail::Errno(0, 9)));
+        assert_eq!(mk().run(&[FileAction::Fchdir { fd: 9 }], ok), Ok(()), "fchdir of it works");
+        // A dup2 into its slot replaces it, so it may be closed (measured: adddup2(8, 9) then addclose(9)).
+        assert_eq!(mk().run(&[FileAction::Dup2 { from: 8, to: 9 }, FileAction::Close { fd: 9 }], ok), Ok(()));
+        // An open into its slot replaces it too, and an inherit of an action-opened O_CLOEXEC slot is fine.
+        assert_eq!(mk().run(&[FileAction::Open { fd: 9, path: vec![], oflag: 0x0100_0000, mode: 0 }, FileAction::Inherit { fd: 9 }], ok), Ok(()));
+    }
+
+    // T4-i, measured: an open action's O_CLOEXEC sticks only when the target is the lowest free slot.
+    #[test]
+    fn an_open_actions_cloexec_sticks_only_at_the_lowest_free_slot() {
+        let mut f = FdTable::new();
+        f.alloc(); // 3
+        let mut st = SpawnState::new(f, BTreeSet::new(), BTreeSet::new());
+        let open = |fd| FileAction::Open { fd, path: vec![], oflag: 0x0100_0000, mode: 0 };
+        st.run(&[open(4), open(9)], &mut |_, _, _| Ok(None)).unwrap();
+        assert!(st.cloexec.contains(&4), "4 was the lowest free slot");
+        assert!(!st.cloexec.contains(&9), "9 was not, so its close-on-exec is cleared");
+        assert_eq!(st.closed(0), vec![4]);
+        // The next lowest free slot is 5: an open at 5 sticks again, one at 6 does not.
+        st.run(&[open(6), open(5)], &mut |_, _, _| Ok(None)).unwrap();
+        assert!(!st.cloexec.contains(&6) && st.cloexec.contains(&5));
     }
 }

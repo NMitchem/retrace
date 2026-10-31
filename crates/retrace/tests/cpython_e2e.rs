@@ -11,23 +11,11 @@
 //   into guest memory on record and captured in no `Event`. Replay restored stale bytes there and
 //   the guest — correctly — reported `bad marshal data (unknown type code)`. `bigread_e2e` is the
 //   repo-owned regression guard for that mechanism; this test is the capability gate above it.
-// - `the_launcher_execs_the_interpreter_and_prints_1` (M54 t4; it pinned the launcher's own `posix_spawn` failure until
-//   exec-in-place was modelled, and the history below is that old gap) points at the launcher shim
-//   `python3` resolves to on PATH, and it RUNS from this commit onward — but it pins a KNOWN GAP,
-//   not a capability. The launcher's job is to `posix_spawn` (syscall 244, `POSIX_SPAWN_SETEXEC`)
-//   the real interpreter binary in its place so the process gets a proper bundle identity;
-//   exec-in-place is unmodelled in retrace today, so the `posix_spawn` is refused (M38) with the
-//   errno the forward used to return — before M38 it was forwarded and EFAULTed on its
-//   untranslated guest `argv`/`envp`; now `record_box`'s exec arm returns that same errno without
-//   forwarding (M38's refusal, spec R4 continuity; M54 task 3 left it: the SETEXEC spawn answers EFAULT through the exec arm until task 4) — instead of replacing
-//   the image, and the guest takes `pythonw.c`'s `err(1, …)` path and prints
-//   "posix_spawn: …: Undefined error: 0" before exiting 1. Record and replay
-//   agreeing byte-for-byte on THAT outcome is retrace working correctly — the divergence oracle
-//   has nothing to disagree about — not a bug to fix. A successor milestone that implements
-//   exec-in-place will change what the launcher guest actually does (it will exec into the real
-//   interpreter and exit 0 having printed "1"), and at that point this test must be REWRITTEN to
-//   assert the new behavior, not preserved as a regression check: it exists to hold a limitation
-//   visible, not to define a requirement that exec-in-place must never happen.
+// - `the_launcher_execs_the_interpreter_and_prints_1` points at the launcher shim `python3` resolves to on PATH. The
+//   launcher `posix_spawn`s (syscall 244, `POSIX_SPAWN_SETEXEC`) the real interpreter in its place so the process gets a
+//   proper bundle identity. Since M54 task 4 retrace models that exec in place, so the launcher's process becomes the
+//   interpreter, prints 1 and exits 0, and two replays reproduce it. (Until then the spawn was refused and the launcher
+//   exited 1 through `pythonw.c`'s `err(1, ...)`; that gap is closed.)
 //
 // Neither guest path is a repo artifact (both come from a Homebrew `python@3.14` install), so both
 // tests skip with a loud `util::announce` line (writes past libtest's capture) naming the missing
@@ -76,6 +64,5 @@ fn the_launcher_execs_the_interpreter_and_prints_1() {
     // The difference this work makes: before M54 t4 the spawn was refused (M38's EFAULT) and the launcher
     // exited 1 with a `retrace: refused: posix_spawn` line; a recording that execs has neither.
     // (The interpreter itself still prints a `mach_msg2` refusal line of its own, as it does when run directly.)
-    assert!(!stderr.contains("refused: posix_spawn"), "no posix_spawn refusal line: the spawn execs. stderr:\n{stderr}");
-    assert!(!stderr.contains("posix_spawn"), "the launcher's own error text is gone. stderr:\n{stderr}");
+    assert!(!stderr.contains("posix_spawn"), "neither a refusal line nor the launcher's own error text: the spawn execs. stderr:\n{stderr}");
 }

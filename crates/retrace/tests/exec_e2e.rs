@@ -355,7 +355,7 @@ fn each_unaccepted_spawn_attribute_is_refused_by_value() {
 #[test]
 fn a_failing_file_action_answers_as_xnu_does() {
     let target = retrace_guest::EXEC_TARGET_DYN;
-    for (n, errno) in [(1, 2), (2, 9), (3, 9), (4, 2), (5, 9), (6, 86), (7, 9), (8, 2), (9, 13)] {
+    for (n, errno) in [(1, 2), (2, 9), (3, 9), (4, 2), (5, 9), (6, 86), (7, 9), (8, 2), (9, 13), (10, 9), (11, 9)] {
         let ns = n.to_string();
         let (out, t) = as_natively(&["spawn-fail", &ns, target], false);
         has(&out, &format!("spawn failed: errno={errno}"));
@@ -363,4 +363,19 @@ fn a_failing_file_action_answers_as_xnu_does() {
         assert!(execs(&t).is_empty(), "spawn-fail {n}: a failed spawn is an ordinary landmark");
         let _ = std::fs::remove_file(&t);
     }
+}
+
+/// Ruling T4-i and T4-h (measured): an `O_CLOEXEC` open action keeps the flag only at the lowest free slot, and a
+/// doomed slot replaced by a dup2 action may be closed.
+#[test]
+fn an_open_actions_cloexec_sticks_only_at_the_lowest_free_slot() {
+    let (out, t) = as_natively(&["spawn-openx"], false);
+    lacks_prefix(&out, "fd 20 ");                         // landed at the lowest free slot: closed at exec
+    has(&out, "fd 22 open (file) cloexec=0");             // not the lowest: kept, with the flag clear
+    has(&out, "fd 23 open (file) cloexec=0");
+    lacks_prefix(&out, "fd 24 ");                         // dup2'd over, then closed
+    if let Event::Exec { closed, .. } = &execs(&t)[0] {
+        assert!(closed.contains(&20) && !closed.contains(&22), "{closed:?}");
+    } else { unreachable!() }
+    let _ = std::fs::remove_file(&t);
 }
