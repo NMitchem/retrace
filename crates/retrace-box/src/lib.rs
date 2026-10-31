@@ -11,7 +11,7 @@ use cache::{walk_page, CacheMeta, DEFAULT_CACHE_PATH};
 
 mod sig;
 mod exec;
-pub use exec::{ExecCall, ExecImage, ExecRefusal, SpawnPlan};
+pub use exec::{decode_spawn, ExecCall, ExecImage, ExecRefusal, FileAction, SpawnFail, SpawnPlan, SpawnTxn};
 pub mod thread;
 pub mod kq;
 pub mod jit;
@@ -1095,6 +1095,17 @@ impl FdTable {
         self.slots[gfd as usize] = FdSlot::Closed;
         self.host[gfd as usize] = None;
         true
+    }
+
+    /// M54 t4: a spawn's `open` action put a plain open descriptor at `gfd` (growing the table if need
+    /// be) with `host` as its host mapping (record; replay passes `None`), and hands back the host
+    /// mapping it displaced, for the CALLER to close if it is > 2.
+    pub fn set_open(&mut self, gfd: u64, host: Option<i32>) -> Option<i32> {
+        self.grow_to(gfd as usize);
+        let displaced = self.host[gfd as usize];
+        self.slots[gfd as usize] = FdSlot::Open;
+        self.host[gfd as usize] = host;
+        displaced
     }
 
     pub fn slots(&self) -> Vec<FdSlot> { self.slots.clone() }

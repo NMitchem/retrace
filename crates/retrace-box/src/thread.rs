@@ -362,6 +362,9 @@ impl ThreadTable {
         self.threads[tid].pending |= Self::sig_bit(sig);
     }
 
+    /// M54 t4 (C5): drop `bits` (bit `sig - 1`) from `tid`'s pending set: the signals exec discards.
+    pub fn clear_pending_of(&mut self, tid: usize, bits: u32) { self.threads[tid].pending &= !bits; }
+
     pub fn pending_of(&self, tid: usize) -> u32 { self.threads[tid].pending }
 
     /// M17: the same question `take_deliverable` answers, WITHOUT clearing the bit.

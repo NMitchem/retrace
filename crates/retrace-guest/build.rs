@@ -391,12 +391,12 @@ fn main() {
 
     // M54 t3: the exec fixtures. execself_dyn, exec_target_dyn and fc_execve are arm64 dynamic programs;
     // exec_x86 is built for x86_64 only (natively it runs under Rosetta; retrace refuses an exec of it).
-    for (name, arch) in [("execself_dyn", "arm64"), ("exec_target_dyn", "arm64"), ("fc_execve", "arm64"), ("exec_x86", "x86_64")] {
+    for (name, arch) in [("execself_dyn", "arm64"), ("exec_target_dyn", "arm64"), ("fc_execve", "arm64"), ("fc_spawn_exec", "arm64"), ("exec_x86", "x86_64")] {
         let src = format!("{}/c/{name}.c", env!("CARGO_MANIFEST_DIR"));
         let bin = format!("{out}/{name}");
         println!("cargo:rerun-if-changed={src}");
         let status = Command::new("clang")
-            .args(["-arch", arch, "-o", &bin, &src])
+            .args(["-arch", arch, "-Wno-deprecated-declarations", "-o", &bin, &src])
             .status().unwrap_or_else(|e| panic!("clang {name}: {e}"));
         assert!(status.success(), "{name} guest build failed");
     }

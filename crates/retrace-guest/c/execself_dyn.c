@@ -9,8 +9,15 @@
 //   execself_dyn cloexec1               FD_CLOEXEC on fd 1: stage 2 reports 0/1/2 on stderr, its stdout is gone
 //   execself_dyn worker                 exec from a worker thread while main blocks in pthread_join
 //   execself_dyn pendmasked             a signal pending on a worker, masked in main: it survives exec
-//   execself_dyn workersig              the same, unmasked in main: native dies of SIGUSR2 as stage 2 starts;
-//                                       retrace refuses it by value (Ruling T3-a)
+//   execself_dyn workersig              the same, unmasked in main: native dies of SIGUSR2 as stage 2 starts (159),
+//                                       and so does retrace (C5, M54 t4)
+//   execself_dyn spawn                  M54 t4: the execve column through posix_spawn(POSIX_SPAWN_SETEXEC): SETSIGDEF{USR2},
+//                                       SETSIGMASK{INT}, an open, a dup2, a close and a chdir action (no pending signal)
+//   execself_dyn spawn-cxd              CLOEXEC_DEFAULT, inherit 0/1/2 and 22 (a pipe end), dup2(20, 29): 20 and 21 close
+//   execself_dyn spawn-hup              a pending, masked SIGHUP and SETSIGMASK(empty): natively the new image dies, exit 129
+//   execself_dyn spawn-refuse <attr> [target]
+//                                       setpgroup, setsid, resetids, noaslr, port, x86pref (and sched, suspended, flag 200)
+//   execself_dyn spawn-fail <n> [target] the failing spawn n (the table at spawn_fail below), its errno and the state after
 //   execself_dyn relpath <dir>          chdir to <dir>, then execve("./exec_target_dyn") (the target is there)
 //   execself_dyn bytes <target>         argv "\xff\xfe", env X=\x80 into the target
 //   execself_dyn pipe <target>          writes "hello" to a pipe whose read end is fd 20, then the target
@@ -20,6 +27,9 @@
 //   execself_dyn e2big <target>         an argument past native's 1 MiB limit: E2BIG
 //   execself_dyn bigargs <target>       an argument of 200 KB: past retrace's 128 KiB start-stack limit
 #include <errno.h>
+#include <spawn.h>
+#include <mach/mach.h>
+#include <sys/types.h>
 #include <stdint.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -98,6 +108,149 @@ static void do_exec(void) {
     exit(1);
 }
 
+// State for every row of 2b's execve column. Every tested descriptor sits at 20 or above.
+static void setup_state(int pend_hup) {
+    // Fill 3..19 with dups so each descriptor below lands where it is tested, 20 and up, from the open or
+    // pipe itself: `open(O_CLOEXEC)` is what exec is tested on, not a dup2 and an fcntl (Ruling T3-f).
+    for (int fd = 3; fd < 20; fd++) { if (dup(0) != fd) { printf("filler landed elsewhere\n"); exit(3); } }
+    int keep = open("/etc/hosts", O_RDONLY);                    // 20, survives
+    int cx = open("/etc/hosts", O_RDONLY | O_CLOEXEC);          // 21, closed by exec
+    int pp[2]; pipe(pp);                                        // 22, 23, survive
+    int kq = kqueue();                                          // 24, closed by exec
+    for (int fd = 3; fd < 20; fd++) close(fd);
+    dup2(1, 25);                                                // a console alias: open, FD_CLOEXEC clear
+    dup2(1, 26); fcntl(26, F_SETFD, FD_CLOEXEC);                // a console alias with FD_CLOEXEC: closed
+    printf("stage1 fds keep=%d cloexec=%d pipe=%d,%d kq=%d\n", keep, cx, pp[0], pp[1], kq);
+    signal(SIGUSR1, h); signal(SIGUSR2, SIG_IGN);
+    if (pend_hup) {
+        sigset_t m; sigemptyset(&m); sigaddset(&m, SIGHUP); sigprocmask(SIG_BLOCK, &m, 0);
+        kill(getpid(), SIGHUP);                                 // masked, so pending across exec
+    }
+    static char alt[65536]; stack_t ss = { .ss_sp = alt, .ss_size = sizeof alt }; sigaltstack(&ss, 0);
+    struct itimerval it = { .it_value = { .tv_sec = 100 } }; setitimer(ITIMER_REAL, &it, 0);
+    umask(027); chdir("/tmp");
+}
+
+// Replace this image with stage 2 (itself) through posix_spawn with `attr` and `fa`; returns only on failure.
+static void do_spawn(posix_spawnattr_t *attr, posix_spawn_file_actions_t *fa, const char *image) {
+    snprintf(tidarg, sizeof tidarg, "tid:%llu", (unsigned long long)tid_now());
+    snprintf(pidarg, sizeof pidarg, "pid:%d", (int)getpid());
+    char *nargv[] = { (char *)image, "stage2", (char *)kind, "a b", "", tidarg, pidarg, NULL };
+    char *nenv[] = { "X=carried", NULL };
+    fflush(stdout);
+    pid_t pid;
+    int rc = posix_spawn(&pid, image, fa, attr, nargv, nenv);
+    printf("spawn failed: errno=%d\n", rc);
+    fflush(stdout);
+}
+
+static int state(int fd) { return fcntl(fd, F_GETFD) >= 0; }
+
+// The spawn modes. Returns the exit status.
+static int spawn_modes(const char *mode, int argc, char **argv) {
+    posix_spawnattr_t attr; posix_spawn_file_actions_t fa;
+    posix_spawnattr_init(&attr); posix_spawn_file_actions_init(&fa);
+    sigset_t none, usr2, intr; sigemptyset(&none); sigemptyset(&usr2); sigaddset(&usr2, SIGUSR2); sigemptyset(&intr); sigaddset(&intr, SIGINT);
+    kind = mode;
+    if (strcmp(mode, "spawn") == 0) {
+        printf("stage1 kind=%s\n", kind);
+        setup_state(0);
+        posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETEXEC | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK);
+        posix_spawnattr_setsigdefault(&attr, &usr2);
+        posix_spawnattr_setsigmask(&attr, &intr);
+        posix_spawn_file_actions_addopen(&fa, 27, "/etc/hosts", O_RDONLY, 0);
+        posix_spawn_file_actions_adddup2(&fa, 20, 28);
+        posix_spawn_file_actions_addclose(&fa, 22);
+        posix_spawn_file_actions_addchdir(&fa, "/usr");
+        do_spawn(&attr, &fa, self);
+        return 1;
+    }
+    if (strcmp(mode, "spawn-cxd") == 0) {
+        printf("stage1 kind=%s\n", kind);
+        int a = open("/etc/hosts", O_RDONLY), b = open("/etc/hosts", O_RDONLY); int pp[2]; pipe(pp);
+        dup2(a, 20); close(a); dup2(b, 21); close(b); dup2(pp[0], 22); close(pp[0]); dup2(pp[1], 23); close(pp[1]);
+        posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETEXEC | POSIX_SPAWN_CLOEXEC_DEFAULT);
+        for (int fd = 0; fd < 3; fd++) posix_spawn_file_actions_addinherit_np(&fa, fd);
+        posix_spawn_file_actions_addinherit_np(&fa, 22);
+        posix_spawn_file_actions_adddup2(&fa, 20, 29);
+        do_spawn(&attr, &fa, self);
+        return 1;
+    }
+    if (strcmp(mode, "spawn-hup") == 0) {
+        printf("stage1 kind=%s\n", kind);
+        sigset_t m; sigemptyset(&m); sigaddset(&m, SIGHUP); sigprocmask(SIG_BLOCK, &m, 0);
+        kill(getpid(), SIGHUP);                                 // masked, so pending
+        posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETEXEC | POSIX_SPAWN_SETSIGMASK);
+        posix_spawnattr_setsigmask(&attr, &none);               // the new mask is empty: the pending HUP is taken at once
+        do_spawn(&attr, &fa, self);
+        return 1;
+    }
+    if (strcmp(mode, "spawn-refuse") == 0) {
+        const char *what = argc > 2 ? argv[2] : "";
+        const char *image = argc > 3 ? argv[3] : self;
+        short fl = POSIX_SPAWN_SETEXEC;
+        if (strcmp(what, "setpgroup") == 0) fl |= POSIX_SPAWN_SETPGROUP;
+        else if (strcmp(what, "setsid") == 0) fl |= POSIX_SPAWN_SETSID;
+        else if (strcmp(what, "resetids") == 0) fl |= POSIX_SPAWN_RESETIDS;
+        else if (strcmp(what, "noaslr") == 0) fl |= 0x100;
+        else if (strcmp(what, "sched") == 0) fl |= 0x10;
+        else if (strcmp(what, "flag200") == 0) fl |= 0x200;
+        posix_spawnattr_setflags(&attr, fl);
+        if (strcmp(what, "port") == 0) posix_spawnattr_setspecialport_np(&attr, mach_task_self(), TASK_BOOTSTRAP_PORT);
+        if (strcmp(what, "x86pref") == 0) { cpu_type_t t = CPU_TYPE_X86_64; size_t n; posix_spawnattr_setbinpref_np(&attr, 1, &t, &n); }
+        if (strcmp(what, "arm64pref") == 0) { cpu_type_t t = CPU_TYPE_ARM64; size_t n; posix_spawnattr_setbinpref_np(&attr, 1, &t, &n); }
+        printf("stage1 kind=%s\n", kind);
+        char *nargv[] = { (char *)image, "stage2", "refuse", NULL }; char *nenv[] = { NULL };
+        fflush(stdout);
+        pid_t pid;
+        int rc = posix_spawn(&pid, image, NULL, &attr, nargv, nenv);
+        printf("spawn failed: errno=%d\n", rc); fflush(stdout);
+        return 0;
+    }
+    if (strcmp(mode, "spawn-fail") == 0) {
+        int n = argc > 2 ? atoi(argv[2]) : 0;
+        const char *image = argc > 3 ? argv[3] : self;
+        // 1 open of a missing path, 2 close of a closed fd, 3 dup2 from a closed fd, 4 chdir to a missing
+        // directory, 5 fchdir of a bad fd, 6 a binpref for x86_64 against a plain arm64 image (EBADARCH),
+        // 7 close of a closed fd with a missing image (the action's errno beats the image),
+        // 8 every action succeeds, then the image is missing (nothing persists), 9 the same, then not executable.
+        char cwd0[1024]; getcwd(cwd0, sizeof cwd0);
+        int pp[2]; int a = open("/etc/hosts", O_RDONLY | O_CLOEXEC); dup2(a, 21); close(a); fcntl(21, F_SETFD, FD_CLOEXEC);
+        a = open("/etc/hosts", O_RDONLY); dup2(a, 20); close(a); pipe(pp); dup2(pp[0], 22); close(pp[0]); dup2(pp[1], 23); close(pp[1]);
+        posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETEXEC);
+        switch (n) {
+        case 1: posix_spawn_file_actions_addopen(&fa, 27, "/nonexistent/x", O_RDONLY, 0); break;
+        case 2: posix_spawn_file_actions_addclose(&fa, 77); break;
+        case 3: posix_spawn_file_actions_adddup2(&fa, 77, 27); break;
+        case 4: posix_spawn_file_actions_addchdir(&fa, "/nonexistent/dir"); break;
+        case 5: posix_spawn_file_actions_addfchdir_np(&fa, 77); break;
+        case 6: { cpu_type_t t = CPU_TYPE_X86_64; size_t k; posix_spawnattr_setbinpref_np(&attr, 1, &t, &k); } break;
+        case 7: posix_spawn_file_actions_addclose(&fa, 77); image = "/nonexistent/tgt"; break;
+        case 8: case 9:
+            posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETEXEC | POSIX_SPAWN_CLOEXEC_DEFAULT);
+            posix_spawn_file_actions_adddup2(&fa, 20, 27);
+            posix_spawn_file_actions_addopen(&fa, 28, "/etc/hosts", O_RDONLY, 0);
+            posix_spawn_file_actions_addclose(&fa, 22);
+            posix_spawn_file_actions_addchdir(&fa, "/usr");
+            for (int fd = 0; fd < 3; fd++) posix_spawn_file_actions_addinherit_np(&fa, fd);
+            image = n == 8 ? "/nonexistent/tgt" : "/etc/hosts";
+            break;
+        }
+        char *nargv[] = { (char *)image, "stage2", "fail", NULL }; char *nenv[] = { NULL };
+        fflush(stdout);
+        pid_t pid;
+        int rc = posix_spawn(&pid, image, &fa, &attr, nargv, nenv);
+        char cwd1[1024]; getcwd(cwd1, sizeof cwd1);
+        printf("spawn failed: errno=%d\n", rc);
+        printf("after: fd27=%s fd28=%s fd20=%s fd22=%s fd21cloexec=%d cwd_changed=%s\n", state(27) ? "open" : "closed",
+               state(28) ? "open" : "closed", state(20) ? "open" : "closed", state(22) ? "open" : "closed",
+               fcntl(21, F_GETFD) & FD_CLOEXEC, strcmp(cwd0, cwd1) ? "yes" : "no");
+        fflush(stdout);
+        return 0;
+    }
+    return 2;
+}
+
 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t c_ready = PTHREAD_COND_INITIALIZER, c_go = PTHREAD_COND_INITIALIZER;
 static int ready, go;
@@ -143,6 +296,9 @@ static void errs(const char *dir, const char *target) {
 int main(int argc, char **argv) {
     self = argv[0];
     if (argc > 1 && strcmp(argv[1], "stage2") == 0) { stage2(argc, argv); return 0; }
+    // A native run inherits its parent's dispositions (a `nohup`ed gate ignores SIGHUP); a retrace guest starts
+    // with every one SIG_DFL. The pending-HUP modes mean the default, so ask for it.
+    signal(SIGHUP, SIG_DFL);
     drop_stray();
     const char *mode = argc > 1 ? argv[1] : "execve";
     if (strcmp(mode, "chain") == 0) {
@@ -185,6 +341,7 @@ int main(int argc, char **argv) {
         execve(argv[2], nargv, nenv);
         printf("exec failed: errno=%d\n", errno); return 0;
     }
+    if (strncmp(mode, "spawn", 5) == 0) return spawn_modes(mode, argc, argv);
     kind = mode;
     printf("stage1 kind=%s\n", kind);
     if (strcmp(mode, "worker") == 0) {
@@ -202,24 +359,7 @@ int main(int argc, char **argv) {
     }
     if (strcmp(mode, "cloexec1") == 0) { fcntl(1, F_SETFD, FD_CLOEXEC); do_exec(); }
     // execve: state for every row of 2b's execve column.
-    int keep = open("/etc/hosts", O_RDONLY);                    // survives
-    int cx = open("/etc/hosts", O_RDONLY | O_CLOEXEC);          // closed by exec
-    int pp[2]; pipe(pp);                                        // survive
-    int kq = kqueue();                                          // closed by exec
-    // Move each to 20.. so stage 2 can check them without the stray's number in the way.
-    dup2(keep, 20); close(keep); dup2(cx, 21); close(cx); dup2(pp[0], 22); close(pp[0]); dup2(pp[1], 23); close(pp[1]);
-    dup2(kq, 24); close(kq);
-    keep = 20; cx = 21; pp[0] = 22; pp[1] = 23; kq = 24;
-    fcntl(21, F_SETFD, FD_CLOEXEC);                             // dup2 clears it; open(O_CLOEXEC)'s intent, restated
-    dup2(1, 25);                                                // a console alias: open, FD_CLOEXEC clear
-    dup2(1, 26); fcntl(26, F_SETFD, FD_CLOEXEC);                // a console alias with FD_CLOEXEC: closed
-    printf("stage1 fds keep=%d cloexec=%d pipe=%d,%d kq=%d\n", keep, cx, pp[0], pp[1], kq);
-    signal(SIGUSR1, h); signal(SIGUSR2, SIG_IGN);
-    sigset_t m; sigemptyset(&m); sigaddset(&m, SIGHUP); sigprocmask(SIG_BLOCK, &m, 0);
-    kill(getpid(), SIGHUP);                                     // masked, so pending across exec
-    static char alt[65536]; stack_t ss = { .ss_sp = alt, .ss_size = sizeof alt }; sigaltstack(&ss, 0);
-    struct itimerval it = { .it_value = { .tv_sec = 100 } }; setitimer(ITIMER_REAL, &it, 0);
-    umask(027); chdir("/tmp");
+    setup_state(1);
     do_exec();
     return 1;
 }

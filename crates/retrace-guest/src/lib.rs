@@ -248,6 +248,8 @@ pub const EXEC_TARGET_DYN: &str = concat!(env!("OUT_DIR"), "/exec_target_dyn");
 pub const EXEC_X86: &str = concat!(env!("OUT_DIR"), "/exec_x86");
 /// M54 t3: tier-1 `fc_execve`: `execve(argv[1], {argv[1], "a b", ""}, environ + X=fc)`.
 pub const FC_EXECVE: &str = concat!(env!("OUT_DIR"), "/fc_execve");
+/// M54 t4: tier-1 `fc_spawn_exec`: SETEXEC `posix_spawn` of `argv[1]` with dup2/close actions, CLOEXEC_DEFAULT, inherit 0/1/2.
+pub const FC_SPAWN_EXEC: &str = concat!(env!("OUT_DIR"), "/fc_spawn_exec");
 /// M45: libdispatch's workqueue-kqueue init (`kevent_qos` 374), issued by hand after a
 /// `dispatch_async`. `argv[1]` selects `straddle`, `flags` or `badptr`; see the source's header.
 pub const KQINIT_DYN: &str = concat!(env!("OUT_DIR"), "/kqinit_dyn");

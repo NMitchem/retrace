@@ -11,7 +11,8 @@
 //   into guest memory on record and captured in no `Event`. Replay restored stale bytes there and
 //   the guest — correctly — reported `bad marshal data (unknown type code)`. `bigread_e2e` is the
 //   repo-owned regression guard for that mechanism; this test is the capability gate above it.
-// - `the_launcher_records_and_replays_its_own_posix_spawn_failure` points at the launcher shim
+// - `the_launcher_execs_the_interpreter_and_prints_1` (M54 t4; it pinned the launcher's own `posix_spawn` failure until
+//   exec-in-place was modelled, and the history below is that old gap) points at the launcher shim
 //   `python3` resolves to on PATH, and it RUNS from this commit onward — but it pins a KNOWN GAP,
 //   not a capability. The launcher's job is to `posix_spawn` (syscall 244, `POSIX_SPAWN_SETEXEC`)
 //   the real interpreter binary in its place so the process gets a proper bundle identity;
@@ -59,53 +60,22 @@ fn the_real_cpython_interpreter_records_and_replays() {
 }
 
 #[test]
-fn the_launcher_records_and_replays_its_own_posix_spawn_failure() {
+fn the_launcher_execs_the_interpreter_and_prints_1() {
     if !std::path::Path::new(LAUNCHER).exists() {
         util::announce(&format!(
-            "SKIPPED the_launcher_records_and_replays_its_own_posix_spawn_failure: {LAUNCHER} \
+            "SKIPPED the_launcher_execs_the_interpreter_and_prints_1: {LAUNCHER} \
              not found (expected a Homebrew `python@3.14` install). This gate did NOT run — it is \
              not evidence of anything."
         ));
         return;
     }
-    // Can't use `assert_rung_records_and_replays` here: it demands exit(0), and this guest's own
-    // correct behavior (given exec-in-place is unmodelled) is to exit 1.
-    let (rec, trace) = util::record_dynamic_args(LAUNCHER, &["-c", "print(1)"]);
-
-    // The guest's own exit. Exit 4 is retrace's own RECORD ERROR and 139 is a crash, so this
-    // discriminates against both of those as well as against a clean success.
-    assert_eq!(
-        rec.code, 1,
-        "launcher should exit 1 via pythonw.c's err(1, ...) path after its posix_spawn is \
-         refused (M38) and returns an error instead of replacing the image. stderr:\n{}",
-        rec.stderr
-    );
-
-    // The load-bearing assertion. Exit code 1 alone is a code a weaker failure would also
-    // produce; only the guest's own error text proves it actually ran pythonw.c's err(1, ...)
-    // path rather than failing for some unrelated reason that happens to also exit 1.
-    //
-    // M51 §3e: the text is on `rec.stderr`, where the program wrote it, beside the recorder's own
-    // `retrace: refused:` line. Before M51 retrace merged the program's fd 2 into its stdout.
-    assert!(
-        rec.stderr.contains("posix_spawn"),
-        "expected the guest's own posix_spawn error text on stderr, got: {}",
-        rec.stderr
-    );
-
-    // Replay must reproduce the exit and the guest's fd-2 error text. Replay prints no refusal
-    // line (it never meets the refusal), so its stderr is the program's text alone.
-    let rep = util::replay(&trace);
-    assert_eq!(rep.code, rec.code, "replay exit code diverged from the recording");
-    assert_eq!(rep.stdout, rec.stdout, "replay stdout diverged from the recording");
-    assert!(rep.stderr.contains("posix_spawn"), "replay must reproduce the guest's stderr text, got: {}", rep.stderr);
-    // The program's whole stderr, not only the word, with retrace's own `retrace:` lines set aside (replay
-    // prints no refusal line, and the closing line is retrace's).
-    let program = |s: &str| s.lines().filter(|l| !l.starts_with("retrace:")).collect::<Vec<_>>().join("\n");
-    assert_eq!(program(&rep.stderr), program(&rec.stderr), "replay must reproduce the program's stderr in full");
-
-    // M38: the posix_spawn is REFUSED now, not forwarded — the refusal line is the only thing
-    // that distinguishes the two, since the errno the guest reads was chosen to match (spec R4).
-    assert!(rec.stderr.contains("retrace: refused: posix_spawn (syscall 244), returned EFAULT"),
-        "the launcher's posix_spawn must be refused by the M38 arm, not forwarded. stderr:\n{}", rec.stderr);
+    // M54 t4: the launcher's `posix_spawn(POSIX_SPAWN_SETEXEC)` replaces the image with the real interpreter,
+    // which prints 1 and exits 0. `assert_rung_records_and_replays_env` demands exactly that stdout and exit 0
+    // and replays TWICE, each equal to the recording.
+    let (_, stderr) = util::assert_rung_records_and_replays_env(LAUNCHER, &["-c", "print(1)"], b"1\n", &[]);
+    // The difference this work makes: before M54 t4 the spawn was refused (M38's EFAULT) and the launcher
+    // exited 1 with a `retrace: refused: posix_spawn` line; a recording that execs has neither.
+    // (The interpreter itself still prints a `mach_msg2` refusal line of its own, as it does when run directly.)
+    assert!(!stderr.contains("refused: posix_spawn"), "no posix_spawn refusal line: the spawn execs. stderr:\n{stderr}");
+    assert!(!stderr.contains("posix_spawn"), "the launcher's own error text is gone. stderr:\n{stderr}");
 }

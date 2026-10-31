@@ -1896,6 +1896,44 @@ pub fn spawn_is_setexec(desc_flags: Option<u16>) -> bool {
     desc_flags.is_some_and(|f| f & POSIX_SPAWN_SETEXEC != 0)
 }
 
+/// M54 t4: the `psa_flags` bits a SETEXEC spawn accepts (t0 §M3, SDK `spawn.h`).
+pub const POSIX_SPAWN_SETSIGDEF: u16 = 0x0004;
+pub const POSIX_SPAWN_SETSIGMASK: u16 = 0x0008;
+pub const POSIX_SPAWN_CLOEXEC_DEFAULT: u16 = 0x4000;
+/// `cpu_type_t` "any", the cputype `posix_spawnattr_setbinpref_np` takes for no preference.
+pub const CPU_TYPE_ANY: u32 = u32::MAX;
+
+/// M54 t4: the name of one `psa_flags` bit that retrace refuses (every one runs natively under SETEXEC,
+/// so these are model gaps, never a claim about macOS), or `None` for a bit that is accepted.
+pub fn spawn_refused_flag_name(bit: u16) -> Option<String> {
+    Some(match bit {
+        0x0001 => "POSIX_SPAWN_RESETIDS".to_string(),
+        0x0002 => "POSIX_SPAWN_SETPGROUP".to_string(),
+        0x0010 => "POSIX_SPAWN_SETSCHEDPARAM".to_string(),
+        0x0020 => "POSIX_SPAWN_SETSCHEDULER".to_string(),
+        0x0080 => "POSIX_SPAWN_START_SUSPENDED".to_string(),
+        0x0100 => "_POSIX_SPAWN_DISABLE_ASLR".to_string(),
+        0x0400 => "POSIX_SPAWN_SETSID".to_string(),
+        POSIX_SPAWN_SETEXEC | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_CLOEXEC_DEFAULT => return None,
+        b => format!("flag {b:#x}"),
+    })
+}
+
+/// M54 t4 (C5): what a pending signal does when exec lets it through at the new image's start, by the
+/// signal's DEFAULT action. `default_action` is the one table the box has; it knows three ignored signals,
+/// so the stop signals and the default-ignored SIGCONT, SIGIO and SIGINFO are classed here, over it,
+/// rather than in a second table of defaults.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecRelease { Ignore, Stop, Terminate }
+
+pub fn exec_release_class(sig: u64) -> ExecRelease {
+    match sig {
+        17 | 18 | 21 | 22 => ExecRelease::Stop,          // SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU
+        19 | 23 | 29 => ExecRelease::Ignore,             // SIGCONT, SIGIO, SIGINFO
+        s => match default_action(s) { DefaultAction::Ignore => ExecRelease::Ignore, DefaultAction::Terminate => ExecRelease::Terminate },
+    }
+}
+
 /// M47 §3e: `fork` (2) is REFUSED, never forwarded, with `EAGAIN` (35), the errno `fork(2)`
 /// documents for a process limit reached, so the guest takes a failure path libc and its callers
 /// already have (R2): libc's `fork` calls `cerror`, then its parent handlers, and returns −1

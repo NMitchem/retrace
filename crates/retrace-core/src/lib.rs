@@ -3,7 +3,7 @@ pub mod symbols;
 mod exec;
 
 use std::path::Path;
-use retrace_box::ExecRefusal;
+use retrace_box::{ExecRefusal, SpawnFail};
 use std::rc::Rc;
 use retrace_box::{Box_, FaultAction, Stage2, Stop};
 use retrace_trace::{Writer, Event, Region};
@@ -1850,38 +1850,61 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                 }
                 let call = match b.read_exec_call(num, args) {
                     Ok(c) => c,
-                    Err(ExecRefusal::Errno(e)) => {
-                        // Until task 4 a SETEXEC `posix_spawn` is unmodelled and answers EFAULT, as M38 did, with
-                        // the same refusal line (cpython_e2e's launcher test pins it). An `execve`'s errno is
-                        // native's own answer, so it prints nothing.
-                        if num == retrace_arch::SYS_POSIX_SPAWN {
-                            say_err(&retrace_arch::refused_line(&retrace_arch::syscall_display(num), "EFAULT"));
-                        }
-                        append_refused(&mut w, &mut b, &mut count, num, args, e, true, thread)?;
-                        continue;
-                    }
-                    Err(ExecRefusal::Wall(m)) => return Err(m),
-                };
-                // The kernel finds and checks the file first and copies the argument strings in after.
-                let resolved = match exec::resolve(&call) {
-                    Ok(r) => r,
                     Err(ExecRefusal::Errno(e)) => { append_refused(&mut w, &mut b, &mut count, num, args, e, true, thread)?; continue; }
                     Err(ExecRefusal::Wall(m)) => return Err(m),
                 };
+                // M54 t4 (C1, Ruling T4-b): a SETEXEC spawn's actions come first, on a scratch table with their
+                // host half done transactionally (`SpawnTxn`): the first failure is the call's errno and the
+                // image is never looked at; a later failure rolls the host half back. Nothing persists.
+                let mut txn = match call.spawn.as_ref().map(|p| b.spawn_actions_host(p)) {
+                    None => None,
+                    Some(Ok(t)) => Some(t),
+                    Some(Err(SpawnFail::Errno(_, e))) => { append_refused(&mut w, &mut b, &mut count, num, args, e, true, thread)?; continue; }
+                    Some(Err(SpawnFail::Wall(m))) => return Err(m),
+                };
+                macro_rules! undo { () => { if let Some(t) = txn.take() { t.rollback(); } } }
+                // The kernel finds and checks the file first and copies the argument strings in after.
+                let resolved = match exec::resolve(&call) {
+                    Ok(r) => r,
+                    Err(ExecRefusal::Errno(e)) => { undo!(); append_refused(&mut w, &mut b, &mut count, num, args, e, true, thread)?; continue; }
+                    Err(ExecRefusal::Wall(m)) => { undo!(); return Err(m) }
+                };
                 match call.args_refusal.clone() {
-                    Some(ExecRefusal::Errno(e)) => { append_refused(&mut w, &mut b, &mut count, num, args, e, true, thread)?; continue; }
-                    Some(ExecRefusal::Wall(m)) => return Err(m),
+                    Some(ExecRefusal::Errno(e)) => { undo!(); append_refused(&mut w, &mut b, &mut count, num, args, e, true, thread)?; continue; }
+                    Some(ExecRefusal::Wall(m)) => { undo!(); return Err(m) }
                     None => {}
                 }
-                if let Some(m) = b.exec_release_wall() { return Err(m); }
-                // The close set is the host kernel's answer, recorded (Ruling 3).
-                let closed = b.cloexec_on_host();
-                let img = exec::image(&call, &resolved.image, &resolved.dylinker, &closed)
+                // C5: a stop signal the new image would take is a wall, decided before anything is appended; the
+                // terminating one is known now too, and ends the run after the `Exec` landmark (native ran the
+                // exec and its new image died).
+                let release = match b.exec_release_check(call.spawn.as_ref()) {
+                    Ok(r) => r,
+                    Err(m) => { undo!(); return Err(m) }
+                };
+                // The close set is the host kernel's answer, recorded (Ruling 3); a spawn's is over the post-action table.
+                let closed = match &txn { Some(t) => t.closed.clone(), None => b.cloexec_on_host() };
+                let mut img = exec::image(&call, &resolved.image, &resolved.dylinker, &closed)
                     .unwrap_or_else(|m| panic!("exec: resolve accepted an image it cannot load: {m}"));
+                if let Some(t) = &txn { img.host_new = t.host_new.clone(); }
                 w.append(&Event::Exec { num, args, path: call.path.clone(), image: resolved.image, script: resolved.script,
                                         dylinker: resolved.dylinker, closed, thread })
                     .map_err(|e| format!("append exec: {e}"))?; count += 1;
                 b.exec_image(&img).map_err(|u| u.marked())?;
+                if let Some(t) = txn.take() { t.commit(); }
+                if let Some(sig) = b.take_exec_release().map_err(|u| u.marked())? {
+                    assert_eq!(Some(sig), release, "exec: the release the check computed is the one taken");
+                    // TERMINAL, as a raised fatal signal is: the event, the final snapshot, break. The pc is the
+                    // new image's entry and the thread tag its only thread's.
+                    let pc = b.position();
+                    let final_snap = b.snapshot();
+                    let nthread = b.threads().current() as u32;
+                    w.append(&Event::Signal { sig, pc, thread: nthread })
+                        .map_err(|e| format!("append signal: {e}"))?; count += 1;
+                    w.append(&final_snap).map_err(|e| format!("append final snapshot: {e}"))?; count += 1;
+                    outcome = Outcome::Signal { sig };
+                    break;
+                }
+                assert_eq!(release, None, "exec: the release the check computed is the one taken");
                 // The new image's `task_self_trap` teaches the name again.
                 guest_task_port = None;
             }
@@ -4112,6 +4135,14 @@ impl ReplaySession {
                                 return Err(Divergence { landmark: self.idx, pc, detail: u.marked() });
                             }
                             self.guest_task_port = None;
+                            // C5, the mirror of record's release: the same `Box_` method on the same state.
+                            let released = self.b.take_exec_release()
+                                .map_err(|u| Divergence { landmark: self.idx, pc, detail: u.marked() })?;
+                            if let Some(sig) = released {
+                                self.idx += 1;
+                                let npc = self.b.position();
+                                return self.signal_terminal(sig, npc);
+                            }
                             return self.finish_event();
                         }
                         other => return Err(Divergence { landmark: self.idx, pc,

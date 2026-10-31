@@ -21,12 +21,47 @@ fn wall(what: impl Into<String>) -> ExecRefusal { ExecRefusal::Wall(retrace_arch
 
 fn errno_of(e: &std::io::Error) -> ExecRefusal { ExecRefusal::Errno(e.raw_os_error().unwrap_or(EACCES as i32) as u64) }
 
+const EBADARCH: u64 = 86;
+
+/// What a binary preference (`posix_spawnattr_setbinpref_np`, `setarchpref_np`) decides about an image's slices
+/// (t4 addendum D, from t0 §M3's table).
+enum Pick {
+    /// Run the slice at this index; `None` is the default choice (arm64e, else arm64) over the whole file.
+    Index(Option<usize>),
+    /// `EBADARCH`: no slice satisfies the preference.
+    NoArch,
+    /// A preference for a cputype the image has and retrace cannot run (Rosetta): a wall.
+    Rosetta(u32),
+}
+
+/// Entry 0 decides (entries 1..3 are unset by `decode_spawn`). Unset, `CPU_TYPE_ANY`, and `CPU_TYPE_ARM64` with
+/// no subtype (-1) take the default choice. `CPU_TYPE_ARM64` with a subtype takes the arm64 slice whose
+/// cpusubtype, capability byte masked off, equals it, else `EBADARCH`. A non-arm64 cputype is `EBADARCH` when
+/// no slice has it and a wall when one does. `slices` is `(cputype, cpusubtype)` per slice.
+fn select(pref: (u32, i32), slices: &[(u32, u32)]) -> Pick {
+    let (cpu, sub) = pref;
+    if cpu == 0 || cpu == retrace_arch::CPU_TYPE_ANY || (cpu == retrace_arch::CPU_TYPE_ARM64 && sub == -1) {
+        return Pick::Index(None);
+    }
+    if cpu == retrace_arch::CPU_TYPE_ARM64 {
+        return match slices.iter().position(|&(c, s)| c == cpu && (s & 0x00ff_ffff) as i32 == sub) {
+            Some(i) => Pick::Index(Some(i)),
+            None => Pick::NoArch,
+        };
+    }
+    if slices.iter().any(|&(c, _)| c == cpu) { Pick::Rosetta(cpu) } else { Pick::NoArch }
+}
+
+fn rosetta(cpu: u32) -> ExecRefusal {
+    wall(format!("posix_spawn with a binary preference for CPU type {cpu:#x}, an architecture retrace does not run (needs Rosetta)"))
+}
+
 fn le32(b: &[u8], o: usize) -> u32 { u32::from_le_bytes(b[o..o + 4].try_into().unwrap()) }
 fn be32(b: &[u8], o: usize) -> u32 { u32::from_be_bytes(b[o..o + 4].try_into().unwrap()) }
 
-/// The `(cputype, offset, size)` of each slice of a fat file, or `None` for a table that does not fit the
+/// The `(cputype, cpusubtype, offset, size)` of each slice of a fat file, or `None` for a table that does not fit the
 /// file (a `0xcafebabe` that is not a universal binary, such as a Java class, is not one).
-fn fat_slices(b: &[u8]) -> Option<Vec<(u32, usize, usize)>> {
+fn fat_slices(b: &[u8]) -> Option<Vec<(u32, u32, usize, usize)>> {
     let is64 = be32(b, 0) == retrace_arch::FAT_MAGIC_64;
     let (stride, n) = (if is64 { 32 } else { 20 }, be32(b, 4) as usize);
     if n > 64 || 8 + n * stride > b.len() { return None; }
@@ -36,7 +71,7 @@ fn fat_slices(b: &[u8]) -> Option<Vec<(u32, usize, usize)>> {
             (u64::from_be_bytes(b[e + 8..e + 16].try_into().unwrap()) as usize,
              u64::from_be_bytes(b[e + 16..e + 24].try_into().unwrap()) as usize)
         } else { (be32(b, e + 8) as usize, be32(b, e + 12) as usize) };
-        (off.checked_add(size)? <= b.len()).then(|| (be32(b, e), off, size))
+        (off.checked_add(size)? <= b.len()).then(|| (be32(b, e), be32(b, e + 4), off, size))
     }).collect()
 }
 
@@ -75,19 +110,31 @@ pub fn resolve(call: &ExecCall) -> Result<Resolved, ExecRefusal> {
     let fat = be32(&bytes, 0) == retrace_arch::FAT_MAGIC || be32(&bytes, 0) == retrace_arch::FAT_MAGIC_64;
     let thin = le32(&bytes, 0) == 0xfeed_facf;
     if !fat && !thin { return Err(ExecRefusal::Errno(ENOEXEC)); }
+    let pref = call.spawn.as_ref().map_or((0, -1), |p| p.binpref);
     let slice: &[u8] = if thin {
-        match le32(&bytes, 4) {
-            retrace_arch::CPU_TYPE_ARM64 => &bytes,
-            CPU_TYPE_X86_64 => return Err(wall("execve of an x86_64-only image (needs Rosetta)")),
-            t => return Err(wall(format!("execve of a Mach-O for CPU type {t:#x}, and retrace runs arm64 programs only"))),
+        let (cpu, sub) = (le32(&bytes, 4), le32(&bytes, 8));
+        match select(pref, &[(cpu, sub)]) {
+            Pick::Index(_) => match cpu {
+                retrace_arch::CPU_TYPE_ARM64 => &bytes,
+                CPU_TYPE_X86_64 => return Err(wall("execve of an x86_64-only image (needs Rosetta)")),
+                t => return Err(wall(format!("execve of a Mach-O for CPU type {t:#x}, and retrace runs arm64 programs only"))),
+            },
+            Pick::NoArch => return Err(ExecRefusal::Errno(EBADARCH)),
+            Pick::Rosetta(c) => return Err(rosetta(c)),
         }
     } else {
         let Some(slices) = fat_slices(&bytes) else { return Err(ExecRefusal::Errno(ENOEXEC)) };
-        match retrace_guest::try_slice_native(&bytes) {
-            Ok(s) => s,
-            Err(_) if slices.iter().any(|&(cpu, _, _)| cpu == CPU_TYPE_X86_64) =>
-                return Err(wall("execve of an x86_64-only image (needs Rosetta)")),
-            Err(_) => return Err(wall("execve of a universal binary with no arm64 slice, and retrace runs arm64 programs only")),
+        let list: Vec<(u32, u32)> = slices.iter().map(|&(c, s, _, _)| (c, s)).collect();
+        match select(pref, &list) {
+            Pick::Index(Some(i)) => { let (_, _, off, size) = slices[i]; &bytes[off..off + size] }
+            Pick::Index(None) => match retrace_guest::try_slice_native(&bytes) {
+                Ok(s) => s,
+                Err(_) if slices.iter().any(|&(cpu, _, _, _)| cpu == CPU_TYPE_X86_64) =>
+                    return Err(wall("execve of an x86_64-only image (needs Rosetta)")),
+                Err(_) => return Err(wall("execve of a universal binary with no arm64 slice, and retrace runs arm64 programs only")),
+            },
+            Pick::NoArch => return Err(ExecRefusal::Errno(EBADARCH)),
+            Pick::Rosetta(c) => return Err(rosetta(c)),
         }
     };
     if slice.len() < 32 || le32(slice, 0) != 0xfeed_facf || le32(slice, 12) != MH_EXECUTE { return Err(ExecRefusal::Errno(ENOEXEC)); }
@@ -110,7 +157,7 @@ pub fn image(call: &ExecCall, image: &[u8], dylinker: &[u8], closed: &[u32]) -> 
     let exe = retrace_guest::try_parse_macho(image).map_err(|why| format!("the exec image {why}"))?;
     let dyld = retrace_guest::try_parse_macho(dylinker).map_err(|why| format!("the exec image's dynamic linker {why}"))?;
     Ok(ExecImage { exe, dylinker: dyld, argv: call.argv.clone(), envp: call.envp.clone(),
-                   exec_path: call.path.clone(), closed: closed.to_vec(), spawn: call.spawn.clone() })
+                   exec_path: call.path.clone(), closed: closed.to_vec(), spawn: call.spawn.clone(), host_new: Vec::new() })
 }
 
 #[cfg(test)]
