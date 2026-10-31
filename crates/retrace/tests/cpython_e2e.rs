@@ -18,7 +18,7 @@
 //   exec-in-place is unmodelled in retrace today, so the `posix_spawn` is refused (M38) with the
 //   errno the forward used to return — before M38 it was forwarded and EFAULTed on its
 //   untranslated guest `argv`/`envp`; now `record_box`'s exec arm returns that same errno without
-//   forwarding (`retrace_arch::exec_refusal_errno`, spec R4 continuity) — instead of replacing
+//   forwarding (M38's refusal, spec R4 continuity; M54 task 3 left it: the SETEXEC spawn answers EFAULT through the exec arm until task 4) — instead of replacing
 //   the image, and the guest takes `pythonw.c`'s `err(1, …)` path and prints
 //   "posix_spawn: …: Undefined error: 0" before exiting 1. Record and replay
 //   agreeing byte-for-byte on THAT outcome is retrace working correctly — the divergence oracle

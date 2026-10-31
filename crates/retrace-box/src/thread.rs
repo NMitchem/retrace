@@ -236,6 +236,43 @@ impl ThreadTable {
         }
     }
 
+    /// M54 t3: the id `reset_for_exec` will give the new image's thread (an exited thread's id is never
+    /// reused, so it is the one `spawn` would assign next).
+    pub fn next_id(&self) -> u64 { self.next_id }
+
+    /// M54 t3 (Ruling T0-i): what is pending on the process's only thread after exec: the union (a set)
+    /// of every thread's pending signals, M17's pends on blocked threads and M53's process-directed pends
+    /// on main among them, less `ignored` (bit `sig - 1`), the signals that are `SIG_IGN` after exec. An
+    /// ignored signal is dropped at generation, so the subtraction is defensive.
+    pub fn exec_pending(&self, ignored: u32) -> u32 {
+        self.threads.iter().fold(0u32, |m, t| m | t.pending) & !ignored
+    }
+
+    /// M54 t3 (Ruling T3-a): the lowest signal pending after exec that the caller's mask, which the new
+    /// thread keeps, does not block. Natively the new image takes it as soon as it starts. `None` when
+    /// every pending signal stays masked.
+    pub fn exec_unmasked_pending(&self, caller: usize, ignored: u32) -> Option<u64> {
+        let open = self.exec_pending(ignored) & !self.threads[caller].mask;
+        (open != 0).then(|| u64::from(open.trailing_zeros()) + 1)
+    }
+
+    /// M54 t3 (spec 3d): exec. The caller becomes the only thread: at table index 0, running, holding
+    /// `ctx` (the new image's start state) and the fresh id `next_id` (returned). Every other thread is
+    /// dropped with its context and blocked state. The caller's mask is kept; its pending set becomes
+    /// `exec_pending(ignored)`; its alternate stack, SPRR view, `redirected` and `frame_mask` reset.
+    pub fn reset_for_exec(&mut self, caller: usize, ctx: ThreadCtx, ignored: u32) -> u64 {
+        let pending = self.exec_pending(ignored);
+        let mask = self.threads[caller].mask;
+        let id = self.next_id;
+        self.next_id += 1;
+        self.threads = vec![Thread {
+            id, ctx, state: ThreadState::Runnable, stack: (0, 0), mask, pending,
+            altstack: None, redirected: false, sprr: 0, frame_mask: None,
+        }];
+        self.current = 0;
+        id
+    }
+
     pub fn current(&self) -> usize { self.current }
     pub fn id_of(&self, tid: usize) -> u64 { self.threads[tid].id }
     pub fn len(&self) -> usize { self.threads.len() }
@@ -674,6 +711,56 @@ mod tests {
         t.exit_current(0);
         let d = t.spawn(ThreadCtx::zeroed(), (0, 0));
         assert_eq!(t.id_of(d), MAIN_THREAD_ID + 4, "an exited thread's id is not reused");
+    }
+
+    // M54 t3 (spec 3d): exec leaves the caller as the only thread, at index 0, with a fresh id from `next_id`.
+    #[test]
+    fn exec_leaves_one_thread_at_index_0_with_a_fresh_id() {
+        let mut t = ThreadTable::new(ThreadCtx::zeroed());
+        t.spawn(ThreadCtx::zeroed(), (0, 0));
+        let caller = t.spawn(ThreadCtx::zeroed(), (0, 0));
+        assert_eq!(caller, 2);
+        t.switch_to(caller);
+        t.set_mask_of(caller, retrace_arch::SIG_BLOCK, 1 << 6);
+        t.set_altstack_of(caller, Some((1, 2, 0)));
+        t.set_sprr_of(caller, 5);
+        t.set_redirected(caller, true);
+        t.set_frame_mask(caller, 7);
+        let want = t.next_id();
+        assert_eq!(want, MAIN_THREAD_ID + 3);
+        let mut ctx = ThreadCtx::zeroed();
+        ctx.regs.pc = 0x1234;
+        let id = t.reset_for_exec(caller, ctx, 0);
+        assert_eq!(id, want, "the id the table promised");
+        assert_eq!((t.len(), t.current()), (1, 0), "one thread, at index 0, running");
+        assert_eq!(t.id_of(0), want);
+        assert_eq!(t.next_id(), want + 1, "next_id advanced");
+        assert_eq!(t.ctx_of(0).regs.pc, 0x1234, "the new context");
+        assert_eq!(t.mask_of(0), 1 << 6, "the caller's mask is kept");
+        assert_eq!(t.state_of(0), ThreadState::Runnable);
+        assert_eq!((t.altstack_of(0), t.sprr_of(0), t.is_redirected(0), t.frame_mask_of(0)), (None, 0, false, None),
+            "altstack, sprr, redirected and frame_mask reset");
+    }
+
+    // Ruling T0-i: a signal pending on a dropped thread is not lost; the survivor holds the union of every
+    // thread's pending set, less what the dispositions after exec ignore.
+    #[test]
+    fn exec_gives_the_survivor_the_union_of_every_threads_pending_less_ignored() {
+        let mut t = ThreadTable::new(ThreadCtx::zeroed());
+        let w = t.spawn(ThreadCtx::zeroed(), (0, 0));
+        let w2 = t.spawn(ThreadCtx::zeroed(), (0, 0));
+        t.pend(0, 1);   // main's own
+        t.pend(w, 30);  // a worker's
+        t.pend(w2, 31); // another worker's, which is ignored after exec
+        t.pend(w2, 1);  // already pending on main: a set, not a count
+        t.set_mask_of(w, retrace_arch::SIG_BLOCK, (1 << 29) | (1 << 0));
+        let ignored = 1u32 << 30; // signal 31
+        assert_eq!(t.exec_pending(ignored), (1 << 0) | (1 << 29), "the union less the ignored");
+        assert_eq!(t.exec_unmasked_pending(w, ignored), None, "signals 1 and 30 are both blocked by the caller's mask, so nothing is taken at once");
+        assert_eq!(t.exec_unmasked_pending(0, ignored), Some(1), "main's mask is empty: signal 1 would be taken at once");
+        t.reset_for_exec(w, ThreadCtx::zeroed(), ignored);
+        assert_eq!(t.pending_of(0), (1 << 0) | (1 << 29));
+        assert_eq!(t.mask_of(0), (1 << 29) | (1 << 0), "the caller's mask, not main's");
     }
 
     #[test]

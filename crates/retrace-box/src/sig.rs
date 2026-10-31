@@ -72,6 +72,26 @@ impl SigTable {
     pub fn set_action(&mut self, sig: u64, a: SigAction) -> SigAction {
         std::mem::replace(&mut self.disp[Self::idx(sig)], a)
     }
+
+    /// M54 t3 (spec 2b): what exec does to the dispositions. A caught handler becomes `SIG_DFL` with its
+    /// mask, flags and trampoline cleared (xnu's `execsigs`); `SIG_IGN` and `SIG_DFL` stay; and each
+    /// signal `sigdefault` names (bit `sig - 1`, SETSIGDEF) becomes `SIG_DFL`, an ignore included.
+    pub fn reset_for_exec(&mut self, sigdefault: u32) {
+        for sig in 1..NSIG {
+            let a = &mut self.disp[sig];
+            if matches!(a.disp, Disposition::Handler(_)) || sigdefault & (1 << (sig - 1)) != 0 {
+                *a = SigAction::default();
+            }
+        }
+    }
+
+    /// M54 t3: the signals (bit `sig - 1`) that are `SIG_IGN` once exec has reset the table with
+    /// `sigdefault`. Pure: it does not change the table, so the record arm can ask it before the point of
+    /// no return.
+    pub fn ignored_after_exec(&self, sigdefault: u32) -> u32 {
+        (1..NSIG).filter(|&sig| self.disp[sig].disp == Disposition::Ign && sigdefault & (1 << (sig - 1)) == 0)
+            .fold(0u32, |m, sig| m | 1 << (sig - 1))
+    }
 }
 
 /// Decode the ACT argument: `struct __sigaction`, 24 bytes (`sys/signal.h:277`).
@@ -330,6 +350,26 @@ mod tests {
         for sig in 1..32u64 {
             assert_eq!(t.action(sig).disp, Disposition::Dfl, "sig {sig}");
         }
+    }
+
+    // M54 t3 (spec 2b): a caught handler becomes SIG_DFL at exec, SIG_IGN stays, SIG_DFL stays, and every
+    // signal SETSIGDEF names becomes SIG_DFL (an ignore included).
+    #[test]
+    fn exec_resets_dispositions_as_xnu() {
+        let mut t = SigTable::default();
+        let act = |disp| SigAction { disp, tramp: 0x7000, mask: 3, flags: 4 };
+        t.set_action(30, act(Disposition::Handler(0x1_0000)));
+        t.set_action(31, act(Disposition::Ign));
+        t.set_action(1, act(Disposition::Ign));
+        t.set_action(2, act(Disposition::Handler(0x2_0000)));
+        t.reset_for_exec(1 << 0); // SETSIGDEF names signal 1
+        assert_eq!(t.action(30), SigAction::default(), "a handler is SIG_DFL with its mask, flags and trampoline cleared");
+        assert_eq!(t.action(31).disp, Disposition::Ign, "SIG_IGN stays");
+        assert_eq!(t.action(31).tramp, 0x7000, "an ignored action is kept as it was");
+        assert_eq!(t.action(1).disp, Disposition::Dfl, "a sigdefault bit resets even an ignore");
+        assert_eq!(t.action(2).disp, Disposition::Dfl, "a handler is SIG_DFL");
+        assert_eq!(t.action(3).disp, Disposition::Dfl, "SIG_DFL stays");
+        assert_eq!(t.ignored_after_exec(0), 1 << 30, "signal 31's bit; signal 1's ignore was reset above");
     }
 
     #[test]

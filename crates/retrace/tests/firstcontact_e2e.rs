@@ -79,6 +79,9 @@ const ROWS: &[Row] = &[
     // M54 t2: a posix_spawn that starts a child is a ProcessCreation wall (was M38's EFAULT).
     Row { name: "fc_spawn_child", bin: retrace_guest::FC_SPAWN_CHILD, args: &[],
           expect: Expect::Refused("retrace: unsupported: posix_spawn of a child process (syscall 244)") },
+    // M54 t3: the program replaces itself with the target through a plain execve (argv with a space and an empty
+    // argument, X=fc added to the environment); the target prints what it was given.
+    Row { name: "fc_execve", bin: retrace_guest::FC_EXECVE, args: &[retrace_guest::EXEC_TARGET_DYN], expect: Expect::Pass },
     // M51 §3f: the program gets the recorder's environment, which is ENV, as native gets it.
     Row { name: "fc_env", bin: retrace_guest::FC_ENV, args: &["one", "two words"], expect: Expect::Pass },
     // M51 (R8): __builtin_trap(), the brk class without swiftc. Joins in Task 3, where it passes (C9).

@@ -167,12 +167,12 @@ fn a_pipe_readv_with_a_later_unreachable_entry_ends_the_recording_at_one_clean_l
 #[test]
 fn an_older_trace_is_refused_by_name() {
     // M53 moved the format to RT\x00\x0f: a recording made before it (RT\x00\x0e) holds an EFAULT where
-    // a writev was forwarded untranslated.
+    // a writev was forwarded untranslated. M54 moved it on to RT\x00\x10, the magic the refusal names now.
     let t = std::env::temp_dir().join(format!("retrace-iovec-{}-old.bin", std::process::id()));
     std::fs::write(&t, b"RT\x00\x0erest-of-a-pre-M53-trace").unwrap();
     let rep = util::run_bounded(util::bin(), &["replay", t.to_str().unwrap()], &[], BOUND);
     assert!(rep.stderr.contains("recorded by a different retrace trace format (not torn)"), "{}", rep.stderr);
-    assert!(rep.stderr.contains(r"RT\x00\x0e") && rep.stderr.contains(r"RT\x00\x0f"),
+    assert!(rep.stderr.contains(r"RT\x00\x0e") && rep.stderr.contains(r"RT\x00\x10"),
         "the refusal names both magics: {}", rep.stderr);
     assert_ne!(rep.code, Some(0), "a refused trace does not replay");
     let _ = std::fs::remove_file(&t);

@@ -240,9 +240,14 @@ pub const PIPE_DYN: &str = concat!(env!("OUT_DIR"), "/pipe_dyn");
 pub const DUPFD_DYN: &str = concat!(env!("OUT_DIR"), "/dupfd_dyn");
 /// M38: `fstatat(AT_FDCWD, ".")` — prints `ok` when the sentinel passes through translation.
 pub const ATFDCWD_DYN: &str = concat!(env!("OUT_DIR"), "/atfdcwd_dyn");
-/// M38: `execve` then `posix_spawn(SETEXEC)`; prints the errno each returns — both are refused,
-/// never forwarded.
-pub const EXEC_DYN: &str = concat!(env!("OUT_DIR"), "/exec_dyn");
+/// M54 t3: the exec fixture: stage 1 sets state and execs itself as stage 2, in the modes `execself_dyn.c`'s header lists.
+pub const EXECSELF_DYN: &str = concat!(env!("OUT_DIR"), "/execself_dyn");
+/// M54 t3: the image the exec fixtures replace themselves with; it prints its argv, `X`, descriptors and fd 5's pipe.
+pub const EXEC_TARGET_DYN: &str = concat!(env!("OUT_DIR"), "/exec_target_dyn");
+/// M54 t3: an x86_64-only program (`puts("x86")`): an exec of it is refused by name.
+pub const EXEC_X86: &str = concat!(env!("OUT_DIR"), "/exec_x86");
+/// M54 t3: tier-1 `fc_execve`: `execve(argv[1], {argv[1], "a b", ""}, environ + X=fc)`.
+pub const FC_EXECVE: &str = concat!(env!("OUT_DIR"), "/fc_execve");
 /// M45: libdispatch's workqueue-kqueue init (`kevent_qos` 374), issued by hand after a
 /// `dispatch_async`. `argv[1]` selects `straddle`, `flags` or `badptr`; see the source's header.
 pub const KQINIT_DYN: &str = concat!(env!("OUT_DIR"), "/kqinit_dyn");
@@ -669,13 +674,6 @@ mod tests {
     fn atfdcwd_guest_parses() {
         // M38: proves the build.rs wiring and the path constant; behaviour is atfdcwd_e2e's.
         let l = parse_macho(&std::fs::read(ATFDCWD_DYN).unwrap());
-        assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
-    }
-
-    #[test]
-    fn exec_guest_parses() {
-        // M38: proves the build.rs wiring and the path constant; behaviour is exec_e2e's.
-        let l = parse_macho(&std::fs::read(EXEC_DYN).unwrap());
         assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
     }
 

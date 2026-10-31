@@ -10,6 +10,8 @@ pub use cache::AuthSlot;
 use cache::{walk_page, CacheMeta, DEFAULT_CACHE_PATH};
 
 mod sig;
+mod exec;
+pub use exec::{ExecCall, ExecImage, ExecRefusal, SpawnPlan};
 pub mod thread;
 pub mod kq;
 pub mod jit;
@@ -9513,6 +9515,24 @@ mod stack_geometry_tests {
         assert_eq!(word(sp + 64), 0, "envp's terminator");
         assert_eq!(cstr(sp + 72), b"executable_path=/bin/prog".to_vec(), "apple[0] follows");
         assert_eq!(start_args_bytes(&argv_s, &envp), (10 + 4 + 4 + 6 + 3) + 5 * 8 + 16, "strings with NULs, one pointer each, two terminators");
+    }
+
+    // M54 t3 (Task 1's owed test): exec's `executable_path=` is the path argument as the guest passed it,
+    // which is neither argv[0] nor a resolved path (Ruling T0-c), so the stack carries the two apart.
+    #[test]
+    fn the_start_stack_carries_executable_path_apart_from_argv0() {
+        let (host, len) = alloc_pages(DYN_STACK_SIZE as usize);
+        let stack = Backing { host, ipa: DYN_STACK_TOP - DYN_STACK_SIZE, len };
+        let argv = [b"argv-zero".to_vec(), b"x".to_vec()];
+        let sp = Box_::build_start_stack(&stack, &argv, &[], b"./tgt", EXE_BASE);
+        let at = |a: u64| unsafe { host.add((a - stack.ipa) as usize) };
+        let word = |a: u64| u64::from_le_bytes(unsafe { std::slice::from_raw_parts(at(a), 8) }.try_into().unwrap());
+        let cstr = |a: u64| unsafe { std::ffi::CStr::from_ptr(at(word(a)) as *const std::ffi::c_char) }.to_bytes().to_vec();
+        assert_eq!(word(sp + 8), 2, "argc");
+        assert_eq!((cstr(sp + 16), cstr(sp + 24)), (b"argv-zero".to_vec(), b"x".to_vec()), "argv[0] stays what the guest passed");
+        // argv terminator at +32, envp terminator at +40, apple[0] at +48.
+        assert_eq!((word(sp + 32), word(sp + 40)), (0, 0));
+        assert_eq!(cstr(sp + 48), b"executable_path=./tgt".to_vec(), "apple[0] is the path argument, as given");
     }
 
     // Fail loud, never default: a snapshot naming no stack we recognize must not silently answer

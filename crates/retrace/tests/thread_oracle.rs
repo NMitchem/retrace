@@ -453,3 +453,24 @@ fn retag_fixture_where_and_expect_divergence(guest: &str, argv: &[&str], what: &
     assert!(rep.stderr.contains("the schedule diverged"),
         "the divergence must be the THREAD oracle's, not merely some divergence; stderr:\n{}", rep.stderr);
 }
+
+/// M54 t3 (spec 3h): `Event::Exec` is a new landmark variant whose replay arm consumes it and returns, so it
+/// carries an eighth `verify_thread`. Retag an exec landmark, made from a worker thread so the recorded tag is
+/// nonzero, to another genuinely live thread (main, which is blocked in `pthread_join`) and replay must
+/// refuse it. With the arm's check deleted the replay accepts the wrong-thread trace and exits 0.
+#[test]
+fn a_wrong_thread_on_an_exec_landmark_is_a_divergence() {
+    let (rec, trace) = util::record_dynamic_args(retrace_guest::EXECSELF_DYN, &["worker"]);
+    assert_eq!(rec.code, 0, "clean exit; stderr:\n{}", rec.stderr);
+    let mut events = retrace_trace::Reader::open(&trace).unwrap();
+    let i = events.iter().position(|e| matches!(e, Event::Exec { .. })).expect("an Exec landmark");
+    let orig = match &events[i] { Event::Exec { thread, .. } => *thread, _ => unreachable!() };
+    assert_eq!(orig, 1, "the worker made the call: a nonzero tag, which this test needs");
+    if let Event::Exec { thread, .. } = &mut events[i] { *thread = 0; }
+    let mut w = retrace_trace::Writer::create(&trace).unwrap();
+    for e in &events { w.append(e).unwrap(); }
+    drop(w);
+    let rep = util::replay(&trace);
+    assert_eq!(rep.code, 3, "CLI exit 3 is the Divergence convention; stderr:\n{}", rep.stderr);
+    assert!(rep.stderr.contains("schedule diverged"), "the detail names the schedule; stderr:\n{}", rep.stderr);
+}

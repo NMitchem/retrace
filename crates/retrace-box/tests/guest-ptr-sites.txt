@@ -44,7 +44,6 @@ crates/retrace-core/src/lib.rs	record_box	apply_and_return	covered: prepare_repl
 crates/retrace-core/src/lib.rs	record_box	apply_and_return	covered: prepare_reply sigpending out set, written only when the page passes; a bad set is swallowed natively
 crates/retrace-core/src/lib.rs	record_box	read_guest	covered: prepare_forward_pointers sigaltstack new stack
 crates/retrace-core/src/lib.rs	record_box	apply_and_return	covered: prepare_forward_pointers sigaltstack old stack write (a Ptr it checks writable)
-crates/retrace-core/src/lib.rs	record_box	apply_and_return	internal: execve and posix_spawn refusal, no writes
 crates/retrace-core/src/lib.rs	record_box	apply_and_return	internal: fork refusal, no writes
 crates/retrace-core/src/lib.rs	record_box	apply_and_return	internal: madvise MADV_ZERO regions, which guest_madvise validated the range for before computing them
 crates/retrace-core/src/lib.rs	record_box	apply_and_return	internal: __mac_syscall out_ipa, computed and validated by guest_mac_syscall; a refusal records no write
@@ -75,7 +74,6 @@ crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies
 crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies a recorded Region list (or the empty list); the regions were checked or recomputed on record
 crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies a recorded Region list (or the empty list); the regions were checked or recomputed on record
 crates/retrace-core/src/lib.rs	advance	read_guest	covered: mach2_unreachable replay mirror of the forwarded guard body read
-crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies a recorded Region list (or the empty list); the regions were checked or recomputed on record
 crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies a recorded Region list (or the empty list); the regions were checked or recomputed on record
 crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies a recorded Region list (or the empty list); the regions were checked or recomputed on record
 crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies a recorded Region list (or the empty list); the regions were checked or recomputed on record
