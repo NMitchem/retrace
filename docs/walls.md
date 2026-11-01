@@ -71,14 +71,11 @@ it. What still stops here, each line starting `M55:` and naming the call and its
 - on a guest socket end, `shutdown`, `sendmsg` (any: its msghdr iovec is not translated; with control data an `SCM_RIGHTS` descriptor would also carry a
   host number), `sendmsg_x`, and `setsockopt` of `SO_SNDBUF`, `SO_RCVBUF`, `SO_SNDLOWAT` or `SO_RCVLOWAT`,
   because the model's buffer constants would go stale (`… on guest socket fd N is not modelled`);
-- a blocking `recv` with `MSG_WAITALL` for more bytes than are held, on a guest socket end whose peer is open, which would wait
-  for another thread to send the rest (`… with MSG_WAITALL would wait for N more bytes …`);
 - `fcntl(F_SETFL)` on a guest pipe or socket end with a status flag beyond `O_NONBLOCK`, `O_APPEND` and
   `O_ASYNC` (`M55: fcntl(F_SETFL, 0x…) on guest fd N: a status flag … is not modelled`);
-- a guest end whose byte count the model lost, for example after a read that returned more than it counted
-  (`M55: socket N: the byte count is unknown`);
-- every other socket call: `socket`, `bind`, `connect`, `listen` and `accept` stop as unmodelled calls
-  (`bind (syscall 104)`). tokio's TCP and Unix listener tests stop at `bind`.
+- `bind`, `listen` and `accept`, which have no row (`bind (syscall 104)`). `socket` and `connect` are forwarded, but a
+  descriptor they make is not a guest end, so waiting on it stops under [Threads](#threads). tokio's TCP and Unix
+  listener tests stop at `bind`.
 
 The successors are network sockets and datagram pairs.
 
@@ -141,8 +138,8 @@ The program used a signal in a way retrace does not model yet. These reach it to
   (`psynch_mutexwait`), `poll`, `select` or `pselect`, or a parked workqueue thread (`M55: a handled signal
   (SIGUSR1) to thread N, blocked in psynch_cvwait: delivery there is not modelled`). Natively the signal is
   delivered at once and the wait returns early; the kernel's return for a condition variable or mutex carries
-  an effect on its sequence word that retrace does not reproduce. A tokio program whose runtime thread
-  waits in a condition variable when the signal arrives reaches this;
+  an effect on its sequence word that retrace does not reproduce. A multi-thread tokio program that
+  signals itself while `main` waits in `block_on` reaches this (`tk_kill_mt`): a process-directed signal goes to main first;
 - a hardware fault on a thread that has its signal blocked, which the program did not survive natively either;
 - `kill` with a signal other than 0 to another process;
 - `terminate_with_payload`, which ends a process by its pid;
@@ -186,7 +183,9 @@ larger than the free room (65536 bytes for a pipe from empty, 8192 per direction
 `M55: read on guest pipe fd N would wait for another thread to write` (or `write of N bytes on guest socket fd
 M would wait for another thread to read`, `… blocking I/O between threads is not modelled`). Natively the
 call blocks until another thread feeds or drains the end and then completes. Setting `O_NONBLOCK` first (tokio
-and mio do) avoids it. The successor is a block-and-retry model, which would make the blocked thread
+and mio do) avoids it. Two more walls land here: a blocking `recv` with `MSG_WAITALL` for more bytes than are held, on a
+guest socket end whose peer is open (`… with MSG_WAITALL would wait for N more bytes …`), and a guest end whose byte count
+the model lost, for example after a read that returned more than it counted (`M55: socket N: the byte count is unknown`). The successor is a block-and-retry model, which would make the blocked thread
 runnable when the call can complete.
 
 A handled signal that arrives while a thread waits in `poll`, a condition variable or a mutex stops the
@@ -199,9 +198,9 @@ One case is special: every thread is blocked and nothing is left to wake any of 
 program would hang forever, so the line says so. Since M53 it also names a thread blocked in `sigsuspend`
 (`thread N waits in sigsuspend for a signal nothing can send`), which is what a `pause()` with no timer and no
 sender is. If the same program does not hang outside
-retrace, that is a bug in retrace; please report it. One exception is a known limit, not a bug: a thread
-blocked in `poll` or a wait while it holds a signal it cannot take (K8), for example `alarm(n)`
-followed by an infinite `poll`, also ends here. Natively that call returns `EINTR`.
+retrace, that is a bug in retrace; please report it. Before M55 a thread blocked in `poll` or a wait with a signal it
+could not take also ended here; since M55 a handled signal to such a thread is refused at the raise instead (see
+[Signals](#signals)).
 
 A program that spins forever waiting for another thread, without blocking, is not a wall: it hangs
 under retrace, where natively the other thread would run on another core. retrace cannot tell a spin from slow work by anything in the

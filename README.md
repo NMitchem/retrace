@@ -86,8 +86,8 @@ behind it. These are the ones you'll hit first:
   cold), which stops at that wall; run the tool itself or select the Command Line Tools.
 - Command-line programs only. XPC service lookups, I/O Kit and GUI frameworks aren't modelled, and
   kqueue, `poll` and `select` readiness cover only a program's own pipes and `socketpair`s, so nothing that waits on a
-  network socket, a terminal or an inherited descriptor runs; a tokio program that listens or connects stops at
-  `bind` or `socket`. A blocking read or write that has to wait for another thread to feed or drain a pipe or
+  network socket, a terminal or an inherited descriptor runs; a tokio program that listens stops at `bind`,
+  and one that connects stops when it first waits on its socket. A blocking read or write that has to wait for another thread to feed or drain a pipe or
   socket stops at a wall, and so does a handled signal sent to a thread blocked in a condition variable or mutex.
 - A syscall or Mach message retrace has no model for stops the recording with one line naming
   it, `retrace: unsupported: …`, and exit status 4; [`docs/walls.md`](docs/walls.md) explains each
