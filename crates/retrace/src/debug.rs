@@ -728,6 +728,7 @@ impl<'a> Exec<'a> {
     /// instructions REMAINING from the current step K to the window end (i.e. window_len − K), which
     /// equals the full window length only when stepped from K = 0.
     pub(crate) fn cmd_stepi<W: Write>(&mut self, count: u64, out: &mut W) -> Result<Halt, String> {
+        if count > 0 { if let Some(h) = self.step_at_pending_terminal(out)? { return Ok(h); } }
         let res = self.sess_mut().step_insns(count);
         match res {
             // An arrival (R4) only if it moved: `stepi 0` stands still, so the cursor stays (§3b).
@@ -762,6 +763,17 @@ impl<'a> Exec<'a> {
                 self.phase = p0;
                 Ok(Halt::Refused(head.to_string()))
             }
+        }
+    }
+
+    /// Fix round 2 of final fix 2 (N1): at a position where a C5 terminal is pending (an exec that released a fatal
+    /// signal, parked at its exec stop `(n, 0)`), the process is already dead natively, so a forward step runs
+    /// nothing: it reports the terminal as `continue` does and the cursor stays at `(n, 0)`. `None` anywhere else.
+    fn step_at_pending_terminal<W: Write>(&mut self, out: &mut W) -> Result<Option<Halt>, String> {
+        if self.sess().terminal_pending().is_none() { return Ok(None); }
+        match self.sess_mut().advance().map_err(|d| format!("step diverged at landmark {} pc {:#x}: {}", d.landmark, d.pc, d.detail))? {
+            Advance::Exited(report) => self.park_at_terminal(report, out).map(Some),
+            _ => Err("step: a pending terminal did not end the run".into()),
         }
     }
 
@@ -1064,6 +1076,7 @@ impl<'a> Exec<'a> {
     /// An instruction that branches to itself (`b .`) does retire with its pc unchanged and is
     /// `Stepped`: that is one real instruction, and lldb loops on it on a live target too.
     pub(crate) fn step_thread<W: Write>(&mut self, t: u32, out: &mut W) -> Result<Halt, String> {
+        if let Some(h) = self.step_at_pending_terminal(out)? { return Ok(h); }
         let cur = self.sess().current_thread();
         if t != cur {
             // M44 B6(b): a live thread that is not running is run to until it is — the blocked

@@ -4500,6 +4500,10 @@ impl ReplaySession {
     /// `k` retire (no silent clamp; the length substring is a UX contract the reverse-stepi relies
     /// on). The session is spent on Err — the guest is parked mid-window with `k` unsatisfied.
     pub fn step_insns(&mut self, k: u64) -> Result<(), String> {
+        // N1: no instruction of the new image runs before a pending C5 terminal; its window is empty.
+        if k > 0 && self.terminal_pending().is_some() {
+            return Err(format!("window {} ends after 0 instruction(s); cannot step {k}", self.idx));
+        }
         for done in 0..k {
             loop {
                 match self.b.step() {

@@ -378,3 +378,32 @@ fn a_bare_argv0_still_names_the_new_epochs_image_by_executable_path() {
     assert!(after.contains(retrace_guest::EXEC_TARGET_DYN), "named by the path the kernel used: {after}");
     let _ = std::fs::remove_file(&t);
 }
+
+/// Fix round 2 of final fix 2 (N1): natively the process is killed at the exec, so no instruction of the new image
+/// runs. A forward step from the exec stop reports the terminal and the position stays `(n, 0)`.
+#[test]
+fn a_step_at_a_pending_terminal_reports_it_and_runs_nothing() {
+    let (t, _path) = record_hup();
+    let n = exec_n(&t);
+    let out = dbg(&t, "continue; stepi; where; stepi 3; where");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.iter().filter(|l| **l == "guest terminated by signal 1").count(), 2, "each step reports the terminal:\n{out}");
+    let wh: Vec<&&str> = lines.iter().filter(|l| l.starts_with("at (")).collect();
+    assert_eq!(wh.len(), 2, "{out}");
+    assert!(wh.iter().all(|l| l.starts_with(&format!("at ({n}, 0) ")) && !l.contains("__dyld_start+0x")), "no instruction ran:\n{out}");
+    let _ = std::fs::remove_file(&t);
+}
+
+#[test]
+fn the_gdbserver_step_at_a_pending_terminal_gives_the_signal_terminal() {
+    use util::rsp::Rsp;
+    let (t, _path) = record_hup();
+    let n = exec_n(&t);
+    let mut c = Rsp::spawn(&t, &[]);
+    assert!(c.send("c").contains("reason:exec;"));
+    let end = c.send("s");
+    assert_eq!(util::rsp::description(&end).as_deref(), Some("guest terminated by signal 1"), "{end}");
+    assert!(end.starts_with("T01"), "{end}");
+    assert!(c.where_().starts_with(&format!("at ({n}, 0) ")), "{}", c.where_());
+    let _ = std::fs::remove_file(&t);
+}
