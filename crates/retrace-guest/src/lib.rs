@@ -321,6 +321,13 @@ pub const SIGBLOCKED_DYN: &str = concat!(env!("OUT_DIR"), "/sigblocked_dyn");
 /// M55 t1: a Unix stream socket pair by mode — `pair`, `flow`, `big`, `eof`, `level`, `poll`, `select`,
 /// `dup2console`, `execeof`, `shapes`, `dgram`, `refusals <which>`, `worker` (see the source's header).
 pub const SOCKPAIR_DYN: &str = concat!(env!("OUT_DIR"), "/sockpair_dyn");
+/// M55 t4: a blocking read or write on a guest pipe or socket that would wait for another thread, by mode:
+/// `pipe`, `sock`, `pipewrite`, `sockwrite`, `nonblock`, `dontwait`, `fitswrite` (see the source's header).
+pub const BLOCKIO_DYN: &str = concat!(env!("OUT_DIR"), "/blockio_dyn");
+/// M55 t4: a write to a pipe with no reader, SIGPIPE at its default: ends with 141.
+pub const FC_SIGPIPE: &str = concat!(env!("OUT_DIR"), "/fc_sigpipe");
+/// M55 t4: std's `UnixStream::pair()`, nonblocking, a round trip, one end dropped.
+pub const FC_RS_SOCKPAIR: &str = concat!(env!("OUT_DIR"), "/fc_rs_sockpair");
 /// M55 t1 tier-1 `fc_sockpair`: a nonblocking pair, one message each way, a kqueue level wait, EOF.
 pub const FC_SOCKPAIR: &str = concat!(env!("OUT_DIR"), "/fc_sockpair");
 /// M52 §3i: main spins on a flag a created thread would set; natively it exits 0 at once, under

@@ -14,6 +14,11 @@
 //   maskedsem    main masks SIGUSR1 and waits on a semaphore; the signal rides through the wake and
 //                its handler runs at the unmask
 //   maskedkevent the same through kevent
+//   pipehandler  (M55 t4, p0/pipethread.c) main in pthread_join; a worker writes to a pipe whose reader is closed. SIGPIPE
+//                is process-directed: its handler runs on MAIN, after the worker's write has returned EPIPE;
+//                si_code is 0 and si_pid the process's own
+//   pipemainmask the same with SIGPIPE masked on main (the worker unmasks it): the worker takes it
+//   pipedfl      the same with SIGPIPE at its default: the process dies with 141 while main is blocked
 #include <errno.h>
 #include <mach/mach.h>
 #include <pthread.h>
@@ -93,6 +98,24 @@ static void *killer(void *a) {
     return NULL;
 }
 
+static int pipefds[2], pipe_unmask;
+static volatile int pran, pon_main, pcode, ppid;
+static void ph(int s, siginfo_t *si, void *uc) {
+    (void)s; (void)uc;
+    pran++; pon_main = pthread_equal(pthread_self(), mainth); pcode = si->si_code; ppid = si->si_pid;
+}
+static void *pipe_writer(void *a) {
+    (void)a;
+    if (pipe_unmask) { sigset_t s; sigemptyset(&s); sigaddset(&s, SIGPIPE); pthread_sigmask(SIG_UNBLOCK, &s, NULL); }
+    usleep(20000);
+    errno = 0;
+    ssize_t r = write(pipefds[1], "x", 1);
+    printf("worker: write r=%zd errno=%d ran=%d\n", r, errno, pran);
+    fflush(stdout);
+    usleep(20000);
+    return NULL;
+}
+
 static void mask_usr1(int how) {
     sigset_t s;
     sigemptyset(&s);
@@ -149,6 +172,23 @@ int main(int argc, char **argv) {
         pthread_join(w, NULL);
         printf("%s: n=%d errno=%d then=%d handled=%d on_main=%d\n", mode, n, e, n2, handled, on_main);
         frame();
+    } else if (!strncmp(mode, "pipe", 4)) {
+        if (strcmp(mode, "pipedfl")) {
+            struct sigaction ps;
+            memset(&ps, 0, sizeof ps);
+            ps.sa_sigaction = ph;
+            ps.sa_flags = SA_SIGINFO;
+            sigaction(SIGPIPE, &ps, NULL);
+        }
+        if (!strcmp(mode, "pipemainmask")) {
+            sigset_t s; sigemptyset(&s); sigaddset(&s, SIGPIPE); pthread_sigmask(SIG_BLOCK, &s, NULL);
+            pipe_unmask = 1;
+        }
+        pipe(pipefds);
+        close(pipefds[0]);
+        pthread_create(&w, NULL, pipe_writer, NULL);
+        pthread_join(w, NULL);
+        printf("main: joined ran=%d on_main=%d si_code=%#x si_pid_is_self=%d\n", pran, pon_main, pcode, ppid == getpid());
     } else if (!strcmp(mode, "term")) {
         pthread_create(&w, NULL, killer, NULL);
         pthread_join(w, NULL);

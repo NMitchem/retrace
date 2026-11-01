@@ -44,7 +44,7 @@ int main(int argc, char **argv) {
         pause();
     } else if (!strcmp(mode, "socketpair")) {
         int sv[2];
-        socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+        socketpair(AF_UNIX, SOCK_DGRAM, 0, sv);  // M55: a stream pair is modelled; a datagram pair is the wall
     } else if (!strcmp(mode, "pollfile")) {
         // M53 t4 (C1): poll on a regular file is outside the pipe model, refused by value.
         struct pollfd f = {open("/etc/hosts", O_RDONLY), POLLIN, 0};

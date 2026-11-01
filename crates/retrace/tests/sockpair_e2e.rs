@@ -74,6 +74,24 @@ fn the_peer_closing_gives_eof_then_epipe() {
     assert_eq!(out, "write 2\nread 2\nread 0\nwrite -1 errno=32\n");
 }
 
+/// M55 t4 (spec §3f): the same with SIGPIPE at its default disposition: the last write ends the process, as
+/// native, with 141 and the output flushed before it. The recording ends at a terminal `Event::Signal`.
+#[test]
+fn the_default_sigpipe_on_a_socket_ends_the_process_with_141() {
+    let (ncode, nout) = native(&["eofdfl"]);
+    assert_eq!(ncode, Some(141), "native dies of SIGPIPE");
+    let (rec, trace) = record(&["eofdfl"], BOUND);
+    assert_eq!((rec.code, String::from_utf8_lossy(&rec.stdout).into_owned()), (Some(141), nout.clone()), "stderr:\n{}", rec.stderr);
+    assert_eq!(nout, "write 2\nread 2\nread 0\n");
+    for k in 1..=2 {
+        let rp = util::run_bounded(util::bin(), &["replay", trace.to_str().unwrap()], &[], BOUND);
+        assert_eq!((rp.code, rp.stdout.as_slice()), (Some(141), rec.stdout.as_slice()), "replay {k}: {}", rp.stderr);
+    }
+    let ev = retrace_trace::Reader::open(&trace).unwrap();
+    let last = ev.iter().rev().find(|e| !matches!(e, Event::Snapshot { .. })).unwrap();
+    assert!(matches!(last, Event::Signal { sig: 13, .. }), "the terminal is SIGPIPE: {last:?}");
+}
+
 #[test]
 fn a_level_triggered_knote_follows_the_bytes() {
     let (out, _) = records_as_native(&["level"]);

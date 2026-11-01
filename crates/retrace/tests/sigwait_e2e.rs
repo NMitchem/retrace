@@ -120,3 +120,36 @@ fn a_masked_signal_rides_through_a_kevent_wake() {
     let (out, _) = records_as_native("maskedkevent");
     assert_eq!(out, "maskedkevent: n=1 handled=0\nafter unmask: handled=1 on_main=1\n");
 }
+
+// M55 Task 4 (spec §3f; t0 `p0/pipethread`, T0-nosigpipe): a write that returns EPIPE on a guest pipe or socket
+// end raises SIGPIPE, as a process-directed signal with `si_code` 0 and `si_pid` the process's own. Before M55
+// the write returned EPIPE and nothing was raised: the host's SIGPIPE went to the recorder, which ignores it.
+
+#[test]
+fn sigpipe_reaches_a_joining_main_as_native() {
+    let (out, trace) = records_as_native("pipehandler");
+    assert_eq!(out, "worker: write r=-1 errno=32 ran=0\nmain: joined ran=1 on_main=1 si_code=0 si_pid_is_self=1\n");
+    let ev = events(&trace);
+    assert!(ev.iter().any(|e| matches!(e, Event::SignalDelivery { sig: 13, thread: 0, .. })),
+        "the handler was delivered to main, not the writer");
+}
+
+#[test]
+fn sigpipe_reaches_the_writer_when_main_masks_it() {
+    let (out, trace) = records_as_native("pipemainmask");
+    assert_eq!(out, "worker: write r=-1 errno=32 ran=1\nmain: joined ran=1 on_main=0 si_code=0 si_pid_is_self=1\n");
+    let ev = events(&trace);
+    assert!(ev.iter().any(|e| matches!(e, Event::SignalDelivery { sig: 13, thread, .. } if *thread != 0)),
+        "the handler was delivered to the writer");
+}
+
+#[test]
+fn a_default_sigpipe_ends_the_process_with_141() {
+    let (out, trace) = records_as_native("pipedfl");
+    assert_eq!(out, "", "the worker never prints after its write");
+    let native = util::run_bounded(retrace_guest::SIGBLOCKED_DYN, &["pipedfl"], &[], BOUND);
+    assert_eq!(native.code, Some(141), "native dies of SIGPIPE");
+    let ev = events(&trace);
+    let last = ev.iter().rev().find(|e| !matches!(e, Event::Snapshot { .. })).unwrap();
+    assert!(matches!(last, Event::Signal { sig: 13, thread, .. } if *thread != 0), "the terminal is SIGPIPE, tagged with the writer: {last:?}");
+}

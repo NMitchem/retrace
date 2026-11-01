@@ -6,6 +6,7 @@
 //   sockpair_dyn pair        return 0, B - A is 1, A is the lowest free, F_GETFL 0x2, F_GETFD 0
 //   sockpair_dyn flow        3 bytes each way, FIONREAD on each end, the reads
 //   sockpair_dyn big         nonblocking: a 16384-byte write returns 8192, reads of 1000 sum 8192
+//   sockpair_dyn eofdfl      as eof with SIGPIPE at its default: the last write ends the process, exit 141
 //   sockpair_dyn eof         the peer closed with 2 unread: reads 2 then 0, a write is EPIPE (SIGPIPE ignored)
 //   sockpair_dyn level       the level-triggered kevent sequence of the spec's 2b
 //   sockpair_dyn poll        poll's revents for each state and each requested bit
@@ -102,6 +103,20 @@ static int mode_eof(void) {
     printf("read %zd\n", read(sv[1], buf, sizeof buf));
     ssize_t w = write(sv[1], "x", 1);
     printf("write %zd errno=%d\n", w, errno);
+    return 0;
+}
+
+/* eofdfl: eof with SIGPIPE at its default disposition: the final write ends the process (141). Flushed
+ * line by line, since a killed process loses what stdio holds. */
+static int mode_eofdfl(void) {
+    mk();
+    printf("write %zd\n", write(sv[0], "ab", 2)); fflush(stdout);
+    close(sv[0]);
+    char buf[8];
+    printf("read %zd\n", read(sv[1], buf, sizeof buf)); fflush(stdout);
+    printf("read %zd\n", read(sv[1], buf, sizeof buf)); fflush(stdout);
+    ssize_t w = write(sv[1], "x", 1);
+    printf("not reached %zd\n", w);
     return 0;
 }
 
@@ -569,6 +584,7 @@ int main(int argc, char **argv) {
     if (!strcmp(m, "flow")) return mode_flow();
     if (!strcmp(m, "big")) return mode_big();
     if (!strcmp(m, "eof")) return mode_eof();
+    if (!strcmp(m, "eofdfl")) return mode_eofdfl();
     if (!strcmp(m, "level")) return mode_level();
     if (!strcmp(m, "poll")) return mode_poll();
     if (!strcmp(m, "select")) return mode_select();

@@ -35,6 +35,38 @@ pub const SOCK_LOWAT: u64 = 2048;
 /// add's flags verbatim (`detect`: `0x21`).
 pub const ADD_FLAGS_RETURNED: u16 = !EV_SYSFLAGS;
 
+/// The most a blocking write to an empty guest pipe completes at once (T0-blockwrite: 65536 from the first
+/// write, measured; a socket direction is `SOCK_CAPACITY`). It is NOT `PIPE_SIZE`, which answers a different
+/// question: the `data` of `EVFILT_WRITE` on an empty pipe (16384). The two disagree on purpose.
+pub const PIPE_WRITE_CAPACITY: u64 = 65536;
+
+/// What a guest pipe or socket end is to a blocking call (M55 3g, 3f).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IoEnd {
+    pub socket: bool,
+    /// A read call can use this end / a write call can use it. A socket end is both.
+    pub readable: bool,
+    pub writable: bool,
+    /// Bytes this end has to read. `None` once the model lost the count.
+    pub unread: Option<u64>,
+    /// Bytes already held in the buffer a write on this end fills.
+    pub held: Option<u64>,
+    /// What a blocking write can complete: `capacity - held`.
+    pub capacity: u64,
+    pub other_open: bool,
+    pub nonblock: bool,
+    pub nosigpipe: bool,
+}
+
+/// The refusal for a guest end whose byte count the model lost (the pipe and socket spellings).
+pub fn lost_count(fd: u64, socket: bool) -> String {
+    if socket { sock_lost(fd) } else {
+        retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
+            "M48: pipe {fd}: the byte count is unknown: a read returned more bytes than the model \
+             counted, so a write reached the pipe by a path note_fd_effects does not see"))
+    }
+}
+
 /// What a guest descriptor is to the model.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FdKind {
@@ -159,6 +191,10 @@ struct Pipe {
     /// Open guest descriptors on each end. A `dup` adds one, and the end closes at zero.
     readers: u32,
     writers: u32,
+    /// M55 §3f, §3g: `O_NONBLOCK` and the no-SIGPIPE bit of each end's open file, `[read, write]`. A dup
+    /// shares the open file, so they live here and not per descriptor.
+    nonblock: [bool; 2],
+    nosigpipe: [bool; 2],
 }
 
 /// The guest's pipes, by descriptor (R4). The counts move only by the calls' own returns:
@@ -372,7 +408,7 @@ impl GuestKqueues {
         }
         let id = self.pipes.next;
         self.pipes.next += 1;
-        self.pipes.pipes.insert(id, Pipe { count: Some(0), size: PIPE_SIZE, readers: 0, writers: 0 });
+        self.pipes.pipes.insert(id, Pipe { count: Some(0), size: PIPE_SIZE, readers: 0, writers: 0, nonblock: [false; 2], nosigpipe: [false; 2] });
         self.pipes.bind(r, id, false);
         self.pipes.bind(w, id, true);
         Ok(())
@@ -403,14 +439,35 @@ impl GuestKqueues {
         self.socks.fds.get(&fd).map(|&e| self.socks.state(e))
     }
 
-    /// `O_NONBLOCK` is a bit of the open file, shared by every dup of the end (M55 3g; Task 4's callers).
+    /// `O_NONBLOCK` is a bit of the open file, shared by every dup of the end (M55 3g).
     pub fn set_nonblock(&mut self, fd: u64, on: bool) {
         if let Some(&e) = self.socks.fds.get(&fd) { self.socks.ends.get_mut(&e).expect("a bound end exists").nonblock = on; }
+        if let Some(&(id, w)) = self.pipes.ends.get(&fd) {
+            self.pipes.pipes.get_mut(&id).expect("a bound end's pipe exists").nonblock[w as usize] = on;
+        }
     }
 
-    /// `SO_NOSIGPIPE` of the end (M55 3f; Task 4's callers).
+    /// The no-SIGPIPE bit of the end's open file: `SO_NOSIGPIPE` on a socket end, `F_SETNOSIGPIPE` on a pipe
+    /// end (M55 3f, T0-nosigpipe).
     pub fn set_nosigpipe(&mut self, fd: u64, on: bool) {
         if let Some(&e) = self.socks.fds.get(&fd) { self.socks.ends.get_mut(&e).expect("a bound end exists").nosigpipe = on; }
+        if let Some(&(id, w)) = self.pipes.ends.get(&fd) {
+            self.pipes.pipes.get_mut(&id).expect("a bound end's pipe exists").nosigpipe[w as usize] = on;
+        }
+    }
+
+    /// What guest pipe or socket end `fd` is to a blocking call (M55 3g), or `None` for any other descriptor.
+    pub fn io_end(&self, fd: u64) -> Option<IoEnd> {
+        if let Some(&e) = self.socks.fds.get(&fd) {
+            let st = self.socks.state(e);
+            return Some(IoEnd { socket: true, writable: true, readable: true, unread: st.unread, held: st.peer_unread,
+                                capacity: SOCK_CAPACITY, other_open: st.peer_open, nonblock: st.nonblock, nosigpipe: st.nosigpipe });
+        }
+        let &(id, w) = self.pipes.ends.get(&fd)?;
+        let p = self.pipes.pipes[&id];
+        Some(IoEnd { socket: false, writable: w, readable: !w, unread: p.count, held: p.count, capacity: PIPE_WRITE_CAPACITY,
+                     other_open: if w { p.readers > 0 } else { p.writers > 0 },
+                     nonblock: p.nonblock[w as usize], nosigpipe: p.nosigpipe[w as usize] })
     }
 
     /// M54 t3 (spec 2b, measured): exec closes every kqueue descriptor, and the threads that waited on

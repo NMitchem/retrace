@@ -78,6 +78,10 @@ const ROWS: &[Row] = &[
     Row { name: "fc_posix", bin: retrace_guest::FC_POSIX, args: &[], expect: Expect::Pass },
     // M55 t1: a nonblocking socket pair, a kqueue level wait and EOF.
     Row { name: "fc_sockpair", bin: retrace_guest::FC_SOCKPAIR, args: &[], expect: Expect::Pass },
+    // M55 t4: a write to a pipe with no reader and SIGPIPE at its default ends the process as native does.
+    Row { name: "fc_sigpipe", bin: retrace_guest::FC_SIGPIPE, args: &[], expect: Expect::Pass },
+    // M55 t4: std's UnixStream::pair(), nonblocking, a round trip, one end dropped: 0 from read, BrokenPipe.
+    Row { name: "fc_rs_sockpair", bin: retrace_guest::FC_RS_SOCKPAIR, args: &[], expect: Expect::Pass },
     // M54 t2: a posix_spawn that starts a child is a ProcessCreation wall (was M38's EFAULT).
     Row { name: "fc_spawn_child", bin: retrace_guest::FC_SPAWN_CHILD, args: &[],
           expect: Expect::Refused("retrace: unsupported: posix_spawn of a child process (syscall 244)") },
@@ -273,8 +277,9 @@ fn panic_message(stderr: &str) -> Option<String> {
 
 /// `None` when the recording's terminal event carries native's signal `want`, else what it carries.
 fn terminal_mismatch(trace: &Path, want: i32) -> Option<String> {
-    // Only abort() raises (SIGABRT); every other fatal signal a fixture dies of is a hardware fault.
-    let raised = want == 6;
+    // abort() raises (SIGABRT) and a write's EPIPE raises SIGPIPE (M55); every other fatal signal a fixture
+    // dies of is a hardware fault.
+    let raised = matches!(want, 6 | 13);
     let (events, torn) = retrace_trace::Reader::open_checked(trace).expect("read the recording");
     let got = match events.iter().rev().find(|e| !matches!(e, Event::Snapshot { .. })) {
         _ if torn => "a torn trace".to_owned(),

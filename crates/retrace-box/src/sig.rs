@@ -46,13 +46,22 @@ impl Default for SigAction {
 pub struct SigTable {
     /// Indexed by signal number; `[0]` is unused so indexing mirrors signal numbering (1..=31).
     disp: [SigAction; NSIG],
+    /// M55 §3f: the pid a kernel-raised signal's `si_pid` carries, when replay must take it from the
+    /// recording (the recorder's own pid is not the replayer's). `None` on record: `deliver_signal_to` uses
+    /// the process's own id, which is the guest's (`getpid` is not intercepted).
+    pid_override: Option<u32>,
+}
+
+impl SigTable {
+    pub fn set_pid_override(&mut self, pid: Option<u32>) { self.pid_override = pid; }
+    pub fn frame_pid(&self) -> u32 { self.pid_override.unwrap_or_else(std::process::id) }
 }
 
 impl Default for SigTable {
     /// All-default — which is genuinely correct for a fresh process, so there is no seeding step
     /// that could be got wrong.
     fn default() -> Self {
-        SigTable { disp: [SigAction::default(); NSIG] }
+        SigTable { disp: [SigAction::default(); NSIG], pid_override: None }
     }
 }
 
@@ -230,6 +239,8 @@ pub struct NeonState {
 pub struct FrameInput {
     pub sig: u64,
     pub si_code: u64,
+    /// `si_pid`, set for a kernel-raised signal (`si_code` 0) and 0 otherwise.
+    pub si_pid: u32,
     pub si_addr: u64,
     pub esr: u64,
     pub far: u64,
@@ -289,6 +300,7 @@ pub fn build_frame(inp: &FrameInput) -> (Vec<u8>, EntryRegs) {
     let si = FRAME_SIGINFO_OFF;
     f[si..si + 4].copy_from_slice(&(inp.sig as u32).to_le_bytes()); // si_signo
     f[si + 8..si + 12].copy_from_slice(&(inp.si_code as u32).to_le_bytes()); // si_code
+    f[si + 12..si + 16].copy_from_slice(&inp.si_pid.to_le_bytes()); // si_pid
     f[si + 24..si + 32].copy_from_slice(&inp.si_addr.to_le_bytes()); // si_addr
 
     // --- ucontext_t at +104. uc_mcontext is a POINTER; the mcontext is the block at +160. ---
@@ -485,6 +497,7 @@ mod tests {
         FrameInput {
             sig: 11,
             si_code: 1,
+            si_pid: 0,
             si_addr: 0xdead_0000,
             esr: 0x9200_0046,
             far: 0xdead_0000,

@@ -1683,6 +1683,8 @@ pub const ITIMER_VIRTUAL: u64 = 1;
 pub const ITIMER_PROF: u64 = 2;
 /// `SIGALRM`, the signal `ITIMER_REAL` raises.
 pub const SIGALRM: u64 = 14;
+/// `SIGPIPE`, raised by a write that returns `EPIPE` (M55).
+pub const SIGPIPE: u64 = 13;
 pub const SYS_SIGRETURN: u64 = 184;
 pub const SYS_PTHREAD_KILL: u64 = 328;
 pub const SYS_PTHREAD_SIGMASK: u64 = 329;

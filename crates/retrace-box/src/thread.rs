@@ -204,6 +204,9 @@ pub struct Thread {
     /// `uu_oldmask`: the handler runs under the argument mask, and returns to the mask the call
     /// found). Consumed by `Box_::deliver_signal_to`.
     pub frame_mask: Option<u32>,
+    /// M55 §3f: bit `(sig - 1)` of the pending signals the kernel raised (SIGPIPE after an `EPIPE`), whose
+    /// frame carries `si_code` 0 rather than `SI_USER` when they are materialised.
+    pub kernel_origin: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -230,6 +233,7 @@ impl ThreadTable {
                 redirected: false,
                 sprr: 0,
                 frame_mask: None,
+                kernel_origin: 0,
             }],
             current: 0,
             next_id: MAIN_THREAD_ID + 1,
@@ -267,7 +271,7 @@ impl ThreadTable {
         self.next_id += 1;
         self.threads = vec![Thread {
             id, ctx, state: ThreadState::Runnable, stack: (0, 0), mask, pending,
-            altstack: None, redirected: false, sprr: 0, frame_mask: None,
+            altstack: None, redirected: false, sprr: 0, frame_mask: None, kernel_origin: 0,
         }];
         self.current = 0;
         id
@@ -358,6 +362,20 @@ impl ThreadTable {
         self.threads[tid].mask & Self::sig_bit(sig) != 0
     }
 
+    /// M55 §3f: pend `sig` as one the kernel raised (its frame is `si_code` 0).
+    pub fn pend_kernel(&mut self, tid: usize, sig: u64) {
+        self.pend(tid, sig);
+        self.threads[tid].kernel_origin |= Self::sig_bit(sig);
+    }
+
+    /// Was `sig` pended on `tid` by the kernel? Clears the mark: asked once, at the delivery.
+    pub fn take_kernel_origin(&mut self, tid: usize, sig: u64) -> bool {
+        let bit = Self::sig_bit(sig);
+        let was = self.threads[tid].kernel_origin & bit != 0;
+        self.threads[tid].kernel_origin &= !bit;
+        was
+    }
+
     pub fn pend(&mut self, tid: usize, sig: u64) {
         self.threads[tid].pending |= Self::sig_bit(sig);
     }
@@ -444,6 +462,7 @@ impl ThreadTable {
             redirected: false,
             sprr: 0,
             frame_mask: None,
+            kernel_origin: 0,
         });
         self.threads.len() - 1
     }
