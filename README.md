@@ -90,10 +90,10 @@ behind it. These are the ones you'll hit first:
 - A syscall or Mach message retrace has no model for stops the recording with one line naming
   it, `retrace: unsupported: …`, and exit status 4; [`docs/walls.md`](docs/walls.md) explains each
   kind. In the latest sweep, 46 of the 54 Apple binaries in the committed sample recorded and
-  replayed with native's stdout, stderr and exit status, and <<7b: the second figure, recorded and replayed identically (47 at M53)>> recorded and replayed identically
+  replayed with native's stdout and exit status, and 49 recorded and replayed identically
   (most of the rest start another process, which stops at a wall, or print host state).
 - Of the 39 small C, C++, Rust and Swift programs in the first-contact corpus
-  (`firstcontact_e2e`), the kind a newcomer tries first, <<gate: 36 expected>> record and replay as they run natively
+  (`firstcontact_e2e`), the kind a newcomer tries first, 36 record and replay as they run natively
   (up from 33). The other three are a program that starts a child process, which stops at a wall, and two Swift programs that stop at a libdispatch call retrace does not model (a workloop, a workqueue opcode).
 - A recording holds the program's environment, so a recording you share shares it; run retrace under env -i to pass only what the program needs.
 - Traces are big: tens of MiB to over a GiB, uncompressed. node's `console.log(1)` is about 501 MiB

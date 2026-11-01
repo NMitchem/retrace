@@ -273,8 +273,8 @@ and threads.
 
 **Exec is one method, run by both sides (M54).** A successful `execve`, `SETEXEC` `posix_spawn` or `#!` script
 is `Event::Exec`, which carries the path, the selected slice of the image (a script's interpreter) and of its
-dynamic linker, a script's first line, the guest descriptors exec closed and a spawn's file-action outcomes;
-argv and envp are read from guest memory on both sides, not recorded. Record and replay both call
+dynamic linker, a script's first line and the guest descriptors exec closed; argv, envp and a spawn's
+attributes and file actions are read from guest memory on both sides, not recorded. Record and replay both call
 `Box_::exec_image` with the same `ExecImage`, and replay never reads the new binary from disk, so symmetry
 rule 1 holds by construction. Everything that can refuse (`read_exec_call`, `resolve`, the spawn-action
 validation) runs **before the point of no return**, `exec_image`'s first line: past it a failure is a bug,

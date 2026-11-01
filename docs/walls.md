@@ -85,6 +85,11 @@ naming itself in the line:
 - a static image (one with no dynamic linker), a setuid or setgid file, and an image whose segments
   overlap retrace's own low memory, the commpage or the shared region, are not 16 KiB aligned or end past
   2^36 bytes;
+- an image whose load commands cannot be walked (a command that is too short or runs past the end of the
+  file). Natively the kernel accepts such an `execve` and then kills the process with `SIGKILL` (exit 137),
+  so there is no error to answer. A file too short to hold a Mach-O header, or without the magic, answers
+  `ENOEXEC`, as natively. A set-id `#!` script is refused under the setuid/setgid rule above, although
+  macOS by default runs one without the privileges;
 - arguments and environment together past retrace's 128 KiB start-stack limit (past 1 MiB the call returns
   `E2BIG`, as natively);
 - a `posix_spawn` attribute or extension retrace does not model, named by value: a flag other than
