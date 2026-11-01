@@ -157,7 +157,7 @@ fn execves_errors_answer_as_natively() {
     let (out, t) = as_natively(&args, false);
     for line in ["missing errno=2", "noexec errno=13", "directory errno=13", "garbage errno=8", "badpath errno=14",
                  // The file is checked before the argument strings are read (measured natively).
-                 "missing_badargv errno=2", "garbage_badargv errno=8",
+                 "missing_badargv errno=2", "garbage_badargv errno=8", "missing_farargv errno=2",
                  "badargv errno=14", "badargventry errno=14", "badenvp errno=14", "badenventry errno=14"] {
         has(&out, line);
     }
@@ -271,7 +271,12 @@ fn assert_terminal_signal(trace: &Path, sig: u64) {
     let n = ev.len();
     assert!(matches!(ev[n - 1], Event::Snapshot { .. }), "the final snapshot is last");
     assert!(matches!(&ev[n - 2], Event::Signal { sig: s, .. } if *s == sig), "Event::Signal {{ sig: {sig} }} before it: {:?}", ev[n - 2]);
-    assert!(matches!(ev[n - 3], Event::Exec { .. }), "the Exec landmark before that");
+    let Event::Exec { dylinker, .. } = &ev[n - 3] else { panic!("the Exec landmark before that: {:?}", ev[n - 3]) };
+    // M54 final review I2: the terminal pc is the new image's first instruction, dyld's slid entry, not the
+    // old image's `svc` return address that ELR_EL1 held at the trap.
+    let entry = retrace_guest::try_parse_macho(dylinker).unwrap().entry + retrace_box::DYLD_BASE;
+    assert!(matches!(&ev[n - 2], Event::Signal { pc, .. } if *pc == entry),
+            "Signal.pc is the dylinker's entry {entry:#x}: {:?}", ev[n - 2]);
 }
 
 // ---- M54 task 4: posix_spawn(POSIX_SPAWN_SETEXEC) -------------------------------------------------------

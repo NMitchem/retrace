@@ -11,7 +11,7 @@ use cache::{walk_page, CacheMeta, DEFAULT_CACHE_PATH};
 
 mod sig;
 mod exec;
-pub use exec::{decode_spawn, final_args_refusal, script_argv, SHEBANG_MAX, ExecCall, ExecImage, ExecRefusal, FileAction, SpawnFail, SpawnPlan, SpawnTxn};
+pub use exec::{decode_spawn, final_args_refusal, image_layout_refusal, script_argv, SHEBANG_MAX, ExecCall, ExecImage, ExecRefusal, FileAction, SpawnFail, SpawnPlan, SpawnTxn};
 pub mod thread;
 pub mod kq;
 pub mod jit;
@@ -7666,6 +7666,9 @@ impl Box_ {
         if num == retrace_arch::SYS_MAP_WITH_LINKING_NP { return Ok(()); }
         let shape = retrace_arch::shape_of(num, args);
         for (i, kind) in shape.args.iter().enumerate() {
+            // M54 final review M2: the kernel copies an exec's path first and the argument arrays after the
+            // file is found, so a bad array is `read_exec_call`'s refusal (the file's own errno comes first).
+            if *kind == NestedSource && (num == retrace_arch::SYS_EXECVE || num == retrace_arch::SYS_POSIX_SPAWN) { continue; }
             let write = match kind {
                 Path | Source | NestedSource => false,
                 // M51 §3h (I-1): `retrace_arch::ptr_use` classifies every `Ptr` position (a unit test keeps

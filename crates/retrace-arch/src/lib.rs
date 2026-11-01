@@ -1127,8 +1127,7 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // struct and then the kernel follows attrp, file_actions, port_actions, persona_info and
         // more INSIDE it (bsd/kern/kern_exec.c `posix_spawn`, one `copyin` per member) — rule 1,
         // NestedSource, like argv/envp's strings. Never forwarded: since M54 a child is a
-        // ProcessCreation wall and a SETEXEC spawn goes through the exec arm (EFAULT until task 4;
-        // cpython_e2e's launcher test pins it, EXPECTED_DIFFS). It was forwarded from M2 to M37 and failed only
+        // ProcessCreation wall and a SETEXEC spawn goes through the exec arm (M54 t4). It was forwarded from M2 to M37 and failed only
         // because those guest pointers EFAULT in retrace's process — a forwarded spawn that
         // succeeded would start a real child of retrace. This row is documentation of the
         // prototype only; nothing consults it for forwarding.

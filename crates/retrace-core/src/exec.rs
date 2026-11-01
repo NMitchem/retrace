@@ -17,6 +17,9 @@ const EACCES: u64 = 13;
 const MH_EXECUTE: u32 = 2;
 const CPU_TYPE_X86_64: u32 = 0x0100_0007;
 
+/// The call the program made, as `read_exec_call` names it.
+fn cname(call: &ExecCall) -> &'static str { if call.num == retrace_arch::SYS_POSIX_SPAWN { "posix_spawn" } else { "execve" } }
+
 fn wall(what: impl Into<String>) -> ExecRefusal { ExecRefusal::Wall(retrace_arch::wall(WallCategory::ProcessCreation, what)) }
 
 fn errno_of(e: &std::io::Error) -> ExecRefusal { ExecRefusal::Errno(e.raw_os_error().unwrap_or(EACCES as i32) as u64) }
@@ -77,16 +80,16 @@ fn fat_slices(b: &[u8]) -> Option<Vec<(u32, u32, usize, usize)>> {
 
 /// The dynamic linker `image` names, read and sliced the way the start does (the CLI reads `/usr/lib/dyld`
 /// and takes its arm64e slice).
-fn dylinker_slice(path: &str) -> Result<Vec<u8>, ExecRefusal> {
+fn dylinker_slice(path: &str, name: &str) -> Result<Vec<u8>, ExecRefusal> {
     let bytes = std::fs::read(path)
-        .map_err(|e| wall(format!("execve of an image whose dynamic linker {path} cannot be read ({e})")))?;
+        .map_err(|e| wall(format!("{name} of an image whose dynamic linker {path} cannot be read ({e})")))?;
     if bytes.len() < 8 || (!bytes.starts_with(&[0xcf, 0xfa, 0xed, 0xfe]) && fat_slices(&bytes).is_none()) {
-        return Err(wall(format!("execve of an image whose dynamic linker {path} is not a Mach-O")));
+        return Err(wall(format!("{name} of an image whose dynamic linker {path} is not a Mach-O")));
     }
     let slice = retrace_guest::try_slice_native(&bytes)
-        .map_err(|why| wall(format!("execve of an image whose dynamic linker {path} {why}")))?;
+        .map_err(|why| wall(format!("{name} of an image whose dynamic linker {path} {why}")))?;
     retrace_guest::try_parse_macho(slice)
-        .map_err(|why| wall(format!("execve of an image whose dynamic linker {path} {why}")))?;
+        .map_err(|why| wall(format!("{name} of an image whose dynamic linker {path} {why}")))?;
     Ok(slice.to_vec())
 }
 
@@ -115,7 +118,7 @@ fn resolve_file(path_bytes: &[u8], call: &ExecCall, allow_script: bool) -> Resul
     // SAFETY: access(2) reads a NUL-terminated path and writes nothing.
     if unsafe { libc::access(cpath.as_ptr(), libc::X_OK) } != 0 { return Err(errno_of(&std::io::Error::last_os_error())); }
     if md.permissions().mode() & 0o6000 != 0 {
-        return Err(wall("execve of a setuid or setgid image (retrace cannot make the credential change)"));
+        return Err(wall(format!("{} of a setuid or setgid image (retrace cannot make the credential change)", cname(call))));
     }
     let bytes = std::fs::read(path).map_err(|e| errno_of(&e))?;
     if bytes.starts_with(b"#!") {
@@ -130,7 +133,8 @@ fn resolve_file(path_bytes: &[u8], call: &ExecCall, allow_script: bool) -> Resul
         inner.script = line;
         return Ok(inner);
     }
-    if bytes.len() < 8 { return Err(ExecRefusal::Errno(ENOEXEC)); }
+    // A `mach_header_64` is 32 bytes: the thin branch reads its cputype and cpusubtype at 4 and 8.
+    if bytes.len() < 32 { return Err(ExecRefusal::Errno(ENOEXEC)); }
     let fat = be32(&bytes, 0) == retrace_arch::FAT_MAGIC || be32(&bytes, 0) == retrace_arch::FAT_MAGIC_64;
     let thin = le32(&bytes, 0) == 0xfeed_facf;
     if !fat && !thin { return Err(ExecRefusal::Errno(ENOEXEC)); }
@@ -140,8 +144,8 @@ fn resolve_file(path_bytes: &[u8], call: &ExecCall, allow_script: bool) -> Resul
         match select(pref, &[(cpu, sub)]) {
             Pick::Index(_) => match cpu {
                 retrace_arch::CPU_TYPE_ARM64 => &bytes,
-                CPU_TYPE_X86_64 => return Err(wall("execve of an x86_64-only image (needs Rosetta)")),
-                t => return Err(wall(format!("execve of a Mach-O for CPU type {t:#x}, and retrace runs arm64 programs only"))),
+                CPU_TYPE_X86_64 => return Err(wall(format!("{} of an x86_64-only image (needs Rosetta)", cname(call)))),
+                t => return Err(wall(format!("{} of a Mach-O for CPU type {t:#x}, and retrace runs arm64 programs only", cname(call)))),
             },
             Pick::NoArch => return Err(ExecRefusal::Errno(EBADARCH)),
             Pick::Rosetta(c) => return Err(rosetta(c)),
@@ -154,8 +158,8 @@ fn resolve_file(path_bytes: &[u8], call: &ExecCall, allow_script: bool) -> Resul
             Pick::Index(None) => match retrace_guest::try_slice_native(&bytes) {
                 Ok(s) => s,
                 Err(_) if slices.iter().any(|&(cpu, _, _, _)| cpu == CPU_TYPE_X86_64) =>
-                    return Err(wall("execve of an x86_64-only image (needs Rosetta)")),
-                Err(_) => return Err(wall("execve of a universal binary with no arm64 slice, and retrace runs arm64 programs only")),
+                    return Err(wall(format!("{} of an x86_64-only image (needs Rosetta)", cname(call)))),
+                Err(_) => return Err(wall(format!("{} of a universal binary with no arm64 slice, and retrace runs arm64 programs only", cname(call)))),
             },
             Pick::NoArch => return Err(ExecRefusal::Errno(EBADARCH)),
             Pick::Rosetta(c) => return Err(rosetta(c)),
@@ -164,13 +168,18 @@ fn resolve_file(path_bytes: &[u8], call: &ExecCall, allow_script: bool) -> Resul
     if slice.len() < 32 || le32(slice, 0) != 0xfeed_facf || le32(slice, 12) != MH_EXECUTE { return Err(ExecRefusal::Errno(ENOEXEC)); }
     let loaded = retrace_guest::try_parse_macho(slice).map_err(|_| ExecRefusal::Errno(ENOEXEC))?;
     let Some(dyld) = loaded.dylinker.as_deref() else {
-        return Err(wall("execve of a static image (no LC_LOAD_DYLINKER)"));
+        return Err(wall(format!("{} of a static image (no LC_LOAD_DYLINKER)", cname(call))));
     };
     // C2: restore's posture, the symbols and the gdbserver all read the Mach-O header at EXE_BASE.
     if !loaded.segments.iter().any(|s| s.data.starts_with(&[0xcf, 0xfa, 0xed, 0xfe]) && s.vaddr == EXE_BASE) {
-        return Err(wall(format!("execve of an image whose Mach-O header is not at {EXE_BASE:#x}")));
+        return Err(wall(format!("{} of an image whose Mach-O header is not at {EXE_BASE:#x}", cname(call))));
     }
-    let dylinker = dylinker_slice(dyld)?;
+    let dylinker = dylinker_slice(dyld, cname(call))?;
+    // M6: segments `stage_image` cannot place are refused here, before the point of no return.
+    let dl = retrace_guest::try_parse_macho(&dylinker).expect("dylinker_slice parsed it");
+    if let Some(why) = retrace_box::image_layout_refusal(&loaded, &dl) {
+        return Err(wall(format!("{} of an image whose {why}", cname(call))));
+    }
     Ok(Resolved { image: slice.to_vec(), script: Vec::new(), dylinker })
 }
 
@@ -264,6 +273,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    #[test]
+    fn a_thin_header_shorter_than_a_mach_header_is_enoexec_not_a_panic() {
+        let d = scratch("short");
+        let short = d.join("short");
+        std::fs::write(&short, [0xcf, 0xfa, 0xed, 0xfe, 0x0c, 0x00, 0x00, 0x01, 0x02, 0x00]).unwrap();
+        mode(&short, 0o755);
+        assert_eq!(errno(resolve(&call(short.to_str().unwrap()))), 8, "a 10-byte thin Mach-O");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     /// A fat file around `slices` (cpusubtype, bytes), each 16 KiB aligned, as `lipo` writes it.
     fn fat(slices: &[(u32, &[u8])]) -> Vec<u8> {
         let mut out = Vec::new();
@@ -330,6 +349,50 @@ mod tests {
             mode(&p, 0o755);
             assert_eq!(errno(resolve(&call(p.to_str().unwrap()))), want, "{name}");
         }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // Task 5 minors: the interpreter's own mode, and the line's 511/512-byte boundary (`< 512`, t5 addendum B).
+    #[test]
+    fn an_interpreter_needs_the_execute_bit_and_the_line_fits_in_511_bytes() {
+        let d = scratch("shebang");
+        let target = retrace_guest::EXEC_TARGET_DYN;
+        let interp = d.join("interp");
+        std::fs::copy(target, &interp).unwrap();
+        mode(&interp, 0o644);
+        let s = d.join("s");
+        std::fs::write(&s, format!("#!{}\n", interp.display())).unwrap();
+        mode(&s, 0o755);
+        assert_eq!(errno(resolve(&call(s.to_str().unwrap()))), 13, "an interpreter without the execute bit is EACCES");
+        // A line of exactly 511 bytes (the `#!`, the interpreter, a comment tail) resolves; 512 is ENOEXEC.
+        for (total, want) in [(511usize, 0u64), (512, 8)] {
+            let head = format!("#!{} #", retrace_guest::EXEC_TARGET_DYN);
+            let line = format!("{head}{}", "x".repeat(total - head.len()));
+            assert_eq!(line.len(), total);
+            let p = d.join(format!("l{total}"));
+            std::fs::write(&p, format!("{line}\n")).unwrap();
+            mode(&p, 0o755);
+            match (resolve(&call(p.to_str().unwrap())), want) {
+                (Ok(r), 0) => assert_eq!(r.script.len(), 511),
+                (r, w) if w != 0 => assert_eq!(errno(r), w, "a {total}-byte line"),
+                (r, _) => panic!("a {total}-byte line should resolve: {:?}", r.err().map(|e| format!("{e:?}"))),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // M4: the wall names the call the program made.
+    #[test]
+    fn a_refused_image_names_the_call_that_asked() {
+        let d = scratch("names");
+        let x86 = d.join("x86");
+        std::fs::copy(retrace_guest::EXEC_X86, &x86).unwrap();
+        mode(&x86, 0o755);
+        let mut c = call(x86.to_str().unwrap());
+        let text = |c: &ExecCall| match resolve(c) { Err(ExecRefusal::Wall(m)) => m, other => panic!("expected a wall: {:?}", other.err()) };
+        assert!(text(&c).contains("execve of an x86_64-only image"), "{}", text(&c));
+        c.num = 244;
+        assert!(text(&c).contains("posix_spawn of an x86_64-only image"), "{}", text(&c));
         let _ = std::fs::remove_dir_all(&d);
     }
 }

@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 
 /// What `execve` and `posix_spawn(POSIX_SPAWN_SETEXEC)` ask for, read out of guest memory.
 ///
-/// task 4 fills `spawn`. `args_refusal` is the refusal of the argument vector (EFAULT, E2BIG, or the
+/// `spawn` is `Some` for a SETEXEC `posix_spawn`. `args_refusal` is the refusal of the argument vector (EFAULT, E2BIG, or the
 /// start-stack wall): the kernel finds and checks the file BEFORE it copies the argument strings in
 /// (measured natively: a missing path with a bad `argv` is ENOENT, garbage is ENOEXEC), so the record
 /// arm resolves the file first and answers this only for an image it would have run.
@@ -352,6 +352,42 @@ pub fn script_argv(line: &[u8], script_path: &[u8], argv: &[Vec<u8>]) -> Result<
     Ok(out)
 }
 
+/// M54 final review M6: why `stage_image` could not place these segments, as a `resolve`-time wall text before the
+/// point of no return (`stage_map` asserts alignment and `hv_vm_map` fails on overlap, both panics past it). A segment
+/// must start on a 16 KiB granule; and none may overlap another (the exe at its own vmaddrs, dyld at
+/// `DYLD_BASE`), the box-owned low range `[0, DYN_STACK_TOP)` (trampoline, page tables, signing and TLBI stubs, TSD,
+/// stack), the two commpage granules, or the shared region, or end past the 36-bit IPA space. The nano band and
+/// the mmap area are not checked: they are the program's own reservations, made after the image.
+pub fn image_layout_refusal(exe: &Loaded, dyld: &Loaded) -> Option<String> {
+    let g = GRANULE as u64;
+    let mut spans: Vec<(u64, u64, String)> = Vec::new();
+    for (who, l, slide) in [("the executable", exe, 0u64), ("the dynamic linker", dyld, DYLD_BASE)] {
+        for s in &l.segments {
+            let va = s.vaddr.wrapping_add(slide);
+            if !va.is_multiple_of(g) {
+                return Some(format!("{who} has a segment at {va:#x}, which is not 16 KiB-aligned (retrace maps whole 16 KiB granules)"));
+            }
+            let len = (s.memsz.max(s.data.len()).max(GRANULE) as u64).next_multiple_of(g);
+            let Some(end) = va.checked_add(len).filter(|&e| e <= 1 << 36) else {
+                return Some(format!("{who} has a segment at {va:#x} past the 36-bit guest address space"));
+            };
+            spans.push((va, end, format!("{who}'s segment at {va:#x}")));
+        }
+    }
+    let fixed = [(0, DYN_STACK_TOP, "retrace's low range (trampoline, tables, stubs, TSD, stack)"),
+                 (COMMPAGE2_IPA, COMMPAGE2_IPA + g, "the commpage"), (COMMPAGE_IPA, COMMPAGE_IPA + g, "the commpage"),
+                 (SHARED_REGION_START, SHARED_REGION_END, "the shared region")];
+    for (i, (a, b, name)) in spans.iter().enumerate() {
+        for (fa, fb, fname) in fixed {
+            if *a < fb && fa < *b { return Some(format!("{name} overlaps {fname}")); }
+        }
+        for (c, d, other) in &spans[..i] {
+            if a < d && c < b { return Some(format!("{name} overlaps {other}")); }
+        }
+    }
+    None
+}
+
 /// The refusal of the *final* argument vector, after a script's expansion (Ruling T5-b, inferred, not
 /// measured: the kernel copies the final vector into the new image): the same formula and limits as
 /// `read_exec_strings`/`read_exec_call` apply to the strings the call carried.
@@ -414,6 +450,42 @@ impl Box_ {
             out.push(s);
             i += 1;
         }
+    }
+
+    /// The pointer step both sides take for an exec call, at the same point (symmetry rule 1): the generic pointer
+    /// check (the path), then every page the argument arrays and their strings occupy is made present, so a string
+    /// in a shared-cache page the program never touched (libc's `execvp` passes `"sh"` from `__cstring`) reads as
+    /// itself and not as a false EFAULT (M54 final review M1). Paging a cache page is a pure function of (file,
+    /// slide, keys), regenerated identically on both sides. A page that cannot be presented is left for
+    /// `read_exec_call`, which refuses it in the kernel's order.
+    pub fn prepare_exec_pointers(&mut self, num: u64, args: &[u64; 8]) -> Result<(), u64> {
+        self.prepare_forward_pointers(num, args)?;
+        let (argv, envp) = if num == retrace_arch::SYS_POSIX_SPAWN { (args[3], args[4]) } else { (args[1], args[2]) };
+        let mut budget = EXEC_ARG_MAX;
+        for arr in [argv, envp] {
+            if arr == 0 { continue; }
+            let mut i = 0u64;
+            while budget > 0 {
+                let at = arr.wrapping_add(i * 8);
+                if self.present_page(at, false).is_err() { break; }
+                let Some(p) = self.read_va_checked(at, 8) else { break };
+                let sp = u64::from_le_bytes(p.try_into().unwrap());
+                if sp == 0 { break; }
+                // The string, a page at a time to its NUL.
+                let mut a = sp;
+                loop {
+                    if self.present_page(a, false).is_err() { break; }
+                    let n = (((a | (GRANULE as u64 - 1)) + 1 - a) as usize).min(budget);
+                    let chunk = self.read_va_prefix(a, n);
+                    budget = budget.saturating_sub(n.max(1));
+                    if chunk.len() < n || chunk.contains(&0) || budget == 0 { break; }
+                    a = a.wrapping_add(n as u64);
+                }
+                budget = budget.saturating_sub(8);
+                i += 1;
+            }
+        }
+        Ok(())
     }
 
     /// Read an `execve` (59) or `posix_spawn` (244, SETEXEC) call out of guest memory. `Err(Errno)` is the
@@ -489,12 +561,18 @@ impl Box_ {
         let kq = (0..slots).filter(|&g| self.gkq.is_kqueue(g)).collect();
         let mut st = SpawnState::new(self.fds.clone(), self.cloexec_on_host().into_iter().collect(), kq);
         let wants_cwd = plan.actions.iter().any(|a| matches!(a, FileAction::Chdir { .. } | FileAction::Fchdir { .. }));
-        let cwd = wants_cwd.then(|| {
+        // M3: a working directory the recorder cannot open (mode 0311, or deleted) cannot be saved for the undo, a
+        // wall by value, never a panic. A guest reaches it by a chdir or fchdir file action in a cwd it made unreadable.
+        let cwd = if wants_cwd {
             // SAFETY: open(2) on a constant NUL-terminated path.
             let fd = unsafe { libc::open(c".".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
-            assert!(fd >= 0, "spawn: cannot open the working directory to restore it: {}", std::io::Error::last_os_error());
-            fd
-        });
+            if fd < 0 {
+                return Err(SpawnFail::Wall(retrace_arch::wall(WallCategory::ProcessCreation, format!(
+                    "posix_spawn where the working directory could not be saved for a chdir file action ({}) (syscall 244)",
+                    std::io::Error::last_os_error()))));
+            }
+            Some(fd)
+        } else { None };
         let mut host_new = vec![None; n];
         let errno = || std::io::Error::last_os_error().raw_os_error().unwrap_or(9) as u64;
         let res = st.run(&plan.actions, &mut |i, a, src| match a {
@@ -608,6 +686,10 @@ impl Box_ {
         // 294 or 536 on both sides, as at the start.
         Self::set_pac_keys(&self.vcpu);
         Self::start_sysregs(&self.vcpu, &st);
+        // M54 final review I2: the exception-return pair `position()` and `save_ctx()` read. At the exec trap
+        // they hold the OLD image's `svc` return; the new image's position is its entry, at EL0t.
+        self.vcpu.set_sys(sysreg::ELR_EL1, st.entry).unwrap();
+        self.vcpu.set_sys(sysreg::SPSR_EL1, 0).unwrap();
         for r in 0..31 { self.vcpu.set_reg(reg::x(r), 0).unwrap(); }
         for q in 0..32 { self.vcpu.set_simd(simd::q(q), 0).unwrap(); }
         self.vcpu.set_reg(reg::FPCR, 0).unwrap();
@@ -894,5 +976,73 @@ mod tests {
         // The next lowest free slot is 5: an open at 5 sticks again, one at 6 does not.
         st.run(&[open(6), open(5)], &mut |_, _, _| Ok(None)).unwrap();
         assert!(!st.cloexec.contains(&6) && st.cloexec.contains(&5));
+    }
+
+    // M54 final review M7 (Ruling T4-f): the scan is ascending; an ignored signal before the first terminating one is
+    // discarded, a terminating one ends the scan (a higher-numbered signal behind it is not looked at), a stop signal
+    // reached first is the wall, and a masked one is not released.
+    #[test]
+    fn release_scan_walks_the_pending_set_in_ascending_order() {
+        let bit = |s: u64| 1u32 << (s - 1);
+        // HUP (1) terminates before CHLD (20, ignored) is reached: nothing discarded.
+        assert_eq!(Box_::release_scan(bit(1) | bit(20), 0), Ok((0, Some(1))));
+        // CONT (19, ignored) and CHLD (20, ignored) come before USR1 (30): both discarded, then USR1.
+        assert_eq!(Box_::release_scan(bit(19) | bit(20) | bit(30), 0), Ok((bit(19) | bit(20), Some(30))));
+        // Ascending decides between two terminators.
+        assert_eq!(Box_::release_scan(bit(15) | bit(1), 0), Ok((0, Some(1))));
+        // A stop signal reached first is the wall by value; one behind a terminator is never reached.
+        let wall = Box_::release_scan(bit(18) | bit(30), 0).unwrap_err();
+        assert!(wall.contains("SIGTSTP pending at exec"), "{wall}");
+        assert_eq!(Box_::release_scan(bit(1) | bit(18), 0), Ok((0, Some(1))));
+        // A mask over HUP releases nothing; a mask on one signal leaves the others to the scan.
+        assert_eq!(Box_::release_scan(bit(1), bit(1)), Ok((0, None)));
+        assert_eq!(Box_::release_scan(bit(1) | bit(19), bit(1)), Ok((bit(19), None)));
+        assert_eq!(Box_::release_scan(0, 0), Ok((0, None)));
+    }
+
+    // T4-g: an inherit action on a guest kqueue is a wall by value.
+    #[test]
+    fn an_inherit_of_a_guest_kqueue_is_a_wall() {
+        let mut f = FdTable::new();
+        f.alloc(); f.alloc();
+        let mut st = SpawnState::new(f, BTreeSet::new(), [4u64].into_iter().collect());
+        match st.run(&[FileAction::Inherit { fd: 4 }], &mut |_, _, _| Ok(None)) {
+            Err(SpawnFail::Wall(m)) => assert!(m.contains("an inherit action on descriptor 4, a guest kqueue"), "{m}"),
+            other => panic!("expected a wall, got {other:?}"),
+        }
+    }
+
+    // Ruling T5-b: the limits apply to the final vector.
+    #[test]
+    fn the_final_vector_is_checked_against_both_limits() {
+        let arg = |n: usize| vec![vec![b'a'; n]];
+        // total = len + 1 + 8, plus 16.
+        assert_eq!(final_args_refusal(&arg(START_ARGS_LIMIT - 25), &[]), None, "exactly at retrace's limit");
+        assert!(matches!(final_args_refusal(&arg(START_ARGS_LIMIT - 24), &[]), Some(ExecRefusal::Wall(_))), "one past it is the wall");
+        assert_eq!(final_args_refusal(&arg(EXEC_ARG_MAX - 25), &[]).map(|r| matches!(r, ExecRefusal::Wall(_))), Some(true), "just under native's limit");
+        assert_eq!(final_args_refusal(&arg(EXEC_ARG_MAX - 24), &[]), Some(ExecRefusal::Errno(E2BIG)), "past native's limit");
+        assert_eq!(final_args_refusal(&arg(EXEC_ARG_MAX), &arg(10)), Some(ExecRefusal::Errno(E2BIG)), "the environment counts");
+    }
+
+    // M6: a segment `stage_image` cannot place is refused before the point of no return.
+    #[test]
+    fn a_misplaced_segment_is_refused_by_value() {
+        let seg = |vaddr: u64, len: usize| retrace_guest::Segment { vaddr, data: vec![0; len], memsz: len, exec: false };
+        let img = |segments| Loaded { segments, entry: 0, dylinker: None, cpusubtype: 0 };
+        let ok_exe = img(vec![seg(EXE_BASE, 0x4000), seg(EXE_BASE + 0x4000, 0x4000)]);
+        let ok_dyld = img(vec![seg(0, 0x8000)]);
+        assert_eq!(image_layout_refusal(&ok_exe, &ok_dyld), None);
+        let why = image_layout_refusal(&img(vec![seg(EXE_BASE, 0x4000), seg(EXE_BASE + 0x4000 + 0x1000, 0x1000)]), &ok_dyld).unwrap();
+        assert!(why.contains("not 16 KiB-aligned"), "{why}");
+        let why = image_layout_refusal(&img(vec![seg(EXE_BASE, 0x8000), seg(EXE_BASE + 0x4000, 0x4000)]), &ok_dyld).unwrap();
+        assert!(why.contains("overlaps"), "{why}");
+        let why = image_layout_refusal(&img(vec![seg(TRAMPOLINE_IPA, 0x4000)]), &ok_dyld).unwrap();
+        assert!(why.contains("low range"), "{why}");
+        let why = image_layout_refusal(&img(vec![seg(COMMPAGE_IPA, 0x4000)]), &ok_dyld).unwrap();
+        assert!(why.contains("commpage"), "{why}");
+        let why = image_layout_refusal(&ok_exe, &img(vec![seg(SHARED_REGION_START - DYLD_BASE, 0x4000)])).unwrap();
+        assert!(why.contains("shared region"), "{why}");
+        let why = image_layout_refusal(&img(vec![seg(DYLD_BASE, 0x4000)]), &ok_dyld).unwrap();
+        assert!(why.contains("dynamic linker's segment") && why.contains("overlaps"), "{why}");
     }
 }

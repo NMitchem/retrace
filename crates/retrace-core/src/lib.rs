@@ -1826,7 +1826,7 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
 
             // M54 t2: a posix_spawn that starts a CHILD is a ProcessCreation wall: retrace records one
             // process. Read the descriptor's attrp and psa_flags through the checked reader; an
-            // unreadable one falls through to the exec arm below (it answers EFAULT until task 4).
+            // unreadable one falls through to the exec arm below (it answers EFAULT).
             // The recording ends here, so replay has no mirror to this arm.
             Stop::Syscall { num, args } if num == retrace_arch::SYS_POSIX_SPAWN
                 && b.spawn_flags(args[2]).is_some_and(|f| !retrace_arch::spawn_is_setexec(f)) => {
@@ -1844,7 +1844,7 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
             Stop::Syscall { num, args } if num == retrace_arch::SYS_EXECVE || num == retrace_arch::SYS_POSIX_SPAWN => {
                 // M51 §3h (C3): the generic arm's pointer check, so the pages the exec call reads are
                 // present as replay's generic tail makes them for a failed one.
-                if let Err(e) = b.prepare_forward_pointers(num, &args) {
+                if let Err(e) = b.prepare_exec_pointers(num, &args) {
                     append_refused(&mut w, &mut b, &mut count, num, args, e, true, thread)?;
                     continue;
                 }
@@ -2037,6 +2037,11 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                 assert!(retrace_arch::fork_refusal_errno(num).is_none(),
                     "fork ({num}) reached the generic forward arm — it must be refused above (M47). \
                      Forwarded, it starts a real child of the recorder.");
+                // M54: exec is never forwarded (it would replace retrace's own process). Every 59 and 244
+                // lands in a returning arm above (the child wall, or the exec arm); this is the checked fact.
+                assert!(num != retrace_arch::SYS_EXECVE && num != retrace_arch::SYS_POSIX_SPAWN,
+                    "exec ({num}) reached the generic forward arm — it must be handled above (M54). \
+                     Forwarded, it would replace the recorder's own process image.");
                 // M50 §3c (B3): an unrowed syscall, or one that writes through a nested pointer, ends
                 // the recording here as a wall. It comes after the "never forwarded" asserts above,
                 // which guard arms that must exist, and before the M27 assert below, which is now a
@@ -4113,7 +4118,7 @@ impl ReplaySession {
                             // argument divergence still reports as itself.
                             self.verify_thread(*rthread, pc)?;
                             // Record's pointer check, at the same point: the pages the call reads are made present.
-                            if let Err(e) = self.b.prepare_forward_pointers(num, &args) {
+                            if let Err(e) = self.b.prepare_exec_pointers(num, &args) {
                                 return Err(Divergence { landmark: self.idx, pc, detail: format!(
                                     "exec: replay refuses a pointer (errno {e}) that the recording accepted") });
                             }

@@ -485,6 +485,9 @@ pub const IOVEC_DYN: &str = concat!(env!("OUT_DIR"), "/iovec_dyn");
 pub const FC_POSIX: &str = concat!(env!("OUT_DIR"), "/fc_posix");
 /// M53: `std::fs` end to end, as a first-contact Rust program.
 pub const FC_RS_FS: &str = concat!(env!("OUT_DIR"), "/fc_rs_fs");
+/// M54 t5: Rust's `Command::exec` through `PATH` misses, as a first-contact Rust program: a non-executable
+/// match (EACCES) and a nonexistent directory come first, then the real target's directory, where the last
+/// attempt succeeds. Its argument is the path of `EXEC_TARGET_DYN`.
 pub const FC_RS_EXEC: &str = concat!(env!("OUT_DIR"), "/fc_rs_exec");
 /// M51 (spec §3e): the output modes (see the source).
 pub const FID_OUTPUT: &str = concat!(env!("OUT_DIR"), "/fid_output");

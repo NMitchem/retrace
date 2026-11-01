@@ -311,6 +311,8 @@ static void errs(const char *dir, const char *target) {
     // vector is EFAULT only for an image it would run, and a missing or garbage file keeps its own errno.
     execve(missing, (char **)8, e0);         errline("missing_badargv", -1);
     execve(garbage, (char **)8, e0);         errline("garbage_badargv", -1);
+    // M54 final review M2: a plausible but unmapped array, past the 16 KiB skip, with a missing file: still ENOENT.
+    execve(missing, (char **)0x700000000000, e0); errline("missing_farargv", -1);
     execve(target, (char **)8, e0);          errline("badargv", -1);
     execve(target, badent, e0);              errline("badargventry", -1);
     execve(target, a0, (char **)8);          errline("badenvp", -1);
