@@ -8,7 +8,7 @@ replay backwards in lldb. Set a watchpoint on the memory a crash tripped over, r
 wrote it.
 
 It's a technical preview. It runs Rust and C programs, Homebrew's `jq`, the CPython interpreter,
-Homebrew's `node` with its JIT on, Xcode's `git` for local work, and most of `/bin` and `/usr/bin`.
+Homebrew's `node` with its JIT on, tokio programs that open no network sockets, Xcode's `git` for local work, and most of `/bin` and `/usr/bin`.
 The big differences from rr: threads only switch when one blocks, so races that need preemption
 won't reproduce, and there's no `fork`: a program that starts a child process stops at a wall. See [Limits](#limits).
 
@@ -85,16 +85,18 @@ behind it. These are the ones you'll hit first:
   Xcode selected, an `xcrun` shim such as `/usr/bin/git` can start a child first (when xcrun's cache is
   cold), which stops at that wall; run the tool itself or select the Command Line Tools.
 - Command-line programs only. XPC service lookups, I/O Kit and GUI frameworks aren't modelled, and
-  kqueue, `poll` and `select` readiness cover only a program's own pipes, so nothing that waits on a socket, a terminal
-  or an inherited descriptor runs.
+  kqueue, `poll` and `select` readiness cover only a program's own pipes and `socketpair`s, so nothing that waits on a
+  network socket, a terminal or an inherited descriptor runs; a tokio program that listens or connects stops at
+  `bind` or `socket`. A blocking read or write that has to wait for another thread to feed or drain a pipe or
+  socket stops at a wall, and so does a handled signal sent to a thread blocked in a condition variable or mutex.
 - A syscall or Mach message retrace has no model for stops the recording with one line naming
   it, `retrace: unsupported: …`, and exit status 4; [`docs/walls.md`](docs/walls.md) explains each
   kind. In the latest sweep, 46 of the 54 Apple binaries in the committed sample recorded and
   replayed with native's stdout and exit status, and 49 recorded and replayed identically
   (most of the rest start another process, which stops at a wall, or print host state).
-- Of the 39 small C, C++, Rust and Swift programs in the first-contact corpus
-  (`firstcontact_e2e`), the kind a newcomer tries first, 36 record and replay as they run natively
-  (up from 33). The other three are a program that starts a child process, which stops at a wall, and two Swift programs that stop at a libdispatch call retrace does not model (a workloop, a workqueue opcode).
+- Of the 42 small C, C++, Rust and Swift programs in the first-contact corpus
+  (`firstcontact_e2e`), the kind a newcomer tries first, 39 record and replay as they run natively
+  (up from 36). The other three are a program that starts a child process, which stops at a wall, and two Swift programs that stop at a libdispatch call retrace does not model (a workloop, a workqueue opcode).
 - A recording holds the program's environment, so a recording you share shares it; run retrace under env -i to pass only what the program needs.
 - Traces are big: tens of MiB to over a GiB, uncompressed. node's `console.log(1)` is about 501 MiB
   because retrace backs V8's address-space reservations in full. The format isn't stable, and
