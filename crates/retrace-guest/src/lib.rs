@@ -485,6 +485,7 @@ pub const IOVEC_DYN: &str = concat!(env!("OUT_DIR"), "/iovec_dyn");
 pub const FC_POSIX: &str = concat!(env!("OUT_DIR"), "/fc_posix");
 /// M53: `std::fs` end to end, as a first-contact Rust program.
 pub const FC_RS_FS: &str = concat!(env!("OUT_DIR"), "/fc_rs_fs");
+pub const FC_RS_EXEC: &str = concat!(env!("OUT_DIR"), "/fc_rs_exec");
 /// M51 (spec §3e): the output modes (see the source).
 pub const FID_OUTPUT: &str = concat!(env!("OUT_DIR"), "/fid_output");
 /// M51 (spec §3b): one trap per mode (see the source).

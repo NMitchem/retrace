@@ -21,6 +21,9 @@
 //   execself_dyn spawn-openx            T4-i: O_CLOEXEC open actions at the lowest free slot (closed) and not (kept); a doomed slot
 //                                       replaced by a dup2 action and then closed (ok)
 //   execself_dyn relpath <dir>          chdir to <dir>, then execve("./exec_target_dyn") (the target is there)
+//   execself_dyn script <dir> <target>  M54 t5: writes <dir>/script `#!<target> one`, execs it with "two": the target prints one, the script path, two
+//   execself_dyn script-rel <dir> <target>  the same with the interpreter written relative (`#!./<basename>`), from the target's directory
+//   execself_dyn nested <dir> <target>  <dir>/inner is `#!<target>`, <dir>/script is `#!<dir>/inner`: prints `errno=<n>` for the exec
 //   execself_dyn bytes <target>         argv "\xff\xfe", env X=\x80 into the target
 //   execself_dyn pipe <target>          writes "hello" to a pipe whose read end is fd 20, then the target
 //   execself_dyn chain <n>              execs itself with n-1 until 0, then prints "chain done"
@@ -342,6 +345,35 @@ int main(int argc, char **argv) {
         char *nargv[] = { "./exec_target_dyn", "rel", NULL }; char *nenv[] = { NULL };
         execve("./exec_target_dyn", nargv, nenv);
         printf("exec failed: errno=%d\n", errno); return 1;
+    }
+    if (strcmp(mode, "script") == 0 || strcmp(mode, "script-rel") == 0) {
+        char path[1024], line[1100];
+        snprintf(path, sizeof path, "%s/script", argv[2]);
+        if (strcmp(mode, "script") == 0) snprintf(line, sizeof line, "#!%s one\n", argv[3]);
+        else {
+            char tmp[1024]; strncpy(tmp, argv[3], sizeof tmp - 1); tmp[sizeof tmp - 1] = 0;
+            char *slash = strrchr(tmp, '/'); *slash = 0;
+            if (chdir(tmp) != 0) { printf("chdir failed\n"); return 1; }
+            snprintf(line, sizeof line, "#!./%s one\n", slash + 1);
+        }
+        int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0755);
+        if (fd < 0 || write(fd, line, strlen(line)) < 0) { printf("write failed\n"); return 1; }
+        close(fd); chmod(path, 0755);
+        char *nargv[] = { "ignored", "two", NULL }; char *nenv[] = { NULL };
+        execve(path, nargv, nenv);
+        printf("exec failed: errno=%d\n", errno); return 1;
+    }
+    if (strcmp(mode, "nested") == 0) {
+        char inner[1024], path[1024], line[1100];
+        snprintf(inner, sizeof inner, "%s/inner", argv[2]);
+        snprintf(path, sizeof path, "%s/script", argv[2]);
+        snprintf(line, sizeof line, "#!%s\n", argv[3]);
+        int fd = open(inner, O_WRONLY | O_CREAT | O_TRUNC, 0755); write(fd, line, strlen(line)); close(fd); chmod(inner, 0755);
+        snprintf(line, sizeof line, "#!%s\n", inner);
+        fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0755); write(fd, line, strlen(line)); close(fd); chmod(path, 0755);
+        char *nargv[] = { "ignored", "two", NULL }; char *nenv[] = { NULL };
+        execve(path, nargv, nenv);
+        printf("errno=%d\n", errno); return 0;
     }
     if (strcmp(mode, "bytes") == 0) {
         char *nargv[] = { argv[2], "\xff\xfe", NULL }; char *nenv[] = { "X=\x80", NULL };

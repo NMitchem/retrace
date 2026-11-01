@@ -3,13 +3,13 @@
 //! dylinker and the close set from the event and reads no file but the shared cache); both sides call
 //! `image`, on the same bytes, to build what `Box_::exec_image` installs.
 use retrace_arch::WallCategory;
-use retrace_box::{ExecCall, ExecImage, ExecRefusal, EXE_BASE};
+use retrace_box::{final_args_refusal, script_argv, ExecCall, ExecImage, ExecRefusal, EXE_BASE, SHEBANG_MAX};
 use std::ffi::{CString, OsStr};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 
 /// What `resolve` hands the record arm for `Event::Exec`: the selected slice of the executable, the
-/// `#!` line (empty: task 5), and the selected slice of the image's dynamic linker.
+/// `#!` line (without its newline; empty when the file is not a script), and the selected slice of the image's dynamic linker.
 pub struct Resolved { pub image: Vec<u8>, pub script: Vec<u8>, pub dylinker: Vec<u8> }
 
 const ENOEXEC: u64 = 8;
@@ -94,19 +94,43 @@ fn dylinker_slice(path: &str) -> Result<Vec<u8>, ExecRefusal> {
 /// an errno the program is answered, or a wall by value; nothing here runs past the point of no return.
 /// The order is the kernel's: the file first, the argument strings after (`ExecCall::args_refusal`).
 pub fn resolve(call: &ExecCall) -> Result<Resolved, ExecRefusal> {
-    let path = OsStr::from_bytes(&call.path);
+    let mut r = resolve_file(&call.path, call, true)?;
+    if !r.script.is_empty() && call.args_refusal.is_none() {
+        // Ruling T5-b (inferred): the limits apply to the final vector, which the kernel copies into the image.
+        let argv = script_argv(&r.script, &call.path, &call.argv).expect("resolve_file checked the line");
+        if let Some(refusal) = final_args_refusal(&argv, &call.envp) { return Err(refusal); }
+    }
+    r.script.shrink_to_fit();
+    Ok(r)
+}
+
+/// `resolve` for one path. A `#!` file (`allow_script`) resolves its interpreter through this same function,
+/// once: an interpreter that is itself a script is ENOEXEC, as natively (t0 M2, t5 addendum C).
+fn resolve_file(path_bytes: &[u8], call: &ExecCall, allow_script: bool) -> Result<Resolved, ExecRefusal> {
+    let path = OsStr::from_bytes(path_bytes);
     // Not `File::open` first: opening a FIFO blocks until a writer comes, and exec of one is EACCES.
     let md = std::fs::metadata(path).map_err(|e| errno_of(&e))?;
     if !md.is_file() { return Err(ExecRefusal::Errno(EACCES)); }
-    let cpath = CString::new(call.path.clone()).map_err(|_| ExecRefusal::Errno(2))?;
+    let cpath = CString::new(path_bytes.to_vec()).map_err(|_| ExecRefusal::Errno(2))?;
     // SAFETY: access(2) reads a NUL-terminated path and writes nothing.
     if unsafe { libc::access(cpath.as_ptr(), libc::X_OK) } != 0 { return Err(errno_of(&std::io::Error::last_os_error())); }
     if md.permissions().mode() & 0o6000 != 0 {
         return Err(wall("execve of a setuid or setgid image (retrace cannot make the credential change)"));
     }
     let bytes = std::fs::read(path).map_err(|e| errno_of(&e))?;
-    // `#!` scripts are task 5's; until then they are ENOEXEC, as a file that is not an image.
-    if bytes.len() < 8 || bytes.starts_with(b"#!") { return Err(ExecRefusal::Errno(ENOEXEC)); }
+    if bytes.starts_with(b"#!") {
+        // The line must end within its first 512 bytes (`script_argv` also refuses a long or empty one).
+        if !allow_script { return Err(ExecRefusal::Errno(ENOEXEC)); }
+        let Some(nl) = bytes[..bytes.len().min(SHEBANG_MAX)].iter().position(|&c| c == b'\n') else {
+            return Err(ExecRefusal::Errno(ENOEXEC));
+        };
+        let line = bytes[..nl].to_vec();
+        let words = script_argv(&line, path_bytes, &[]).map_err(ExecRefusal::Errno)?;
+        let mut inner = resolve_file(&words[0], call, false)?;
+        inner.script = line;
+        return Ok(inner);
+    }
+    if bytes.len() < 8 { return Err(ExecRefusal::Errno(ENOEXEC)); }
     let fat = be32(&bytes, 0) == retrace_arch::FAT_MAGIC || be32(&bytes, 0) == retrace_arch::FAT_MAGIC_64;
     let thin = le32(&bytes, 0) == 0xfeed_facf;
     if !fat && !thin { return Err(ExecRefusal::Errno(ENOEXEC)); }
@@ -153,11 +177,19 @@ pub fn resolve(call: &ExecCall) -> Result<Resolved, ExecRefusal> {
 /// What `Box_::exec_image` installs, built from the recorded slices: record's resolved bytes and replay's
 /// event bytes both come through here, so both sides install the same thing. `Err` is a retrace bug on
 /// record (it parsed the same bytes in `resolve`) and a divergence on replay.
-pub fn image(call: &ExecCall, image: &[u8], dylinker: &[u8], closed: &[u32]) -> Result<ExecImage, String> {
+///
+/// A script (`script` non-empty, M54 t5) installs its interpreter: the argv is `script_argv`'s over the call's own
+/// path and argv, and `executable_path=` is the interpreter as the line wrote it.
+pub fn image(call: &ExecCall, image: &[u8], script: &[u8], dylinker: &[u8], closed: &[u32]) -> Result<ExecImage, String> {
     let exe = retrace_guest::try_parse_macho(image).map_err(|why| format!("the exec image {why}"))?;
     let dyld = retrace_guest::try_parse_macho(dylinker).map_err(|why| format!("the exec image's dynamic linker {why}"))?;
-    Ok(ExecImage { exe, dylinker: dyld, argv: call.argv.clone(), envp: call.envp.clone(),
-                   exec_path: call.path.clone(), closed: closed.to_vec(), spawn: call.spawn.clone(), host_new: Vec::new() })
+    let (argv, exec_path) = if script.is_empty() { (call.argv.clone(), call.path.clone()) } else {
+        let v = script_argv(script, &call.path, &call.argv).map_err(|e| format!("the recorded #! line is refused (errno {e})"))?;
+        let p = v[0].clone();
+        (v, p)
+    };
+    Ok(ExecImage { exe, dylinker: dyld, argv, envp: call.envp.clone(),
+                   exec_path, closed: closed.to_vec(), spawn: call.spawn.clone(), host_new: Vec::new() })
 }
 
 #[cfg(test)]
@@ -217,11 +249,18 @@ mod tests {
         std::fs::write(&lib, &dylib).unwrap();
         mode(&lib, 0o755);
         assert_eq!(errno(resolve(&call(lib.to_str().unwrap()))), 8, "a dylib is not an executable");
-        // A `#!` script is ENOEXEC until task 5.
-        let script = d.join("script");
-        std::fs::write(&script, b"#!/bin/echo hi\n").unwrap();
-        mode(&script, 0o755);
-        assert_eq!(errno(resolve(&call(script.to_str().unwrap()))), 8, "a script, until task 5");
+        // A script whose interpreter is itself a script (nested) is ENOEXEC; one with no newline, too.
+        let inner = d.join("inner");
+        std::fs::write(&inner, b"#!/bin/echo hi\n").unwrap();
+        mode(&inner, 0o755);
+        let nested = d.join("nested");
+        std::fs::write(&nested, format!("#!{}\n", inner.display())).unwrap();
+        mode(&nested, 0o755);
+        assert_eq!(errno(resolve(&call(nested.to_str().unwrap()))), 8, "a nested script");
+        let nonl = d.join("nonl");
+        std::fs::write(&nonl, format!("#!{}", retrace_guest::EXEC_TARGET_DYN)).unwrap();
+        mode(&nonl, 0o755);
+        assert_eq!(errno(resolve(&call(nonl.to_str().unwrap()))), 8, "a script whose only line has no newline");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -266,6 +305,31 @@ mod tests {
         mode(&only, 0o755);
         let r = resolve(&call(only.to_str().unwrap())).expect("a fat file with an arm64 slice only");
         assert_eq!(r.image, plain, "else the arm64 slice");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_script_resolves_to_its_interpreters_image_and_keeps_its_line() {
+        let d = scratch("script");
+        let s = d.join("s");
+        std::fs::write(&s, format!("#!{} one\n", retrace_guest::EXEC_TARGET_DYN)).unwrap();
+        mode(&s, 0o755);
+        let r = resolve(&call(s.to_str().unwrap())).expect("a script");
+        assert_eq!(r.image, std::fs::read(retrace_guest::EXEC_TARGET_DYN).unwrap(), "the interpreter's slice");
+        assert_eq!(r.script, format!("#!{} one", retrace_guest::EXEC_TARGET_DYN).into_bytes(), "the line, without its newline");
+        let c = call(s.to_str().unwrap());
+        let img = image(&c, &r.image, &r.script, &r.dylinker, &[]).unwrap();
+        assert_eq!(img.exec_path, retrace_guest::EXEC_TARGET_DYN.as_bytes(), "executable_path is the interpreter as written");
+        assert_eq!(img.argv[1], b"one");
+        assert_eq!(img.argv[2], s.to_str().unwrap().as_bytes(), "then the script path as passed");
+        // missing, directory and non-executable interpreters
+        for (name, line, want) in [("m", "#!/nonexistent/i\n".to_string(), 2u64), ("d", format!("#!{}\n", d.display()), 13),
+                                   ("e", "#!\n".to_string(), 8)] {
+            let p = d.join(name);
+            std::fs::write(&p, line).unwrap();
+            mode(&p, 0o755);
+            assert_eq!(errno(resolve(&call(p.to_str().unwrap()))), want, "{name}");
+        }
         let _ = std::fs::remove_dir_all(&d);
     }
 }

@@ -11,7 +11,7 @@ use cache::{walk_page, CacheMeta, DEFAULT_CACHE_PATH};
 
 mod sig;
 mod exec;
-pub use exec::{decode_spawn, ExecCall, ExecImage, ExecRefusal, FileAction, SpawnFail, SpawnPlan, SpawnTxn};
+pub use exec::{decode_spawn, final_args_refusal, script_argv, SHEBANG_MAX, ExecCall, ExecImage, ExecRefusal, FileAction, SpawnFail, SpawnPlan, SpawnTxn};
 pub mod thread;
 pub mod kq;
 pub mod jit;

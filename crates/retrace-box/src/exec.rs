@@ -330,6 +330,41 @@ const E2BIG: u64 = 7;
 const ENAMETOOLONG: u64 = 63;
 const PATH_MAX: usize = 1024;
 
+/// xnu's `#!` line limit: the line, from `#!` to before the newline, must be under this (t5 addendum B, t0 §M2).
+pub const SHEBANG_MAX: usize = 512;
+
+/// The interpreter's argument vector for `execve(script_path, argv)` of a script whose first line, without its
+/// newline, is `line` (M54 t5, t0 §M2 and the t5 addendum A and B): `{ INTERP as written, W1, W2, ..,
+/// script_path as the call passed it, argv[1..] }`; the script's own `argv[0]` is dropped. The line must start
+/// `#!` and be under 512 bytes. Words are split on space and tab, leading blanks are skipped, `#` and NUL end
+/// the line, CR is not a separator and quotes are not processed. `Err(8)` (ENOEXEC) is a line that is too
+/// long, does not start `#!`, or names no interpreter. Pure, and shared by record and replay (symmetry rule 1).
+pub fn script_argv(line: &[u8], script_path: &[u8], argv: &[Vec<u8>]) -> Result<Vec<Vec<u8>>, u64> {
+    const ENOEXEC: u64 = 8;
+    if line.len() >= SHEBANG_MAX || !line.starts_with(b"#!") { return Err(ENOEXEC); }
+    let body = &line[2..];
+    let end = body.iter().position(|&c| c == b'#' || c == 0).unwrap_or(body.len());
+    let mut out: Vec<Vec<u8>> = body[..end].split(|&c| c == b' ' || c == b'\t')
+        .filter(|w| !w.is_empty()).map(<[u8]>::to_vec).collect();
+    if out.is_empty() { return Err(ENOEXEC); }
+    out.push(script_path.to_vec());
+    out.extend(argv.iter().skip(1).cloned());
+    Ok(out)
+}
+
+/// The refusal of the *final* argument vector, after a script's expansion (Ruling T5-b, inferred, not
+/// measured: the kernel copies the final vector into the new image): the same formula and limits as
+/// `read_exec_strings`/`read_exec_call` apply to the strings the call carried.
+pub fn final_args_refusal(argv: &[Vec<u8>], envp: &[Vec<u8>]) -> Option<ExecRefusal> {
+    let total: usize = argv.iter().chain(envp).map(|s| s.len() + 1 + 8).sum();
+    if total + 16 > EXEC_ARG_MAX { return Some(ExecRefusal::Errno(E2BIG)); }
+    if total + 16 > START_ARGS_LIMIT {
+        return Some(ExecRefusal::Wall(retrace_arch::wall(WallCategory::ProcessCreation, format!(
+            "execve of a script with {} bytes of arguments, past retrace's 128 KiB start-stack limit", total + 16))));
+    }
+    None
+}
+
 impl Box_ {
     /// The `psa_flags` of a `posix_spawn`'s descriptor (`args[2]`: `attr_size` at +0, `attrp` at +8;
     /// `psa_flags` is a `short` at the attr's +0, t0 M3). `Some(None)` is a NULL descriptor or NULL `attrp`
@@ -662,6 +697,35 @@ impl Box_ {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sa(line: &[u8]) -> Result<Vec<String>, u64> {
+        script_argv(line, b"./s", &[b"s0".to_vec(), b"a1".to_vec()])
+            .map(|v| v.iter().map(|w| String::from_utf8_lossy(w).into_owned()).collect())
+    }
+    fn strs(v: &[&str]) -> Result<Vec<String>, u64> { Ok(v.iter().map(|s| s.to_string()).collect()) }
+
+    #[test]
+    fn a_shebang_line_splits_as_xnu_does() {
+        assert_eq!(sa(b"#!/i one"), strs(&["/i", "one", "./s", "a1"]), "the interpreter, its argument, the script path as passed, the rest; argv[0] dropped");
+        assert_eq!(sa(b"#! /i A"), strs(&["/i", "A", "./s", "a1"]), "leading blanks are skipped");
+        assert_eq!(sa(b"#!\t/i\tA\tB  "), strs(&["/i", "A", "B", "./s", "a1"]), "tabs separate, trailing blanks trim");
+        assert_eq!(sa(b"#!/i A B"), strs(&["/i", "A", "B", "./s", "a1"]), "every word is its own argument");
+        assert_eq!(sa(b"#!/i A#B C"), strs(&["/i", "A", "./s", "a1"]), "# ends the line, even mid-word");
+        assert_eq!(sa(b"#!/i A\0B"), strs(&["/i", "A", "./s", "a1"]), "a NUL ends the line");
+        assert_eq!(sa(b"#!/i A\r"), strs(&["/i", "A\r", "./s", "a1"]), "CR is not a separator");
+        assert_eq!(sa(b"#!/i\r"), strs(&["/i\r", "./s", "a1"]), "CR stays in the interpreter's name");
+        assert_eq!(sa(b"#!/i 'A B'"), strs(&["/i", "'A", "B'", "./s", "a1"]), "quotes are not processed");
+        assert_eq!(sa(b"#!"), Err(8), "an empty interpreter");
+        assert_eq!(sa(b"#!   "), Err(8), "only blanks");
+        assert_eq!(sa(b"#!#x"), Err(8), "a # before any word");
+        assert_eq!(sa(b"/i"), Err(8), "no #!");
+        let mut l = b"#!/".to_vec();
+        l.resize(511, b'a');
+        assert!(sa(&l).is_ok(), "511 bytes works");
+        l.push(b'a');
+        assert_eq!(sa(&l), Err(8), "512 bytes is ENOEXEC");
+        assert_eq!(script_argv(b"#!/i", b"./s", &[]), Ok(vec![b"/i".to_vec(), b"./s".to_vec()]), "an empty argv");
+    }
 
     /// A descriptor with `attr_size` 0xf8 and `file_actions_size` `fa`, extensions empty.
     fn desc(fa: u64) -> Vec<u8> {

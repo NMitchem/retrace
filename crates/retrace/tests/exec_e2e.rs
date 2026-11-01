@@ -379,3 +379,46 @@ fn an_open_actions_cloexec_sticks_only_at_the_lowest_free_slot() {
     } else { unreachable!() }
     let _ = std::fs::remove_file(&t);
 }
+
+/// M54 t5: a `#!` script, one level. The target prints its argv in hex and its `executable_path=`; native and
+/// the recording must print the same lines.
+#[test]
+fn a_script_runs_its_interpreter_as_natively() {
+    let target = retrace_guest::EXEC_TARGET_DYN;
+    for mode in ["script", "script-rel"] {
+        let dir = scratch(mode);
+        std::fs::create_dir_all(&dir).unwrap();
+        let d = dir.to_str().unwrap();
+        let (out, t) = as_natively(&[mode, d, target], false);
+        let hex = |s: &str| s.bytes().map(|b| format!("{b:02x}")).collect::<String>();
+        has(&out, "target argc=4");
+        let want_interp = if mode == "script" { target.to_string() } else {
+            format!("./{}", Path::new(target).file_name().unwrap().to_str().unwrap()) };
+        has(&out, &format!("argv[1]={}", hex("one")));
+        has(&out, &format!("argv[2]={}", hex(&format!("{d}/script"))));
+        has(&out, &format!("argv[3]={}", hex("two")));
+        has(&out, &format!("apple0={}", hex(&format!("executable_path={want_interp}"))));
+        // The recorded landmark carries the line and the interpreter's image.
+        match &execs(&t)[0] {
+            Event::Exec { script, path, .. } => {
+                assert_eq!(script.as_slice(), format!("#!{want_interp} one").as_bytes(), "{mode}: the line, without its newline");
+                assert_eq!(path.as_slice(), format!("{d}/script").as_bytes());
+            }
+            e => panic!("{e:?}"),
+        }
+        let _ = std::fs::remove_file(&t);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// A script whose interpreter is itself a script is ENOEXEC (8), as natively.
+#[test]
+fn a_nested_script_answers_natives_errno() {
+    let dir = scratch("nested");
+    std::fs::create_dir_all(&dir).unwrap();
+    let (out, t) = as_natively(&["nested", dir.to_str().unwrap(), retrace_guest::EXEC_TARGET_DYN], false);
+    has(&out, "errno=8");
+    assert!(execs(&t).is_empty(), "no Exec landmark for a refused script");
+    let _ = std::fs::remove_file(&t);
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -1883,7 +1883,7 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                 };
                 // The close set is the host kernel's answer, recorded (Ruling 3); a spawn's is over the post-action table.
                 let closed = match &txn { Some(t) => t.closed.clone(), None => b.cloexec_on_host() };
-                let mut img = exec::image(&call, &resolved.image, &resolved.dylinker, &closed)
+                let mut img = exec::image(&call, &resolved.image, &resolved.script, &resolved.dylinker, &closed)
                     .unwrap_or_else(|m| panic!("exec: resolve accepted an image it cannot load: {m}"));
                 if let Some(t) = &txn { img.host_new = t.host_new.clone(); }
                 w.append(&Event::Exec { num, args, path: call.path.clone(), image: resolved.image, script: resolved.script,
@@ -4102,7 +4102,7 @@ impl ReplaySession {
                         // `read_exec_call` and `exec_image`, with the same arguments, the image rebuilt from the
                         // event's bytes. Replay reads no file for an exec. A failed exec is an ordinary
                         // `Syscall` landmark and takes the generic tail above.
-                        Some(Event::Exec { num: rn, args: ra, path: rpath, image: rimage, script: _, dylinker: rdyld,
+                        Some(Event::Exec { num: rn, args: ra, path: rpath, image: rimage, script: rscript, dylinker: rdyld,
                                            closed: rclosed, thread: rthread }) => {
                             if num != *rn || args != *ra {
                                 return Err(Divergence { landmark: self.idx, pc,
@@ -4129,7 +4129,7 @@ impl ReplaySession {
                                     "exec path mismatch: replay reads {:?} from guest memory, the recording holds {:?}",
                                     String::from_utf8_lossy(&call.path), String::from_utf8_lossy(rpath)) });
                             }
-                            let img = exec::image(&call, rimage, rdyld, rclosed).map_err(|m| Divergence {
+                            let img = exec::image(&call, rimage, rscript, rdyld, rclosed).map_err(|m| Divergence {
                                 landmark: self.idx, pc, detail: format!("exec: {m}") })?;
                             if let Err(u) = self.b.exec_image(&img) {
                                 return Err(Divergence { landmark: self.idx, pc, detail: u.marked() });

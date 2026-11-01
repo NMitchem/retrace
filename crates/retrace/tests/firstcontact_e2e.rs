@@ -85,6 +85,8 @@ const ROWS: &[Row] = &[
     // M54 t4: the same through posix_spawn(POSIX_SPAWN_SETEXEC) with dup2/close actions, CLOEXEC_DEFAULT and
     // 0/1/2 inherited; the target prints "spawned".
     Row { name: "fc_spawn_exec", bin: retrace_guest::FC_SPAWN_EXEC, args: &[retrace_guest::EXEC_TARGET_DYN], expect: Expect::Pass },
+    // M54 t5: Rust's Command::exec through PATH misses (ENOENT, then EACCES), the last attempt succeeding.
+    Row { name: "fc_rs_exec", bin: retrace_guest::FC_RS_EXEC, args: &[retrace_guest::EXEC_TARGET_DYN], expect: Expect::Pass },
     // M51 §3f: the program gets the recorder's environment, which is ENV, as native gets it.
     Row { name: "fc_env", bin: retrace_guest::FC_ENV, args: &["one", "two words"], expect: Expect::Pass },
     // M51 (R8): __builtin_trap(), the brk class without swiftc. Joins in Task 3, where it passes (C9).

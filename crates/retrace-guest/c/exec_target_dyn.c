@@ -3,6 +3,7 @@
 //   target argc=<n>
 //   argv[i]=<hex>            for i >= 1 (an argument that starts "pid:" prints `pid` instead: the
 //                            pid is the one thing that differs between runs)
+//   apple0=<hex of apple[0]>  (t5: `executable_path=<the interpreter or path as exec'd>`)
 //   X=<hex of getenv("X") or "unset">
 //   pid_same=<yes|no>        only when argv[1] starts "pid:" (the caller's pid, passed through exec)
 //   fd <n> <file|fifo|other> for each open descriptor 16..39
@@ -25,12 +26,13 @@
 
 static void hex(const char *s, size_t n) { for (size_t i = 0; i < n; i++) printf("%02x", (unsigned char)s[i]); }
 
-int main(int argc, char **argv) {
+int main(int argc, char **argv, char **envp, char **apple) {
     printf("target argc=%d\n", argc);
     for (int i = 1; i < argc; i++) {
         if (strncmp(argv[i], "pid:", 4) == 0) { printf("argv[%d]=pid\n", i); continue; }
         printf("argv[%d]=", i); hex(argv[i], strlen(argv[i])); printf("\n");
     }
+    if (apple && apple[0]) { printf("apple0="); hex(apple[0], strlen(apple[0])); printf("\n"); }
     const char *x = getenv("X");
     printf("X="); if (x) hex(x, strlen(x)); else printf("unset"); printf("\n");
     if (argc > 1 && strncmp(argv[1], "pid:", 4) == 0)
