@@ -389,15 +389,17 @@ fn main() {
         .status().expect("clang atfdcwd_dyn");
     assert!(status.success(), "atfdcwd_dyn guest build failed");
 
-    // exec_dyn: the M38 exec fixture — `execve` then `posix_spawn(SETEXEC)`; prints the errno
-    // each returns — both are refused, never forwarded. Same recipe as hello_dyn.
-    let src = format!("{}/c/exec_dyn.c", env!("CARGO_MANIFEST_DIR"));
-    let bin = format!("{out}/exec_dyn");
-    println!("cargo:rerun-if-changed={src}");
-    let status = Command::new("clang")
-        .args(["-arch","arm64","-o",&bin,&src])
-        .status().expect("clang exec_dyn");
-    assert!(status.success(), "exec_dyn guest build failed");
+    // M54 t3: the exec fixtures. execself_dyn, exec_target_dyn and fc_execve are arm64 dynamic programs;
+    // exec_x86 is built for x86_64 only (natively it runs under Rosetta; retrace refuses an exec of it).
+    for (name, arch) in [("execself_dyn", "arm64"), ("exec_target_dyn", "arm64"), ("fc_execve", "arm64"), ("fc_spawn_exec", "arm64"), ("exec_x86", "x86_64")] {
+        let src = format!("{}/c/{name}.c", env!("CARGO_MANIFEST_DIR"));
+        let bin = format!("{out}/{name}");
+        println!("cargo:rerun-if-changed={src}");
+        let status = Command::new("clang")
+            .args(["-arch", arch, "-Wno-deprecated-declarations", "-o", &bin, &src])
+            .status().unwrap_or_else(|e| panic!("clang {name}: {e}"));
+        assert!(status.success(), "{name} guest build failed");
+    }
 
     // kqinit_dyn: the M45 fixture — libdispatch's workqueue-kqueue init call, issued by hand
     // through `svc`, after a dispatch_async brings the workqueue up. Same recipe as hello_dyn.
@@ -1159,7 +1161,7 @@ fn main() {
     let dir = env!("CARGO_MANIFEST_DIR");
     for name in ["fc_null_load", "fc_null_store", "fc_null_call", "fc_munmapped", "fc_low_store",
                  "fc_stack_overflow", "fc_uaf", "fc_assert", "fc_sleep", "fc_usleep", "fc_nanosleep",
-                 "fc_mutex", "fc_fileio", "fc_env", "fc_c_trap", "fc_signal", "fc_posix"] {
+                 "fc_mutex", "fc_fileio", "fc_env", "fc_c_trap", "fc_signal", "fc_posix", "fc_spawn_child"] {
         let src = format!("{dir}/c/{name}.c");
         let bin = format!("{out}/{name}");
         println!("cargo:rerun-if-changed={src}");
@@ -1184,7 +1186,7 @@ fn main() {
     let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
     for (name, harness) in [("fc_rs_null", false), ("fc_rs_sleep", false),
                             ("fc_rs_tests", true), ("fc_rs_tests_fail", true), ("fc_rs_threads", true),
-                            ("fc_rs_fs", false)] {
+                            ("fc_rs_fs", false), ("fc_rs_exec", false)] {
         let src = format!("{dir}/rs/{name}.rs");
         let bin = format!("{out}/{name}");
         println!("cargo:rerun-if-changed={src}");

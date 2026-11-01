@@ -299,6 +299,24 @@ impl Symbols {
         Symbols { images }
     }
 
+    /// M54 §3i (C8): the symbols of an exec epoch, from the slices an `Event::Exec` carries. Each
+    /// slice is parsed with `try_parse_macho` and its segments staged as `Region`s at their load
+    /// addresses (the dylinker's plus `DYLD_BASE`, as the box loads it), and then read by the same
+    /// reader `from_snapshot` uses. The slices hold `__LINKEDIT`, so no path is read and no disk is
+    /// touched. A slice that does not parse contributes nothing, as an absent image does in
+    /// `from_snapshot`: symbolication is presentation and never fails a session.
+    pub fn from_exec(image: &[u8], dylinker: &[u8]) -> Symbols {
+        let staged = |bytes: &[u8], base: u64| -> Vec<Region> {
+            retrace_guest::try_parse_macho(bytes).map(|l| l.segments.into_iter()
+                .map(|s| Region { ipa: s.vaddr.wrapping_add(base), bytes: s.data }).collect()).unwrap_or_default()
+        };
+        let images = [(image, retrace_box::EXE_BASE, 0), (dylinker, retrace_box::DYLD_BASE, retrace_box::DYLD_BASE)]
+            .into_iter()
+            .filter_map(|(bytes, header, base)| SymbolTable::for_image(&staged(bytes, base), header))
+            .collect();
+        Symbols { images }
+    }
+
     /// `(name, offset)` from whichever image claims the address.
     pub fn resolve(&self, addr: u64) -> Option<(&str, u64)> {
         self.images.iter().find_map(|t| t.resolve(addr))
@@ -705,5 +723,48 @@ mod tests {
         assert_eq!(crash_site(&mem, retrace_box::SHARED_REGION_START + 0x1234), "a system library",
                    "the cache's symbols are not in the recording");
         assert_eq!(crash_site(&mem, 0x4000_dead_0000), "", "nothing claims it, so nothing is guessed");
+    }
+
+    #[test]
+    fn from_exec_reads_the_slices_symtab() {
+        // M54 C8: the symbols of an epoch come out of the slices alone. The fixtures' own `__LINKEDIT`
+        // answers: `_hex` is the target's and `_do_exec` is `execself_dyn`'s, and dyld's entry is a
+        // symbol of the dylinker slice at its slid address.
+        let target = std::fs::read(retrace_guest::EXEC_TARGET_DYN).unwrap();
+        let dyld = std::fs::read("/usr/lib/dyld").expect("the system dyld, which every dynamic recording reads");
+        let s = Symbols::from_exec(&target, &dyld);
+        let main = s.addrs_of("_main");
+        assert_eq!(main.len(), 1, "one _main: {main:?}");
+        assert_eq!(s.resolve(main[0] + 4), Some(("_main", 4)));
+        assert!(!s.addrs_of("_hex").is_empty(), "the target's own static function");
+        assert!(s.addrs_of("_do_exec").is_empty(), "execself_dyn's is not in this epoch");
+        let entry = retrace_guest::try_parse_macho(&dyld).unwrap().entry + retrace_box::DYLD_BASE;
+        assert_eq!(s.resolve(entry), Some(("__dyld_start", 0)), "dyld's entry, at DYLD_BASE");
+        // An unparsable slice contributes nothing and never panics.
+        assert!(Symbols::from_exec(b"not a mach-o", b"").resolve(retrace_box::EXE_BASE + 0x460).is_none());
+    }
+
+    /// Final review part 2, I3: thin arm64 `MH_EXECUTE` headers whose load commands cannot be walked.
+    fn malformed() -> Vec<(&'static str, Vec<u8>)> {
+        let hdr = |ncmds: u32, sizeofcmds: u32, cmds: &[u8]| {
+            let mut b = Vec::new();
+            for w in [0xfeed_facfu32, retrace_arch::CPU_TYPE_ARM64, 0, 2, ncmds, sizeofcmds, 0, 0] { b.extend_from_slice(&w.to_le_bytes()); }
+            b.extend_from_slice(cmds);
+            b
+        };
+        vec![("truncated: ncmds 1, no command bytes", hdr(1, 8, &[])),
+             ("cmdsize 0", hdr(1, 8, &[0x19, 0, 0, 0, 0, 0, 0, 0])),
+             ("huge ncmds", hdr(u32::MAX, 8, &[0x19, 0, 0, 0, 0, 0, 0, 0]))]
+    }
+
+    #[test]
+    fn from_exec_over_a_malformed_slice_is_empty_symbols() {
+        let good = std::fs::read(retrace_guest::EXEC_TARGET_DYN).unwrap();
+        for (what, bad) in malformed() {
+            let none = Symbols::from_exec(&bad, &bad);
+            assert!(none.resolve(retrace_box::EXE_BASE + 0x460).is_none() && none.addrs_of("_main").is_empty(), "{what}");
+            // One bad slice leaves the other's symbols.
+            assert!(!Symbols::from_exec(&good, &bad).addrs_of("_main").is_empty(), "{what}: the good image still answers");
+        }
     }
 }

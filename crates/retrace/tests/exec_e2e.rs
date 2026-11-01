@@ -1,41 +1,466 @@
-// M38 gate. execve/posix_spawn are REFUSED, never forwarded. Two assertions that a forward
-// cannot both satisfy: (1) the recorder's stderr carries the refusal line — the only observable
-// a forwarded call that happens to EFAULT cannot fake (CLAUDE.md's first gate rule: the errno
-// and the empty write set are exactly what the pre-M38 forward produced, so they are the
-// CONTINUITY half, asserted second and labelled as such); (2) the trace's events for 59 and 244
-// carry the constant and no writes. Repo-owned because the CPython launcher test skips without
-// Homebrew Python and so guards nothing on its own.
+//! M54 (spec §3b-§3e, §3h): `execve` in place. Each mode of `execself_dyn` runs natively, is
+//! recorded, is compared with native line by line, and is replayed twice: a state reset both runs get
+//! wrong in the same way would pass record against replay, so every assertion is against native, and
+//! the lines that matter are pinned by value as well. The refusals are by name: one `retrace:` line,
+//! exit 4, and a replay that ends at the incomplete-recording line.
+//!
+//! Task 3 holds `execve`; tasks 4 and 5 add `posix_spawn(SETEXEC)` and `#!` scripts to this file.
 mod util;
+use retrace_trace::Event;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-fn expect_stdout() -> Vec<u8> {
-    let e = retrace_arch::exec_refusal_errno(retrace_arch::SYS_EXECVE).unwrap();
-    let p = retrace_arch::exec_refusal_errno(retrace_arch::SYS_POSIX_SPAWN).unwrap();
-    format!("execve={e}\nposix_spawn={p}\n").into_bytes()
+const WALLS: &str = "https://github.com/NMitchem/retrace/blob/main/docs/walls.md";
+const BOUND: u64 = 300;
+
+/// A path unique to this process and call.
+fn scratch(name: &str) -> PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    std::env::temp_dir().join(format!("retrace-exec-{}-{}-{name}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)))
+}
+
+fn cli(args: &[&str]) -> util::Bounded { util::run_bounded(util::bin(), args, &[], BOUND) }
+
+/// `record-dyn guest -- args`, bounded; the trace path comes back too.
+fn rec(guest: &str, args: &[&str]) -> (util::Bounded, PathBuf) {
+    let t = scratch("t.bin");
+    let mut argv = vec!["record-dyn", guest, "-o", t.to_str().unwrap()];
+    if !args.is_empty() { argv.push("--"); argv.extend_from_slice(args); }
+    (cli(&argv), t)
+}
+
+fn lossy(b: &[u8]) -> String { String::from_utf8_lossy(b).into_owned() }
+
+/// Run `execself_dyn args` natively, recorded, and replayed twice. All must exit 0 and print what native
+/// printed (stdout, and stderr for the mode that reads it). Returns native's stdout and the trace.
+fn as_natively(args: &[&str], stderr_too: bool) -> (String, PathBuf) {
+    let native = util::run_bounded(retrace_guest::EXECSELF_DYN, args, &[], BOUND);
+    assert_eq!(native.code, Some(0), "{args:?}: native exits 0. stderr:\n{}", native.stderr);
+    let (r, t) = rec(retrace_guest::EXECSELF_DYN, args);
+    assert_eq!(r.code, Some(0), "{args:?}: the recording exits 0. stderr:\n{}", r.stderr);
+    assert_eq!(lossy(&r.stdout), lossy(&native.stdout), "{args:?}: the recording prints what native printed");
+    if stderr_too { assert_eq!(r.stderr, native.stderr, "{args:?}: and the same stderr"); }
+    for i in 0..2 {
+        let rp = cli(&["replay", t.to_str().unwrap()]);
+        assert_eq!(rp.code, Some(0), "{args:?}: replay {i} exits 0. stderr:\n{}", rp.stderr);
+        assert_eq!(rp.stdout, r.stdout, "{args:?}: replay {i} prints what the recording printed");
+        if stderr_too { assert_eq!(rp.stderr, r.stderr, "{args:?}: replay {i}'s stderr"); }
+    }
+    (lossy(&native.stdout), t)
+}
+
+fn has(out: &str, line: &str) { assert!(out.lines().any(|l| l == line), "no line {line:?} in:\n{out}"); }
+fn lacks_prefix(out: &str, prefix: &str) { assert!(!out.lines().any(|l| l.starts_with(prefix)), "a line starting {prefix:?} in:\n{out}"); }
+
+fn execs(trace: &Path) -> Vec<Event> {
+    retrace_trace::Reader::open(trace).unwrap().into_iter().filter(|e| matches!(e, Event::Exec { .. })).collect()
 }
 
 #[test]
-fn exec_is_refused_and_says_so() {
-    let (rec, trace) = util::record_dynamic(retrace_guest::EXEC_DYN);
-    assert_eq!(rec.code, 0, "the fixture must run to its own exit(0); a replaced image or a crash \
-        cannot print anything. stderr:\n{}", rec.stderr);
-    // The difference M38 makes.
-    assert!(rec.stderr.contains("retrace: refused: execve (syscall 59), returned EFAULT to the program")
-        && rec.stderr.contains("retrace: refused: posix_spawn (syscall 244), returned EFAULT to the program"),
-        "both refusal lines must be on the recorder's stderr; a FORWARDED exec prints none. stderr:\n{}", rec.stderr);
-    // Continuity (spec R4): what the guest reads is what the pre-M38 forward returned.
-    assert_eq!(rec.stdout, expect_stdout(), "got {:?}", String::from_utf8_lossy(&rec.stdout));
-    let rep = util::replay(&trace);
-    assert_eq!(rep.code, 0, "replay: {}", rep.stderr);
-    assert_eq!(rep.stdout, rec.stdout);
-    let events = retrace_trace::Reader::open(&trace).unwrap();
-    let mut seen = Vec::new();
-    for e in events.iter() {
-        if let retrace_trace::Event::Syscall { num, ret, err, writes, .. } = e {
-            if let Some(want) = retrace_arch::exec_refusal_errno(*num) {
-                assert!(*err && *ret == want && writes.is_empty(), "syscall {num}: ret {ret} err {err} writes {}", writes.len());
-                seen.push(*num);
-            }
-        }
+fn an_execve_runs_the_new_image_as_natively() {
+    let target = retrace_guest::EXEC_TARGET_DYN;
+    // Every row of spec 2b's execve column.
+    let (out, t) = as_natively(&["execve"], false);
+    has(&out, "stage1 fds keep=20 cloexec=21 pipe=22,23 kq=24");
+    has(&out, "pid_same=yes");
+    has(&out, "tid_changed=yes");
+    has(&out, "argv[3]=<a b>"); has(&out, "argv[4]=<>");
+    has(&out, "fd 20 open (file) cloexec=0");            // a plain descriptor survives
+    has(&out, "fd 22 open (fifo) cloexec=0"); has(&out, "fd 23 open (fifo) cloexec=0"); // both pipe ends
+    has(&out, "fd 25 open (file) cloexec=0");                  // dup2(1, 25): open, FD_CLOEXEC clear
+    lacks_prefix(&out, "fd 21 ");                         // the O_CLOEXEC file is closed
+    lacks_prefix(&out, "fd 24 ");                         // the kqueue is closed
+    lacks_prefix(&out, "fd 26 ");                        // dup2(1, 26) + FD_CLOEXEC is closed
+    has(&out, "USR1 DFL"); has(&out, "USR2 IGN");        // a handler resets, an ignore stays
+    has(&out, "mask HUP=1 INT=0 USR2=0");                // the mask is kept
+    has(&out, "pending HUP=1 USR2=0");                   // and so is a masked pending signal, not delivered
+    has(&out, "altstack flags=4 size=0");                // SS_DISABLE
+    has(&out, "itimer armed=1");                         // ITIMER_REAL is kept
+    has(&out, "umask=027"); has(&out, "cwd=/private/tmp"); has(&out, "env X=carried");
+    let ev = execs(&t);
+    assert_eq!(ev.len(), 1, "one Exec landmark");
+    if let Event::Exec { path, image, dylinker, closed, thread, .. } = &ev[0] {
+        assert_eq!(path.as_slice(), retrace_guest::EXECSELF_DYN.as_bytes(), "the path as the guest passed it");
+        assert!(image.len() > 1000 && dylinker.len() > 1_000_000, "the image and dyld travel in the event");
+        // The close set is the host's answer: the O_CLOEXEC file (21) and the FD_CLOEXEC alias (26), and
+        // nothing that survives. (The kqueue, 24, is closed by rule whether or not its host fd says so.)
+        assert!(closed.contains(&21) && closed.contains(&26), "the O_CLOEXEC file and the FD_CLOEXEC alias: {closed:?}");
+        assert!(closed.iter().all(|f| ![0, 1, 2, 20, 22, 23, 25].contains(f)), "no survivor is closed: {closed:?}");
+        assert_eq!(*thread, 0);
+    } else { unreachable!() }
+    let _ = std::fs::remove_file(&t);
+
+    // FD_CLOEXEC on fd 1: its slot closes, 0 and 2 stay. Stage 2 reports on stderr.
+    let (_, t) = as_natively(&["cloexec1"], true);
+    let _ = std::fs::remove_file(&t);
+
+    // A relative path, resolved against the cwd the guest chose.
+    let dir = scratch("rel");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::copy(target, dir.join("exec_target_dyn")).unwrap();
+    let (out, t) = as_natively(&["relpath", dir.to_str().unwrap()], false);
+    has(&out, "target argc=2"); has(&out, "argv[1]=72656c");
+    if let Event::Exec { path, .. } = &execs(&t)[0] { assert_eq!(path.as_slice(), b"./exec_target_dyn"); }
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_file(&t);
+
+    // Bytes that are not UTF-8 cross the exec exactly.
+    let (out, t) = as_natively(&["bytes", target], false);
+    has(&out, "argv[1]=fffe"); has(&out, "X=80");
+    let _ = std::fs::remove_file(&t);
+
+    // A pipe's bytes survive: the target reads what the program wrote before the exec.
+    let (out, t) = as_natively(&["pipe", target], false);
+    has(&out, "fd 20 fifo"); has(&out, "fd 21 fifo"); has(&out, "pipe=68656c6c6f");
+    let _ = std::fs::remove_file(&t);
+}
+
+#[test]
+fn an_execve_from_a_worker_ends_every_other_thread() {
+    // Main blocks in pthread_join; the worker execs. The join never returns, and stage 2 runs normally
+    // with a new thread id.
+    let (out, t) = as_natively(&["worker"], false);
+    has(&out, "tid_changed=yes");
+    assert!(!out.contains("join returned"), "main's join does not return:\n{out}");
+    let ev = execs(&t);
+    if let Event::Exec { thread, .. } = &ev[0] { assert_eq!(*thread, 1, "the caller was the worker, thread 1"); } else { unreachable!() }
+    let _ = std::fs::remove_file(&t);
+
+    // A worker blocked in pthread_cond_wait with a signal pending on it: main masks the signal, so the
+    // pending signal moves to the new image's only thread and stays pending (Ruling T0-i).
+    let (out, t) = as_natively(&["pendmasked"], false);
+    has(&out, "pending HUP=0 USR2=1");
+    has(&out, "mask HUP=0 INT=0 USR2=1");
+    has(&out, "tid_changed=yes");
+    let _ = std::fs::remove_file(&t);
+}
+
+#[test]
+fn a_chain_of_twenty_images_records_and_replays() {
+    let (out, t) = as_natively(&["chain", "20"], false);
+    assert_eq!(out, "chain done\n");
+    assert_eq!(execs(&t).len(), 20, "twenty Exec landmarks");
+    let size = std::fs::metadata(&t).unwrap().len();
+    let per = size / 20;
+    // H6: the spec's halt is 16 MiB an exec. dyld's slice alone is about 1.3 MB.
+    assert!(per < 16 * 1024 * 1024, "trace size per exec {per} bytes (total {size}) is past the 16 MiB halt");
+    util::announce(&format!("H6: chain 20 trace {size} bytes, {per} bytes per exec"));
+    let _ = std::fs::remove_file(&t);
+}
+
+#[test]
+fn execves_errors_answer_as_natively() {
+    let dir = scratch("errs");
+    std::fs::create_dir_all(&dir).unwrap();
+    let d = dir.to_str().unwrap();
+    let args = ["errs", d, retrace_guest::EXEC_TARGET_DYN];
+    let (out, t) = as_natively(&args, false);
+    for line in ["missing errno=2", "noexec errno=13", "directory errno=13", "garbage errno=8", "badpath errno=14",
+                 // The file is checked before the argument strings are read (measured natively).
+                 "missing_badargv errno=2", "garbage_badargv errno=8", "missing_farargv errno=2",
+                 "badargv errno=14", "badargventry errno=14", "badenvp errno=14", "badenventry errno=14"] {
+        has(&out, line);
     }
-    assert_eq!(seen, vec![retrace_arch::SYS_EXECVE, retrace_arch::SYS_POSIX_SPAWN], "both exec spellings must be landmarks: {seen:?}");
+    // A failed exec is an ordinary landmark: nothing replaced the image.
+    assert!(execs(&t).is_empty(), "no Exec landmark for a failed exec");
+    let _ = std::fs::remove_file(&t);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Final review part 2, I1: a failed exec's argv and envp strings sit on a page the program never touches. Record
+/// presents every exec argument page before it knows the call fails, so replay's landmark for the failure must
+/// present the same ones, or the exit compare finds a backing record has and replay lacks.
+#[test]
+fn a_failed_exec_presents_the_pages_record_presented() {
+    let dir = scratch("untouched");
+    std::fs::create_dir_all(&dir).unwrap();
+    let (out, t) = as_natively(&["untouched", dir.to_str().unwrap()], false);
+    has(&out, "untouched errno=2");
+    assert!(execs(&t).is_empty(), "no Exec landmark for a failed exec");
+    let _ = std::fs::remove_file(&t);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A bad total is E2BIG as natively; past retrace's start-stack limit but under native's is a wall.
+#[test]
+fn an_argument_vector_past_native_is_e2big_and_past_retrace_is_a_wall() {
+    let target = retrace_guest::EXEC_TARGET_DYN;
+    let (out, t) = as_natively(&["e2big", target], false);
+    has(&out, "exec failed: errno=7");
+    let _ = std::fs::remove_file(&t);
+    let line = assert_wall(&["bigargs", target], "execve with ", "process-creation", "");
+    assert!(line.contains("past retrace's 128 KiB start-stack limit"), "{line}");
+}
+
+/// The recording carries the image, so replay never opens the binary (spec §3l): overwrite it after the
+/// recording and the replay still prints what the recording printed; delete it and it still does.
+#[test]
+fn replay_never_reads_the_new_binary() {
+    let dir = scratch("nodisk");
+    std::fs::create_dir_all(&dir).unwrap();
+    let t_path = dir.join("t");
+    std::fs::copy(retrace_guest::EXEC_TARGET_DYN, &t_path).unwrap();
+    let tp = t_path.to_str().unwrap();
+    let (r, trace) = rec(retrace_guest::EXECSELF_DYN, &["copy", tp]);
+    assert_eq!(r.code, Some(0), "{}", r.stderr);
+    assert!(lossy(&r.stdout).contains("target argc=2"), "the recording ran the target:\n{}", lossy(&r.stdout));
+    // Control: the file is now the x86 image, so natively it prints x86. If it did not, the overwrite
+    // below would prove nothing.
+    std::fs::copy(retrace_guest::EXEC_X86, &t_path).unwrap();
+    let native = util::run_bounded(tp, &[], &[], BOUND);
+    assert_eq!(lossy(&native.stdout), "x86\n", "control: the overwritten file is a different program");
+    let rp = cli(&["replay", trace.to_str().unwrap()]);
+    assert_eq!((rp.code, rp.stdout.as_slice()), (Some(0), r.stdout.as_slice()), "replay after the overwrite. stderr:\n{}", rp.stderr);
+    std::fs::remove_file(&t_path).unwrap();
+    let rp = cli(&["replay", trace.to_str().unwrap()]);
+    assert_eq!((rp.code, rp.stdout.as_slice()), (Some(0), r.stdout.as_slice()), "replay after the delete. stderr:\n{}", rp.stderr);
+    let _ = std::fs::remove_file(&trace);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// One wall: record's output, one `retrace: unsupported: <what>` line linking `#<anchor>`, exit 4, and
+/// a replay that ends at the incomplete-recording line. Returns the wall line.
+fn assert_wall(args: &[&str], what: &str, anchor: &str, stdout_so_far: &str) -> String {
+    let (r, t) = rec(retrace_guest::EXECSELF_DYN, args);
+    let lines: Vec<&str> = r.stderr.lines().filter(|l| l.starts_with("retrace:")).collect();
+    assert_eq!(lines.len(), 1, "{args:?}: exactly one retrace: line. stderr:\n{}", r.stderr);
+    let line = lines[0].to_owned();
+    assert!(line.starts_with(&format!("retrace: unsupported: {what}")), "{args:?}: {line}");
+    assert!(line.ends_with(&format!(" - see {WALLS}#{anchor}")), "{args:?}: {line}");
+    assert!(!r.stderr.contains("panicked at") && !r.stderr.contains("internal error"), "{args:?}: a wall, not a bug:\n{}", r.stderr);
+    assert!(lossy(&r.stdout).starts_with(stdout_so_far), "{args:?}: the output before the wall:\n{}", lossy(&r.stdout));
+    assert_eq!(r.code, Some(4), "{args:?}: a wall exits 4. stderr:\n{}", r.stderr);
+    let rp = cli(&["replay", t.to_str().unwrap()]);
+    let rl: Vec<&str> = rp.stderr.lines().filter(|l| l.starts_with("retrace:")).collect();
+    assert_eq!(rl.len(), 1, "{args:?}: replay's one retrace: line. stderr:\n{}", rp.stderr);
+    assert!(rl[0].starts_with("retrace: incomplete recording: it ends at ") && rl[0].ends_with(&format!(" - see {WALLS}#incomplete-recordings")), "{}", rl[0]);
+    assert!(!rp.stderr.contains("DIVERGENCE"), "{}", rp.stderr);
+    assert_eq!(rp.code, Some(4), "{args:?}: replay exits 4. stderr:\n{}", rp.stderr);
+    assert!(execs(&t).is_empty(), "{args:?}: the refused exec left no Exec landmark");
+    let _ = std::fs::remove_file(&t);
+    line
+}
+
+/// Final review part 2, I3: a thin arm64 `MH_EXECUTE` whose load commands cannot be walked (a header with no
+/// command bytes, a command with `cmdsize` 0). Measured natively: `execve` accepts the file and the kernel kills
+/// the process with SIGKILL while loading it, so there is no errno to answer (the review guessed EBADMACHO; it is
+/// not that). Retrace refuses by value, and used to panic (the first) or loop on 2^32 segments (the second).
+#[test]
+fn a_malformed_image_is_refused_where_native_kills_the_process() {
+    let dir = scratch("malformed");
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, cmds) in [("shorthdr", &[][..]), ("cmdsize0", &[0x19u8, 0, 0, 0, 0, 0, 0, 0][..])] {
+        let mut b = Vec::new();
+        for w in [0xfeed_facfu32, 0x0100_000c, 0, 2, 1, 8, 0, 0] { b.extend_from_slice(&w.to_le_bytes()); }
+        b.extend_from_slice(cmds);
+        let p = dir.join(name);
+        std::fs::write(&p, &b).unwrap();
+        std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let native = util::run_bounded(retrace_guest::EXECSELF_DYN, &["copy", p.to_str().unwrap()], &[], BOUND);
+        assert_eq!(native.code, Some(137), "{name}: native is killed by SIGKILL (128 + 9), not an exit. stdout:\n{}", lossy(&native.stdout));
+        assert!(!lossy(&native.stdout).contains("exec failed"), "{name}: and execve did not return an errno");
+        assert_wall(&["copy", p.to_str().unwrap()], "execve of an image whose load commands cannot be walked", "process-creation", "");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_x86_64_only_image_is_refused_by_name() {
+    let line = assert_wall(&["copy", retrace_guest::EXEC_X86], "execve of an x86_64-only image (needs Rosetta)", "process-creation", "");
+    assert!(line.is_ascii(), "{line}");
+}
+
+#[test]
+fn a_static_image_is_refused_by_name() {
+    assert_wall(&["copy", retrace_guest::HELLO], "execve of a static image (no LC_LOAD_DYLINKER)", "process-creation", "");
+}
+
+#[test]
+fn a_setuid_image_is_refused_by_name() {
+    use std::os::unix::fs::PermissionsExt;
+    let p = scratch("suid");
+    std::fs::copy(retrace_guest::EXEC_TARGET_DYN, &p).unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o4755)).unwrap();
+    assert_wall(&["copy", p.to_str().unwrap()], "execve of a setuid or setgid image", "process-creation", "");
+    let _ = std::fs::remove_file(&p);
+}
+
+/// C5 (Ruling T4-f; replaces T3-a's interim wall): a signal pending on a worker, which main does not mask,
+/// is taken by the new image as it starts, natively (159). Record and both replays end the same way: the
+/// `Exec` landmark, then `Event::Signal { sig: 31 }`, then the final snapshot.
+#[test]
+fn a_pending_signal_the_new_image_would_take_ends_the_run_as_natively() {
+    let native = util::run_bounded(retrace_guest::EXECSELF_DYN, &["workersig"], &[], BOUND);
+    assert_eq!(native.code, Some(128 + 31), "control: natively SIGUSR2 ends the new image (159)");
+    let (r, t) = rec(retrace_guest::EXECSELF_DYN, &["workersig"]);
+    assert_eq!(r.code, Some(159), "the recording ends as native does. stderr:\n{}", r.stderr);
+    assert_terminal_signal(&t, 31);
+    for i in 0..2 {
+        let rp = cli(&["replay", t.to_str().unwrap()]);
+        assert_eq!(rp.code, Some(159), "replay {i}. stderr:\n{}", rp.stderr);
+    }
+    let _ = std::fs::remove_file(&t);
+}
+
+/// The trace ends `Exec`, `Signal { sig }`, the final `Snapshot`, in that order.
+fn assert_terminal_signal(trace: &Path, sig: u64) {
+    let ev: Vec<Event> = retrace_trace::Reader::open(trace).unwrap().into_iter().collect();
+    let n = ev.len();
+    assert!(matches!(ev[n - 1], Event::Snapshot { .. }), "the final snapshot is last");
+    assert!(matches!(&ev[n - 2], Event::Signal { sig: s, .. } if *s == sig), "Event::Signal {{ sig: {sig} }} before it: {:?}", ev[n - 2]);
+    let Event::Exec { dylinker, .. } = &ev[n - 3] else { panic!("the Exec landmark before that: {:?}", ev[n - 3]) };
+    // M54 final review I2: the terminal pc is the new image's first instruction, dyld's slid entry, not the
+    // old image's `svc` return address that ELR_EL1 held at the trap.
+    let entry = retrace_guest::try_parse_macho(dylinker).unwrap().entry + retrace_box::DYLD_BASE;
+    assert!(matches!(&ev[n - 2], Event::Signal { pc, .. } if *pc == entry),
+            "Signal.pc is the dylinker's entry {entry:#x}: {:?}", ev[n - 2]);
+}
+
+// ---- M54 task 4: posix_spawn(POSIX_SPAWN_SETEXEC) -------------------------------------------------------
+
+#[test]
+fn a_setexec_spawn_runs_the_new_image_as_natively() {
+    let (out, t) = as_natively(&["spawn"], false);
+    has(&out, "stage1 fds keep=20 cloexec=21 pipe=22,23 kq=24");
+    has(&out, "pid_same=yes"); has(&out, "tid_changed=yes");
+    has(&out, "argv[3]=<a b>"); has(&out, "argv[4]=<>");
+    has(&out, "fd 20 open (file) cloexec=0");              // survives
+    has(&out, "fd 23 open (fifo) cloexec=0");              // the write end survives
+    has(&out, "fd 25 open (file) cloexec=0");
+    has(&out, "fd 27 open (file) cloexec=0");              // the open action
+    has(&out, "fd 28 open (file) cloexec=0");              // adddup2(20, 28)
+    lacks_prefix(&out, "fd 21 "); lacks_prefix(&out, "fd 22 "); // O_CLOEXEC, and the close action
+    lacks_prefix(&out, "fd 24 "); lacks_prefix(&out, "fd 26 ");
+    has(&out, "USR1 DFL"); has(&out, "USR2 DFL");          // SETSIGDEF{USR2} resets the ignore
+    has(&out, "mask HUP=0 INT=1 USR2=0");                  // SETSIGMASK{INT} replaces the mask
+    has(&out, "umask=027"); has(&out, "cwd=/usr");         // the chdir action
+    has(&out, "env X=carried");
+    let ev = execs(&t);
+    assert_eq!(ev.len(), 1, "one Exec landmark");
+    if let Event::Exec { num, closed, .. } = &ev[0] {
+        assert_eq!(*num, 244, "posix_spawn");
+        assert!(closed.contains(&21) && closed.contains(&26), "the O_CLOEXEC file and the FD_CLOEXEC alias: {closed:?}");
+        assert!(!closed.contains(&22), "the close action is applied by the actions, not the close set: {closed:?}");
+    } else { unreachable!() }
+    let _ = std::fs::remove_file(&t);
+}
+
+#[test]
+fn cloexec_default_closes_all_but_the_inherited() {
+    let (out, t) = as_natively(&["spawn-cxd"], false);
+    has(&out, "fd 22 open (fifo) cloexec=0");              // inherited
+    has(&out, "fd 29 open (file) cloexec=0");              // named: adddup2(20, 29)
+    lacks_prefix(&out, "fd 20 "); lacks_prefix(&out, "fd 21 "); lacks_prefix(&out, "fd 23 ");
+    if let Event::Exec { closed, .. } = &execs(&t)[0] {
+        assert!(closed.contains(&20) && closed.contains(&21) && closed.contains(&23), "the unnamed ones close: {closed:?}");
+        assert!(!closed.iter().any(|f| [0, 1, 2, 22, 29].contains(f)), "the inherited and the named stay: {closed:?}");
+    } else { unreachable!() }
+    let _ = std::fs::remove_file(&t);
+}
+
+#[test]
+fn a_pending_signal_the_new_mask_unblocks_ends_the_run_as_natively() {
+    let native = util::run_bounded(retrace_guest::EXECSELF_DYN, &["spawn-hup"], &[], BOUND);
+    assert_eq!(native.code, Some(129), "control: natively the pending SIGHUP ends the new image");
+    let (r, t) = rec(retrace_guest::EXECSELF_DYN, &["spawn-hup"]);
+    assert_eq!(r.code, Some(129), "the recording ends as native does. stderr:\n{}", r.stderr);
+    assert_terminal_signal(&t, 1);
+    for i in 0..2 {
+        let rp = cli(&["replay", t.to_str().unwrap()]);
+        assert_eq!(rp.code, Some(129), "replay {i}. stderr:\n{}", rp.stderr);
+    }
+    let _ = std::fs::remove_file(&t);
+}
+
+#[test]
+fn each_unaccepted_spawn_attribute_is_refused_by_value() {
+    let out = "stage1 kind=spawn-refuse\n";
+    for (mode, what) in [("setpgroup", "posix_spawn with POSIX_SPAWN_SETPGROUP (syscall 244)"),
+                         ("setsid", "posix_spawn with POSIX_SPAWN_SETSID (syscall 244)"),
+                         ("resetids", "posix_spawn with POSIX_SPAWN_RESETIDS (syscall 244)"),
+                         ("noaslr", "posix_spawn with _POSIX_SPAWN_DISABLE_ASLR (syscall 244)"),
+                         ("sched", "posix_spawn with POSIX_SPAWN_SETSCHEDPARAM (syscall 244)"),
+                         ("flag200", "posix_spawn with flag 0x200 (syscall 244)"),
+                         ("port", "posix_spawn with port actions (syscall 244)")] {
+        // Control: every one of these runs natively, so the wall is retrace's own gap.
+        let native = util::run_bounded(retrace_guest::EXECSELF_DYN, &["spawn-refuse", mode], &[], BOUND);
+        assert!(lossy(&native.stdout).contains("stage2 kind=refuse"), "{mode}: natively it runs the image:\n{}", lossy(&native.stdout));
+        let line = assert_wall(&["spawn-refuse", mode], what, "process-creation", out);
+        assert!(!line.contains("macOS refuses") && line.is_ascii(), "{line}");
+    }
+    // A binary preference for x86_64 against an image that has that slice: Rosetta, a wall by value.
+    assert_wall(&["spawn-refuse", "x86pref", "/bin/ls"], "posix_spawn with a binary preference for CPU type 0x1000007", "process-creation", out);
+}
+
+/// C1 and the order (t4 Rulings T4-b, T4-d): each failing action, and a failing image or binpref, answers the
+/// errno natively answered, and nothing persists.
+#[test]
+fn a_failing_file_action_answers_as_xnu_does() {
+    let target = retrace_guest::EXEC_TARGET_DYN;
+    for (n, errno) in [(1, 2), (2, 9), (3, 9), (4, 2), (5, 9), (6, 86), (7, 9), (8, 2), (9, 13), (10, 9), (11, 9)] {
+        let ns = n.to_string();
+        let (out, t) = as_natively(&["spawn-fail", &ns, target], false);
+        has(&out, &format!("spawn failed: errno={errno}"));
+        has(&out, "after: fd27=closed fd28=closed fd20=open fd22=open fd21cloexec=1 cwd_changed=no");
+        assert!(execs(&t).is_empty(), "spawn-fail {n}: a failed spawn is an ordinary landmark");
+        let _ = std::fs::remove_file(&t);
+    }
+}
+
+/// Ruling T4-i and T4-h (measured): an `O_CLOEXEC` open action keeps the flag only at the lowest free slot, and a
+/// doomed slot replaced by a dup2 action may be closed.
+#[test]
+fn an_open_actions_cloexec_sticks_only_at_the_lowest_free_slot() {
+    let (out, t) = as_natively(&["spawn-openx"], false);
+    lacks_prefix(&out, "fd 20 ");                         // landed at the lowest free slot: closed at exec
+    has(&out, "fd 22 open (file) cloexec=0");             // not the lowest: kept, with the flag clear
+    has(&out, "fd 23 open (file) cloexec=0");
+    lacks_prefix(&out, "fd 24 ");                         // dup2'd over, then closed
+    if let Event::Exec { closed, .. } = &execs(&t)[0] {
+        assert!(closed.contains(&20) && !closed.contains(&22), "{closed:?}");
+    } else { unreachable!() }
+    let _ = std::fs::remove_file(&t);
+}
+
+/// M54 t5: a `#!` script, one level. The target prints its argv in hex and its `executable_path=`; native and
+/// the recording must print the same lines.
+#[test]
+fn a_script_runs_its_interpreter_as_natively() {
+    let target = retrace_guest::EXEC_TARGET_DYN;
+    for mode in ["script", "script-rel"] {
+        let dir = scratch(mode);
+        std::fs::create_dir_all(&dir).unwrap();
+        let d = dir.to_str().unwrap();
+        let (out, t) = as_natively(&[mode, d, target], false);
+        let hex = |s: &str| s.bytes().map(|b| format!("{b:02x}")).collect::<String>();
+        has(&out, "target argc=4");
+        let want_interp = if mode == "script" { target.to_string() } else {
+            format!("./{}", Path::new(target).file_name().unwrap().to_str().unwrap()) };
+        has(&out, &format!("argv[1]={}", hex("one")));
+        has(&out, &format!("argv[2]={}", hex(&format!("{d}/script"))));
+        has(&out, &format!("argv[3]={}", hex("two")));
+        has(&out, &format!("apple0={}", hex(&format!("executable_path={want_interp}"))));
+        // The recorded landmark carries the line and the interpreter's image.
+        match &execs(&t)[0] {
+            Event::Exec { script, path, .. } => {
+                assert_eq!(script.as_slice(), format!("#!{want_interp} one").as_bytes(), "{mode}: the line, without its newline");
+                assert_eq!(path.as_slice(), format!("{d}/script").as_bytes());
+            }
+            e => panic!("{e:?}"),
+        }
+        let _ = std::fs::remove_file(&t);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// A script whose interpreter is itself a script is ENOEXEC (8), as natively.
+#[test]
+fn a_nested_script_answers_natives_errno() {
+    let dir = scratch("nested");
+    std::fs::create_dir_all(&dir).unwrap();
+    let (out, t) = as_natively(&["nested", dir.to_str().unwrap(), retrace_guest::EXEC_TARGET_DYN], false);
+    has(&out, "errno=8");
+    assert!(execs(&t).is_empty(), "no Exec landmark for a refused script");
+    let _ = std::fs::remove_file(&t);
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -181,13 +181,18 @@ pub(crate) enum StopKind {
     MachTrap { metype: u8, signal: u8, code: u64, subcode: u64 },
     /// `reason:exception` with a description. Reversible, unlike a plain signal stop (t0 L4d).
     Exception { signal: u8, text: String },
+    /// M54 §3i (t0 M6): the program replaced its image, with the path it passed. `reason:exec`,
+    /// which lldb-2100 accepted from a hand-written stub (`stop reason = exec`), and then re-read the
+    /// target description, the image list and the registers. The path is not on the wire: lldb takes
+    /// the new image from `jGetLoadedDynamicLibrariesInfos`.
+    Exec(String),
 }
 
 impl StopKind {
     fn signal(&self) -> u8 {
         match self {
             StopKind::HistoryBegin(_) | StopKind::Breakpoint | StopKind::Watch(_) | StopKind::Trace
-                | StopKind::HistoryEnd(_) => 5,
+                | StopKind::HistoryEnd(_) | StopKind::Exec(_) => 5,
             StopKind::None => 0,
             StopKind::MachBadAccess { .. } => 0x0b,
             StopKind::MachTrap { signal, .. } => *signal,
@@ -205,6 +210,7 @@ impl StopKind {
             StopKind::MachBadAccess { code, far } => format!("metype:1;mecount:2;medata:{code:x};medata:{far:x};"),
             StopKind::MachTrap { metype, code, subcode, .. } => format!("metype:{metype:x};mecount:2;medata:{code:x};medata:{subcode:x};"),
             StopKind::Exception { text, .. } => format!("reason:exception;description:{};", hex(text.as_bytes())),
+            StopKind::Exec(_) => "reason:exec;".into(),
         }
     }
 }
@@ -521,5 +527,14 @@ mod tests {
         assert!(image_json(&file[..16], 0x1_0000_0000, "x").is_err(), "a truncated header is an Err, not a panic");
         let j = image_json(&file, 0x1_0000_0000, "/t/a\"b\\c\nd\u{1f}e").unwrap();
         assert!(j.contains(r#""pathname":"/t/a\"b\\c\u000ad\u001fe""#), "control characters are escaped: {j}");
+    }
+
+    #[test] fn an_exec_stop_reply_carries_its_reason() {
+        let mut ctx = ThreadCtx::zeroed();
+        ctx.regs.pc = 0x1000;
+        let r = stop_reply(1, &ctx, &[(1, 0x1000)], &StopKind::Exec("/tmp/new".into()));
+        assert!(r.starts_with("T05thread:1;threads:1;thread-pcs:1000;"), "{r}");
+        assert!(r.ends_with(";reason:exec;"), "{r}");
+        assert!(!r.contains("2f746d70"), "the path is not on the wire: {r}");
     }
 }

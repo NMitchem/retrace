@@ -987,13 +987,12 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         2 => row!(P, []),
         // execve(char *fname, char **argp, char **envp): the kernel reads every argv/envp string
         // through the nested pointers — rule 1, NestedSource (EXPECTED_DIFFS; exercised by /bin/sh).
-        // REFUSED since M38, never forwarded: the record arm ahead of the generic forward answers
-        // `exec_refusal_errno` (EFAULT, the value the forward measured) and writes nothing, on
-        // both sides. It was forwarded from M2 to M37 and failed only because those guest
-        // pointers EFAULT in retrace's process — a forwarded exec that SUCCEEDED would replace
-        // retrace's own process image, which is why the operator ruled it refused rather than
-        // waiting for nested-pointer translation to make the forward fatal. This row is
-        // documentation of the prototype only; nothing consults it for forwarding.
+        // Never forwarded: M38 refused it, and since M54 the record arm ahead of the generic forward replaces
+        // the guest's image in place (`Event::Exec`, `Box_::exec_image`). It was forwarded from M2 to M37 and
+        // failed only because those guest pointers EFAULT in retrace's process; a forwarded exec that
+        // SUCCEEDED would replace retrace's own process image. This row is documentation of the prototype
+        // only, and what a FAILED exec's replay reads (`prepare_forward_pointers`); nothing consults it for
+        // forwarding.
         59 => row!(P, [Path, NestedSource, NestedSource]),
         // ---- descriptors ----------------------------------------------------------------------
         // fchdir(int fd): a descriptor the legacy fd table never translated (EXPECTED_DIFFS;
@@ -1127,10 +1126,8 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         //             char **argv, char **envp): pid is 4 bytes out. adesc is read as a fixed
         // struct and then the kernel follows attrp, file_actions, port_actions, persona_info and
         // more INSIDE it (bsd/kern/kern_exec.c `posix_spawn`, one `copyin` per member) — rule 1,
-        // NestedSource, like argv/envp's strings. REFUSED since M38, never forwarded: the record
-        // arm ahead of the generic forward answers `exec_refusal_errno` (EFAULT, the value the
-        // forward measured) and writes nothing, on both sides; cpython_e2e's launcher test pins
-        // the refusal line (EXPECTED_DIFFS). It was forwarded from M2 to M37 and failed only
+        // NestedSource, like argv/envp's strings. Never forwarded: since M54 a child is a
+        // ProcessCreation wall and a SETEXEC spawn goes through the exec arm (M54 t4). It was forwarded from M2 to M37 and failed only
         // because those guest pointers EFAULT in retrace's process — a forwarded spawn that
         // succeeded would start a real child of retrace. This row is documentation of the
         // prototype only; nothing consults it for forwarding.
@@ -1887,17 +1884,53 @@ pub fn is_signal_syscall(num: u64) -> bool {
     )
 }
 
-/// M38: `execve`(59) and `posix_spawn`(244) are REFUSED, never forwarded. Before M38 both were
-/// forwarded and failed only because their `argv`/`envp` are untranslated guest pointers (the
-/// host kernel read a guest address as a host address and returned EFAULT); if nested-pointer
-/// translation ever landed, a forwarded exec would replace retrace's own process. The value is
-/// what the forward RETURNED, measured on `exec_dyn` at M38 Task 4 — chosen for continuity (the
-/// CPython launcher's output, `/bin/sh`'s sweep row and every existing trace are unchanged), not
-/// fidelity; `ENOSYS` (78) is the one-constant change if a successor prefers "exec is unmodelled"
-/// to be what the guest reads (spec R4). `Some` doubles as the predicate the record arm and the
-/// replay mirror share.
-pub fn exec_refusal_errno(num: u64) -> Option<u64> {
-    match num { SYS_EXECVE | SYS_POSIX_SPAWN => Some(14), _ => None }
+/// M54 t2: `POSIX_SPAWN_SETEXEC` in `psa_flags`: the spawn replaces the calling image instead of
+/// starting a child (measured, t0 §M3).
+pub const POSIX_SPAWN_SETEXEC: u16 = 0x0040;
+
+/// M54 t2: whether a `posix_spawn`'s attributes ask for exec-in-place. `desc_flags` is the
+/// `psa_flags` the descriptor's `attrp` points at, or `None` for a NULL descriptor or a NULL
+/// `attrp`, which has no flags and so starts a child.
+pub fn spawn_is_setexec(desc_flags: Option<u16>) -> bool {
+    desc_flags.is_some_and(|f| f & POSIX_SPAWN_SETEXEC != 0)
+}
+
+/// M54 t4: the `psa_flags` bits a SETEXEC spawn accepts (t0 §M3, SDK `spawn.h`).
+pub const POSIX_SPAWN_SETSIGDEF: u16 = 0x0004;
+pub const POSIX_SPAWN_SETSIGMASK: u16 = 0x0008;
+pub const POSIX_SPAWN_CLOEXEC_DEFAULT: u16 = 0x4000;
+/// `cpu_type_t` "any", the cputype `posix_spawnattr_setbinpref_np` takes for no preference.
+pub const CPU_TYPE_ANY: u32 = u32::MAX;
+
+/// M54 t4: the name of one `psa_flags` bit that retrace refuses (every one runs natively under SETEXEC,
+/// so these are model gaps, never a claim about macOS), or `None` for a bit that is accepted.
+pub fn spawn_refused_flag_name(bit: u16) -> Option<String> {
+    Some(match bit {
+        0x0001 => "POSIX_SPAWN_RESETIDS".to_string(),
+        0x0002 => "POSIX_SPAWN_SETPGROUP".to_string(),
+        0x0010 => "POSIX_SPAWN_SETSCHEDPARAM".to_string(),
+        0x0020 => "POSIX_SPAWN_SETSCHEDULER".to_string(),
+        0x0080 => "POSIX_SPAWN_START_SUSPENDED".to_string(),
+        0x0100 => "_POSIX_SPAWN_DISABLE_ASLR".to_string(),
+        0x0400 => "POSIX_SPAWN_SETSID".to_string(),
+        POSIX_SPAWN_SETEXEC | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_CLOEXEC_DEFAULT => return None,
+        b => format!("flag {b:#x}"),
+    })
+}
+
+/// M54 t4 (C5): what a pending signal does when exec lets it through at the new image's start, by the
+/// signal's DEFAULT action. `default_action` is the one table the box has; it knows three ignored signals,
+/// so the stop signals and the default-ignored SIGCONT, SIGIO and SIGINFO are classed here, over it,
+/// rather than in a second table of defaults.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecRelease { Ignore, Stop, Terminate }
+
+pub fn exec_release_class(sig: u64) -> ExecRelease {
+    match sig {
+        17 | 18 | 21 | 22 => ExecRelease::Stop,          // SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU
+        19 | 23 | 29 => ExecRelease::Ignore,             // SIGCONT, SIGIO, SIGINFO
+        s => match default_action(s) { DefaultAction::Ignore => ExecRelease::Ignore, DefaultAction::Terminate => ExecRelease::Terminate },
+    }
 }
 
 /// M47 §3e: `fork` (2) is REFUSED, never forwarded, with `EAGAIN` (35), the errno `fork(2)`
@@ -1906,7 +1939,7 @@ pub fn exec_refusal_errno(num: u64) -> Option<u64> {
 /// (the M47 probe's fork-disasm.txt). Fidelity, not continuity: before M47 a fork never returned,
 /// because its prepare handler's `mach_ports_register` (3403) stopped the recorder first. `vfork`
 /// (66) and the other process-creation calls have no row. `Some` doubles as the predicate the record
-/// arm, the replay mirror and the generic arm's assert share, as `exec_refusal_errno`'s does.
+/// arm, the replay mirror and the generic arm's assert share.
 pub fn fork_refusal_errno(num: u64) -> Option<u64> {
     match num { SYS_FORK => Some(35), _ => None }
 }
@@ -2966,13 +2999,14 @@ mod tests {
         }
     }
 
-    // M38: exec is refused with the errno the FORWARD returned before M38 (measured, Task 4
-    // Step 2) — continuity, not fidelity (spec R4). Every other number is None.
+    // M54 t3: `exec_refusal_errno` (M38's EFAULT for both exec calls) is gone: execve runs in place and a
+    // SETEXEC spawn answers through the exec arm. What stays is the SETEXEC predicate.
     #[test]
-    fn exec_refusal_covers_execve_and_posix_spawn_only() {
-        assert_eq!(exec_refusal_errno(SYS_EXECVE), Some(14));
-        assert_eq!(exec_refusal_errno(SYS_POSIX_SPAWN), Some(14));
-        assert_eq!(exec_refusal_errno(SYS_OPEN), None);
+    fn spawn_setexec_is_the_flag_alone() {
+        assert!(!spawn_is_setexec(None));
+        assert!(!spawn_is_setexec(Some(0)));
+        assert!(spawn_is_setexec(Some(0x0040)));
+        assert!(spawn_is_setexec(Some(0x0140)));
         assert_eq!((SYS_EXECVE, SYS_POSIX_SPAWN), (59, 244));
     }
 

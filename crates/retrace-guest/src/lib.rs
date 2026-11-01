@@ -4,7 +4,10 @@ pub struct Segment { pub vaddr: u64, pub data: Vec<u8>, pub memsz: usize, pub ex
 pub struct Loaded { pub segments: Vec<Segment>, pub entry: u64, pub dylinker: Option<String>, pub cpusubtype: u32 }
 
 fn u32le(b: &[u8], o: usize) -> u32 { u32::from_le_bytes(b[o..o+4].try_into().unwrap()) }
-fn u64le(b: &[u8], o: usize) -> u64 { u64::from_le_bytes(b[o..o+8].try_into().unwrap()) }
+
+/// What `try_parse_macho` answers for a header whose load commands cannot be walked. A caller that must tell
+/// that from the other refusals (`resolve`) compares against this constant, never against a copy of its text.
+pub const MALFORMED: &str = "has load commands that cannot be walked (a size or offset outside the file)";
 
 /// M50 (spec §3b, R2): the loaded image, or why `b` is not a program retrace can run, worded to
 /// follow the file's path in the CLI's one line (`retrace: <path> <why>`).
@@ -31,7 +34,22 @@ pub fn try_parse_macho(b: &[u8]) -> Result<Loaded, String> {
     // the top 8 are capability bits (arm64e carries a ptrauth ABI version there). The box derives
     // the guest's PAC posture from this — macOS enables PAC per process, only for arm64e mains.
     let cpusubtype = u32le(b, 8);
-    let ncmds = u32le(b, 16);
+    let ncmds = u32le(b, 16) as u64;
+    let sizeofcmds = u32le(b, 20) as usize;
+    // Final review part 2, I3: this runs on bytes a guest wrote (a program it execs) and on trace bytes, so
+    // every read is bounds-checked and every sum checked. A command is at least 8 bytes, so `ncmds` is
+    // bounded by `sizeofcmds`; a walk can neither run past the file nor loop on a zero `cmdsize`.
+    let bad = || MALFORMED.to_string();
+    let cmds_end = 32usize.checked_add(sizeofcmds).filter(|&e| e <= b.len()).ok_or_else(bad)?;
+    if ncmds.checked_mul(8).is_none_or(|n| n > sizeofcmds as u64) { return Err(bad()); }
+    let r32 = |o: Option<usize>| -> Result<u32, String> {
+        let o = o.ok_or_else(bad)?;
+        Ok(u32::from_le_bytes(b.get(o..o.checked_add(4).ok_or_else(bad)?).ok_or_else(bad)?.try_into().unwrap()))
+    };
+    let r64 = |o: Option<usize>| -> Result<u64, String> {
+        let o = o.ok_or_else(bad)?;
+        Ok(u64::from_le_bytes(b.get(o..o.checked_add(8).ok_or_else(bad)?).ok_or_else(bad)?.try_into().unwrap()))
+    };
     let mut off = 32usize; // mach_header_64 is 32 bytes
     let mut segments = Vec::new();
     let mut text_vmaddr = 0u64;
@@ -39,41 +57,48 @@ pub fn try_parse_macho(b: &[u8]) -> Result<Loaded, String> {
     let mut entry: Option<u64> = None;
     let mut dylinker: Option<String> = None;
     for _ in 0..ncmds {
-        let cmd = u32le(b, off);
-        let cmdsize = u32le(b, off+4) as usize;
+        let cmd = r32(Some(off))?;
+        let cmdsize = r32(off.checked_add(4))? as usize;
+        let next = off.checked_add(cmdsize).filter(|&n| cmdsize >= 8 && n <= cmds_end).ok_or_else(bad)?;
+        let at = |d: usize| off.checked_add(d);
         match cmd {
             0x19 => { // LC_SEGMENT_64
-                let vmaddr = u64le(b, off+24);
-                let vmsize = u64le(b, off+32) as usize;
-                let fileoff = u64le(b, off+40) as usize;
-                let filesize = u64le(b, off+48) as usize;
-                let initprot = u32le(b, off+60); // initprot (maxprot is off+56); VM_PROT_EXECUTE = 0x4
-                let name = &b[off+8..off+24];
-                if name.starts_with(b"__TEXT") { text_vmaddr = vmaddr; text_fileoff = fileoff as u64; }
+                if cmdsize < 72 { return Err(bad()); }
+                let vmaddr = r64(at(24))?;
+                let vmsize = r64(at(32))?;
+                let fileoff = r64(at(40))?;
+                let filesize = r64(at(48))?;
+                let initprot = r32(at(60))?; // initprot (maxprot is off+56); VM_PROT_EXECUTE = 0x4
+                let name = &b[off + 8..off + 24];
+                if name.starts_with(b"__TEXT") { text_vmaddr = vmaddr; text_fileoff = fileoff; }
                 if vmsize > 0 && name != b"__PAGEZERO\0\0\0\0\0\0" {
-                    segments.push(Segment { vaddr: vmaddr, memsz: vmsize,
-                        data: b[fileoff..fileoff+filesize].to_vec(), exec: initprot & 0x4 != 0 });
+                    // No guest segment is larger than the 36-bit IPA space.
+                    if vmsize >= 1 << 36 { return Err(bad()); }
+                    let end = fileoff.checked_add(filesize).filter(|&e| e <= b.len() as u64).ok_or_else(bad)?;
+                    segments.push(Segment { vaddr: vmaddr, memsz: vmsize as usize,
+                        data: b[fileoff as usize..end as usize].to_vec(), exec: initprot & 0x4 != 0 });
                 }
             }
             0x80000028 => { // LC_MAIN: entryoff is file offset from start of file
-                let entryoff = u64le(b, off+8);
-                entry = Some(text_vmaddr + (entryoff - text_fileoff));
+                if cmdsize < 24 { return Err(bad()); }
+                let entryoff = r64(at(8))?;
+                let rel = entryoff.checked_sub(text_fileoff).ok_or_else(bad)?;
+                entry = Some(text_vmaddr.checked_add(rel).ok_or_else(bad)?);
             }
             0x5 => { // LC_UNIXTHREAD: arm64 thread state; PC is at a fixed offset
                 // flavor(4) count(4) then 34 u64 GPRs; PC is register index 32.
-                let pc = u64le(b, off + 16 + 32*8);
-                entry = Some(pc);
+                if cmdsize < 16 + 33 * 8 { return Err(bad()); }
+                entry = Some(r64(at(16 + 32 * 8))?);
             }
             retrace_arch::LC_LOAD_DYLINKER => {
                 // dylinker_command: cmd(4) cmdsize(4) name.offset(4) then the NUL-terminated path.
-                let name_off = off + u32le(b, off+8) as usize;
-                let end = (off + cmdsize).min(b.len());
-                let nul = (name_off..end).find(|&i| b[i] == 0).unwrap_or(end);
+                let name_off = off.checked_add(r32(at(8))? as usize).filter(|&n| n < next).ok_or_else(bad)?;
+                let nul = (name_off..next).find(|&i| b[i] == 0).unwrap_or(next);
                 dylinker = Some(String::from_utf8_lossy(&b[name_off..nul]).into_owned());
             }
             _ => {}
         }
-        off += cmdsize;
+        off = next;
     }
     let entry = entry.ok_or("has no entry point (LC_MAIN or LC_UNIXTHREAD): it is a library or a \
                              bundle, not a program")?;
@@ -240,9 +265,16 @@ pub const PIPE_DYN: &str = concat!(env!("OUT_DIR"), "/pipe_dyn");
 pub const DUPFD_DYN: &str = concat!(env!("OUT_DIR"), "/dupfd_dyn");
 /// M38: `fstatat(AT_FDCWD, ".")` — prints `ok` when the sentinel passes through translation.
 pub const ATFDCWD_DYN: &str = concat!(env!("OUT_DIR"), "/atfdcwd_dyn");
-/// M38: `execve` then `posix_spawn(SETEXEC)`; prints the errno each returns — both are refused,
-/// never forwarded.
-pub const EXEC_DYN: &str = concat!(env!("OUT_DIR"), "/exec_dyn");
+/// M54 t3: the exec fixture: stage 1 sets state and execs itself as stage 2, in the modes `execself_dyn.c`'s header lists.
+pub const EXECSELF_DYN: &str = concat!(env!("OUT_DIR"), "/execself_dyn");
+/// M54 t3: the image the exec fixtures replace themselves with; it prints its argv, `X`, descriptors and fd 5's pipe.
+pub const EXEC_TARGET_DYN: &str = concat!(env!("OUT_DIR"), "/exec_target_dyn");
+/// M54 t3: an x86_64-only program (`puts("x86")`): an exec of it is refused by name.
+pub const EXEC_X86: &str = concat!(env!("OUT_DIR"), "/exec_x86");
+/// M54 t3: tier-1 `fc_execve`: `execve(argv[1], {argv[1], "a b", ""}, environ + X=fc)`.
+pub const FC_EXECVE: &str = concat!(env!("OUT_DIR"), "/fc_execve");
+/// M54 t4: tier-1 `fc_spawn_exec`: SETEXEC `posix_spawn` of `argv[1]` with dup2/close actions, CLOEXEC_DEFAULT, inherit 0/1/2.
+pub const FC_SPAWN_EXEC: &str = concat!(env!("OUT_DIR"), "/fc_spawn_exec");
 /// M45: libdispatch's workqueue-kqueue init (`kevent_qos` 374), issued by hand after a
 /// `dispatch_async`. `argv[1]` selects `straddle`, `flags` or `badptr`; see the source's header.
 pub const KQINIT_DYN: &str = concat!(env!("OUT_DIR"), "/kqinit_dyn");
@@ -478,6 +510,10 @@ pub const IOVEC_DYN: &str = concat!(env!("OUT_DIR"), "/iovec_dyn");
 pub const FC_POSIX: &str = concat!(env!("OUT_DIR"), "/fc_posix");
 /// M53: `std::fs` end to end, as a first-contact Rust program.
 pub const FC_RS_FS: &str = concat!(env!("OUT_DIR"), "/fc_rs_fs");
+/// M54 t5: Rust's `Command::exec` through `PATH` misses, as a first-contact Rust program: a non-executable
+/// match (EACCES) and a nonexistent directory come first, then the real target's directory, where the last
+/// attempt succeeds. Its argument is the path of `EXEC_TARGET_DYN`.
+pub const FC_RS_EXEC: &str = concat!(env!("OUT_DIR"), "/fc_rs_exec");
 /// M51 (spec §3e): the output modes (see the source).
 pub const FID_OUTPUT: &str = concat!(env!("OUT_DIR"), "/fid_output");
 /// M51 (spec §3b): one trap per mode (see the source).
@@ -669,13 +705,6 @@ mod tests {
     fn atfdcwd_guest_parses() {
         // M38: proves the build.rs wiring and the path constant; behaviour is atfdcwd_e2e's.
         let l = parse_macho(&std::fs::read(ATFDCWD_DYN).unwrap());
-        assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
-    }
-
-    #[test]
-    fn exec_guest_parses() {
-        // M38: proves the build.rs wiring and the path constant; behaviour is exec_e2e's.
-        let l = parse_macho(&std::fs::read(EXEC_DYN).unwrap());
         assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
     }
 
@@ -1001,4 +1030,61 @@ mod fat_tests {
         assert_eq!(parse_macho(&fat).cpusubtype & 0x00ff_ffff, retrace_arch::CPU_SUBTYPE_ARM64_ALL,
                    "an x86_64+arm64 universal must yield the plain-arm64 slice");
     }
+
+    // Final review part 2, I3: a header whose load commands cannot be walked is an `Err`, never a panic or a loop.
+    /// A thin arm64 `MH_EXECUTE` header over `cmds`, with the counts a caller names.
+    pub fn macho_with(ncmds: u32, sizeofcmds: u32, cmds: &[u8]) -> Vec<u8> {
+        let mut b = Vec::new();
+        for w in [0xfeed_facfu32, retrace_arch::CPU_TYPE_ARM64, 0, 2, ncmds, sizeofcmds, 0, 0] { b.extend_from_slice(&w.to_le_bytes()); }
+        b.extend_from_slice(cmds);
+        b
+    }
+    fn segment(name: &[u8], vmaddr: u64, vmsize: u64, fileoff: u64, filesize: u64) -> Vec<u8> {
+        let mut c = Vec::new();
+        c.extend_from_slice(&0x19u32.to_le_bytes());
+        c.extend_from_slice(&72u32.to_le_bytes());
+        let mut n = [0u8; 16]; n[..name.len()].copy_from_slice(name);
+        c.extend_from_slice(&n);
+        for q in [vmaddr, vmsize, fileoff, filesize] { c.extend_from_slice(&q.to_le_bytes()); }
+        c.extend_from_slice(&[0u8; 16]); // maxprot, initprot, nsects, flags
+        c
+    }
+    /// Every shape the review named, as (what, bytes).
+    pub fn malformed_machos() -> Vec<(&'static str, Vec<u8>)> {
+        let mut main = Vec::new();
+        for w in [0x8000_0028u32, 24] { main.extend_from_slice(&w.to_le_bytes()); }
+        main.extend_from_slice(&0x100u64.to_le_bytes());
+        main.extend_from_slice(&0u64.to_le_bytes());
+        let mut below = segment(b"__TEXT", 0x1_0000_0000, 0x4000, 0x4000, 0);
+        below.extend_from_slice(&main);
+        vec![
+            ("32-byte header, ncmds 1, no command bytes", macho_with(1, 8, &[])),
+            ("cmdsize 0", macho_with(1, 8, &[0x19, 0, 0, 0, 0, 0, 0, 0])),
+            ("cmdsize past the end", macho_with(1, 8, &[0x19, 0, 0, 0, 0xff, 0xff, 0xff, 0x7f])),
+            ("huge ncmds", macho_with(u32::MAX, 8, &[0x19, 0, 0, 0, 0, 0, 0, 0])),
+            ("sizeofcmds past the file", macho_with(1, 0x1000, &[0x19, 0, 0, 0, 8, 0, 0, 0])),
+            ("LC_MAIN entryoff below __TEXT's fileoff", macho_with(2, below.len() as u32, &below)),
+            ("a segment with vmsize u64::MAX", macho_with(1, 72, &segment(b"__DATA", 0x1_0000_4000, u64::MAX, 0, 0))),
+            ("a segment's file range past the file", macho_with(1, 72, &segment(b"__DATA", 0x1_0000_4000, 0x4000, u64::MAX - 1, 8))),
+        ]
+    }
+
+    #[test]
+    fn a_malformed_load_command_walk_is_an_error_and_never_a_panic() {
+        for (what, bytes) in malformed_machos() {
+            let r = try_parse_macho(&bytes);
+            assert!(r.is_err(), "{what}: parsed as {r:?}");
+        }
+        for (what, bytes) in malformed_machos() {
+            // Every truncation of a real one is an Err or an Ok, and never a panic.
+            let _ = (what, try_parse_macho(&bytes[..bytes.len().saturating_sub(1)]));
+        }
+        let real = std::fs::read(HELLO_DYN).unwrap();
+        for cut in [32, 33, 40, 100, 400, 1000] {
+            let _ = try_parse_macho(&real[..cut.min(real.len())]);
+        }
+        assert_eq!(try_parse_macho(&macho_with(1, 8, &[])).unwrap_err(), MALFORMED);
+    }
 }
+/// M54 t2: a `posix_spawn` of a real child (`/bin/echo`), which is a ProcessCreation wall.
+pub const FC_SPAWN_CHILD: &str = concat!(env!("OUT_DIR"), "/fc_spawn_child");

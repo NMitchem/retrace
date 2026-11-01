@@ -70,9 +70,27 @@ pub enum Event {
         sig: u64, si_code: u64, si_addr: u64, handler: u64, resume_pc: u64, writes: Vec<Region>,
         thread: u32,
     },
+    /// M54: a successful `execve` (or, from task 4, a `posix_spawn` with `POSIX_SPAWN_SETEXEC`): the process
+    /// became another program in place. A FAILED exec is an ordinary `Syscall` landmark carrying the errno.
+    ///
+    /// `num` and `args` are compared on replay exactly as a `Syscall`'s are. `path` is the path argument as
+    /// the guest passed it (`./tgt` stays `./tgt`); replay re-reads it from guest memory and compares. argv
+    /// and envp are NOT recorded: both sides read them from guest memory, identical at this landmark.
+    /// `image` is the selected slice of the executable (for a `#!` script, the interpreter's) and `script`
+    /// the script's first line without its newline, empty when the file is not a script. `dylinker` is the
+    /// selected slice of the image's `LC_LOAD_DYLINKER` target. Replay reads no file for an exec: these
+    /// bytes are what it loads (spec 3c). `closed` is the guest descriptors exec closed, the host
+    /// kernel's own answer (`FD_CLOEXEC`), recorded as any forwarded call's result is.
+    ///
+    /// `thread` is the caller's tag BEFORE the exec: the table index of the thread that made the call. It is
+    /// the eighth `verify_thread` site's input, and after the exec the caller is thread 0 of a new image.
+    Exec {
+        num: u64, args: [u64; 8], path: Vec<u8>, image: Vec<u8>, script: Vec<u8>, dylinker: Vec<u8>,
+        closed: Vec<u32>, thread: u32,
+    },
 }
 
-pub const TRACE_MAGIC: [u8;4] = *b"RT\x00\x0f"; // "RT" + format version 0x000f. M53 bumped it because `readv`, `writev`, `preadv` and `pwritev` are translated (a console `writev` is a console write; a forwarded iovec lands as per-entry writes), so a pre-M53 recording of one holds an EFAULT or a wall where this retrace records the transfer. 0x000e was M52's: M52 bumped it because the synthetic clock moves 5 ticks per timebase read, not 0x2400, so a pre-M52 recording carries a clock whose meaning differs (the clock is regenerated, not recorded, but every recorded timeout, sleep deadline and `gettimeofday` out-parameter was computed against it). 0x000d was M51's: M51 bumped it because `Event::Crash` gained `sig` and J1 changes the ESR a recorded instruction abort carries, so a pre-M51 recording is refused whole. 0x000c was M49's: a translation fault's SignalDelivery frame carries SEGV_ACCERR and the store-exclusive rewrite changes the code bytes a snapshot holds, so a pre-M49 recording would replay into a false divergence. 0x000b was M47's, for `mach_vm_map`'s mask.
+pub const TRACE_MAGIC: [u8;4] = *b"RT\x00\x10"; // "RT" + format version 0x0010. M54 bumped it because a successful exec is an `Event::Exec` carrying the new image, and a pre-M54 recording's exec landmark is the M38 refusal. 0x000f was M53's: M53 bumped it because `readv`, `writev`, `preadv` and `pwritev` are translated (a console `writev` is a console write; a forwarded iovec lands as per-entry writes), so a pre-M53 recording of one holds an EFAULT or a wall where this retrace records the transfer. 0x000e was M52's: M52 bumped it because the synthetic clock moves 5 ticks per timebase read, not 0x2400, so a pre-M52 recording carries a clock whose meaning differs (the clock is regenerated, not recorded, but every recorded timeout, sleep deadline and `gettimeofday` out-parameter was computed against it). 0x000d was M51's: M51 bumped it because `Event::Crash` gained `sig` and J1 changes the ESR a recorded instruction abort carries, so a pre-M51 recording is refused whole. 0x000c was M49's: a translation fault's SignalDelivery frame carries SEGV_ACCERR and the store-exclusive rewrite changes the code bytes a snapshot holds, so a pre-M49 recording would replay into a false divergence. 0x000b was M47's, for `mach_vm_map`'s mask.
 
 // Minimal in-tree CRC32 (IEEE) — no external checksum dependency.
 fn crc32(data: &[u8]) -> u32 {
@@ -345,7 +363,8 @@ mod tests {
         // M52: the synthetic clock's stride moved from 0x2400 to 5 ticks per timebase read, so what a
         // recording's clock-derived values mean changed (the M24 kind of change).
         // M53: the iovec calls are translated (a console writev prints, a forwarded one lands its entries).
-        assert_eq!(TRACE_MAGIC, *b"RT\x00\x0f");
+        // M54: a successful exec is an `Event::Exec` carrying the new image.
+        assert_eq!(TRACE_MAGIC, *b"RT\x00\x10");
     }
 
     #[test]
@@ -411,6 +430,31 @@ mod tests {
         let msg = Reader::format_skew(&p).unwrap().expect(r"a pre-M53 RT\x00\x0e header is version skew");
         assert!(msg.contains(r"RT\x00\x0e") && msg.contains(&format!(r"RT\x{:02x}\x{:02x}", TRACE_MAGIC[2], TRACE_MAGIC[3])), "{msg}");
         std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn a_pre_m54_trace_is_refused_by_name() {
+        // M54's bump: an M53 recording (RT\x00\x0f) holds the M38 refusal where an exec landmark now carries
+        // the new image, so it would replay into a false divergence. It is refused as an older format.
+        let p = named_tempfile("m53magic");
+        std::fs::write(&p, b"RT\x00\x0frest-of-a-pre-M54-trace").unwrap();
+        let msg = Reader::format_skew(&p).unwrap().expect(r"a pre-M54 RT\x00\x0f header is version skew");
+        assert!(msg.contains(r"RT\x00\x0f") && msg.contains(&format!(r"RT\x{:02x}\x{:02x}", TRACE_MAGIC[2], TRACE_MAGIC[3])), "{msg}");
+        std::fs::remove_file(&p).ok();
+    }
+
+    #[test]
+    fn an_exec_event_round_trips() {
+        let e = Event::Exec { num: 59, args: [0x1000, 0x2000, 0x3000, 0, 0, 0, 0, 0], path: b"./tgt".to_vec(),
+            image: vec![0xcf, 0xfa, 0xed, 0xfe, 1, 2, 3], script: b"#!/bin/echo hi".to_vec(), dylinker: vec![9; 40],
+            closed: vec![4, 11], thread: 1 };
+        let f = tempfile();
+        let mut w = Writer::create(&f).unwrap();
+        w.append(&e).unwrap();
+        drop(w);
+        let (got, truncated) = Reader::open_checked(&f).unwrap();
+        assert!(!truncated);
+        assert_eq!(got, vec![e]);
     }
 
     #[test]

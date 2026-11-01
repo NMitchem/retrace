@@ -243,6 +243,19 @@ impl GuestKqueues {
         Ok(())
     }
 
+    /// M54 t3 (spec 2b, measured): exec closes every kqueue descriptor, and the threads that waited on
+    /// anything are gone with their image. Every kqueue (its knotes and its waiter) and every poll waiter is
+    /// dropped, and the descriptors that named a kqueue come back so the caller closes their slots. The
+    /// pipes and their counts stay: both ends survive exec (measured), less the descriptors the caller then
+    /// closes. Ids and the activation counter only ever grow, so they stay too.
+    pub fn reset_for_exec(&mut self) -> Vec<u64> {
+        let fds: Vec<u64> = self.fd_kq.keys().copied().collect();
+        self.kqs.clear();
+        self.fd_kq.clear();
+        self.poll_waiters.clear();
+        fds
+    }
+
     /// `fd` closed. A kqueue's table goes with its last descriptor; every knote on `fd` leaves every
     /// kqueue (`kern_event.c:knote_fdclose`); and a pipe end loses a descriptor. The close of the
     /// very descriptor a thread blocked in `kevent` through is refused: natively that thread wakes at

@@ -1,7 +1,9 @@
 pub mod machmsg;
 pub mod symbols;
+mod exec;
 
 use std::path::Path;
+use retrace_box::{ExecRefusal, SpawnFail};
 use std::rc::Rc;
 use retrace_box::{Box_, FaultAction, Stage2, Stop};
 use retrace_trace::{Writer, Event, Region};
@@ -364,6 +366,12 @@ fn wall_or_bug(m: String) -> String {
 fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>) -> Result<RecordSummary, String> {
     let mut w = Writer::create(trace_path).map_err(|e| format!("create trace: {e}"))?;
     let mut count = 0usize;
+    // M54 C10: retrace's own 0/1/2, which the console slots map to, start without FD_CLOEXEC, as a process's
+    // do natively, so `cloexec_on_host` reads only what the guest set. Before the opening snapshot; record only.
+    for fd in 0..3 {
+        // SAFETY: F_SETFD on a descriptor number writes only that descriptor's flag word.
+        unsafe { libc::fcntl(fd, libc::F_SETFD, 0); }
+    }
     w.append(&b.snapshot()).map_err(|e| format!("append snapshot: {e}"))?; count += 1;
     // M52 §3i: after the snapshot, so no timer register is in it. Record only.
     b.watch_for_stalls();
@@ -1816,17 +1824,90 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                 }
             }
 
-            // M38: exec is refused, never forwarded — placed BEFORE the generic forward arm, which
-            // is the only guard (the bsdthread_create precedent). Constant return, no writes, so
-            // replay recomputes and byte-compares (symmetry rule 1, the standard posture). The
-            // errno is the one the forward produced before M38, for continuity (spec R4).
-            Stop::Syscall { num, args } if retrace_arch::exec_refusal_errno(num).is_some() => {
-                let e = retrace_arch::exec_refusal_errno(num).unwrap();
-                // exec_refusal_errno is EFAULT (14) for both execve and posix_spawn (M38 R4).
-                say_err(&retrace_arch::refused_line(&retrace_arch::syscall_display(num), "EFAULT"));
-                w.append(&Event::Syscall { num, args, ret: e, ret1: 0, err: true, writes: vec![], thread })
-                    .map_err(|e| format!("append exec refusal: {e}"))?; count += 1;
-                b.apply_and_return(e, true, &[]);
+            // M54 t2: a posix_spawn that starts a CHILD is a ProcessCreation wall: retrace records one
+            // process. Read the descriptor's attrp and psa_flags through the checked reader; an
+            // unreadable one falls through to the exec arm below (it answers EFAULT).
+            // The recording ends here, so replay has no mirror to this arm.
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_POSIX_SPAWN
+                && b.spawn_flags(args[2]).is_some_and(|f| !retrace_arch::spawn_is_setexec(f)) => {
+                return Err(retrace_arch::wall(retrace_arch::WallCategory::ProcessCreation,
+                    "posix_spawn of a child process (syscall 244)"));
+            }
+
+            // M54 t3: exec in place, never forwarded (a forwarded exec would replace retrace's own process;
+            // placed BEFORE the generic forward arm, which is the only guard). Everything that can refuse
+            // happens before anything is appended: the pointer check, `read_exec_call`, `resolve`, the
+            // argument vector, the pending-signal wall. A failed exec is an ordinary `Syscall` landmark
+            // carrying the errno, which replay's generic tail applies; a wall ends the recording. Past
+            // them the call is `Event::Exec` and `Box_::exec_image`, the same method replay calls with the
+            // same input rebuilt from the event, so symmetry rule 1 holds by construction (spec 3c).
+            Stop::Syscall { num, args } if num == retrace_arch::SYS_EXECVE || num == retrace_arch::SYS_POSIX_SPAWN => {
+                // M51 §3h (C3): the generic arm's pointer check plus every argv/envp page. Replay's generic
+                // tail calls this same method for 59/244 (final review part 2, I1), so a failed exec leaves
+                // the same backings on both sides; a successful one reaches the `Exec` mirror.
+                if let Err(e) = b.prepare_exec_pointers(num, &args) {
+                    append_refused(&mut w, &mut b, &mut count, num, args, e, true, thread)?;
+                    continue;
+                }
+                let call = match b.read_exec_call(num, args) {
+                    Ok(c) => c,
+                    Err(ExecRefusal::Errno(e)) => { append_refused(&mut w, &mut b, &mut count, num, args, e, true, thread)?; continue; }
+                    Err(ExecRefusal::Wall(m)) => return Err(m),
+                };
+                // M54 t4 (C1, Ruling T4-b): a SETEXEC spawn's actions come first, on a scratch table with their
+                // host half done transactionally (`SpawnTxn`): the first failure is the call's errno and the
+                // image is never looked at; a later failure rolls the host half back. Nothing persists.
+                let mut txn = match call.spawn.as_ref().map(|p| b.spawn_actions_host(p)) {
+                    None => None,
+                    Some(Ok(t)) => Some(t),
+                    Some(Err(SpawnFail::Errno(_, e))) => { append_refused(&mut w, &mut b, &mut count, num, args, e, true, thread)?; continue; }
+                    Some(Err(SpawnFail::Wall(m))) => return Err(m),
+                };
+                macro_rules! undo { () => { if let Some(t) = txn.take() { t.rollback(); } } }
+                // The kernel finds and checks the file first and copies the argument strings in after.
+                let resolved = match exec::resolve(&call) {
+                    Ok(r) => r,
+                    Err(ExecRefusal::Errno(e)) => { undo!(); append_refused(&mut w, &mut b, &mut count, num, args, e, true, thread)?; continue; }
+                    Err(ExecRefusal::Wall(m)) => { undo!(); return Err(m) }
+                };
+                match call.args_refusal.clone() {
+                    Some(ExecRefusal::Errno(e)) => { undo!(); append_refused(&mut w, &mut b, &mut count, num, args, e, true, thread)?; continue; }
+                    Some(ExecRefusal::Wall(m)) => { undo!(); return Err(m) }
+                    None => {}
+                }
+                // C5: a stop signal the new image would take is a wall, decided before anything is appended; the
+                // terminating one is known now too, and ends the run after the `Exec` landmark (native ran the
+                // exec and its new image died).
+                let release = match b.exec_release_check(call.spawn.as_ref()) {
+                    Ok(r) => r,
+                    Err(m) => { undo!(); return Err(m) }
+                };
+                // The close set is the host kernel's answer, recorded (Ruling 3); a spawn's is over the post-action table.
+                let closed = match &txn { Some(t) => t.closed.clone(), None => b.cloexec_on_host() };
+                let mut img = exec::image(&call, &resolved.image, &resolved.script, &resolved.dylinker, &closed)
+                    .unwrap_or_else(|m| panic!("exec: resolve accepted an image it cannot load: {m}"));
+                if let Some(t) = &txn { img.host_new = t.host_new.clone(); }
+                w.append(&Event::Exec { num, args, path: call.path.clone(), image: resolved.image, script: resolved.script,
+                                        dylinker: resolved.dylinker, closed, thread })
+                    .map_err(|e| format!("append exec: {e}"))?; count += 1;
+                b.exec_image(&img).map_err(|u| u.marked())?;
+                if let Some(t) = txn.take() { t.commit(); }
+                if let Some(sig) = b.take_exec_release().map_err(|u| u.marked())? {
+                    assert_eq!(Some(sig), release, "exec: the release the check computed is the one taken");
+                    // TERMINAL, as a raised fatal signal is: the event, the final snapshot, break. The pc is the
+                    // new image's entry and the thread tag its only thread's.
+                    let pc = b.position();
+                    let final_snap = b.snapshot();
+                    let nthread = b.threads().current() as u32;
+                    w.append(&Event::Signal { sig, pc, thread: nthread })
+                        .map_err(|e| format!("append signal: {e}"))?; count += 1;
+                    w.append(&final_snap).map_err(|e| format!("append final snapshot: {e}"))?; count += 1;
+                    outcome = Outcome::Signal { sig };
+                    break;
+                }
+                assert_eq!(release, None, "exec: the release the check computed is the one taken");
+                // The new image's `task_self_trap` teaches the name again.
+                guest_task_port = None;
             }
 
             // M47 §3e: fork is refused, never forwarded — a forwarded fork would start a real child
@@ -1957,6 +2038,11 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                 assert!(retrace_arch::fork_refusal_errno(num).is_none(),
                     "fork ({num}) reached the generic forward arm — it must be refused above (M47). \
                      Forwarded, it starts a real child of the recorder.");
+                // M54: exec is never forwarded (it would replace retrace's own process). Every 59 and 244
+                // lands in a returning arm above (the child wall, or the exec arm); this is the checked fact.
+                assert!(num != retrace_arch::SYS_EXECVE && num != retrace_arch::SYS_POSIX_SPAWN,
+                    "exec ({num}) reached the generic forward arm — it must be handled above (M54). \
+                     Forwarded, it would replace the recorder's own process image.");
                 // M50 §3c (B3): an unrowed syscall, or one that writes through a nested pointer, ends
                 // the recording here as a wall. It comes after the "never forwarded" asserts above,
                 // which guard arms that must exist, and before the M27 assert below, which is now a
@@ -2119,6 +2205,28 @@ impl DecodedTrace {
     pub fn is_complete(&self) -> bool { trace_complete(&self.events) }
 }
 
+/// M54 §3i: one image's stretch of a recording. A recording is a sequence of epochs, one per image:
+/// epoch 0's images come from the opening snapshot, and epoch k's from the k-th `Event::Exec`'s slices.
+/// `first_event` is the index in the event list of the event that begins the epoch: 0 for the opening
+/// snapshot, an `Exec`'s own index otherwise. A position `(n, k)` has consumed `n` events, so it is in
+/// the last epoch whose `first_event < n`, and the exec's own stop `(first_event + 1, 0)` is the
+/// first position of its epoch. `path` is what the program passed to the exec (a `#!` script's own
+/// path, while `image` is the interpreter's slice), and `image` and `dylinker` are the arm64 slices.
+/// Epoch 0 has an empty path and image: its bytes are in the snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Epoch { pub first_event: usize, pub path: Vec<u8>, pub image: Vec<u8>, pub dylinker: Vec<u8> }
+
+/// The recording's epochs, in order: epoch 0, then one per `Event::Exec`.
+pub fn exec_epochs(events: &[Event]) -> Vec<Epoch> {
+    let mut v = vec![Epoch { first_event: 0, path: Vec::new(), image: Vec::new(), dylinker: Vec::new() }];
+    for (i, e) in events.iter().enumerate() {
+        if let Event::Exec { path, image, dylinker, .. } = e {
+            v.push(Epoch { first_event: i, path: path.clone(), image: image.clone(), dylinker: dylinker.clone() });
+        }
+    }
+    v
+}
+
 /// M50 §3c (R5, C2): whether a recording has its end, a terminal event (an exit, a crash or a fatal
 /// signal). A recording that stopped at a wall, or whose recorder was killed, has none.
 fn trace_complete(events: &[Event]) -> bool {
@@ -2221,6 +2329,18 @@ impl ReplaySession {
         // events[0] is the initial snapshot; the first landmark to consume is events[1].
         Ok(ReplaySession { b, events, idx: 1, console: Console::default(), guest_task_port: None,
                            truncated: trace.truncated })
+    }
+
+    /// Final review part 2, I2: the signal of a C5 terminal waiting at the cursor, if one is. An exec that releases a
+    /// fatal pending signal appends the `Exec` and then the terminal `Signal` with nothing between, and replay
+    /// finishes the `Exec` before the terminal (the `Exec` mirror checks that the box's release names that signal).
+    /// A `Signal` straight after an `Exec` is never anything else: the new image runs dyld's syscalls before any
+    /// raise. Derived from the position rather than held in a field, so a checkpoint taken at `(n, 0)` carries it.
+    pub fn terminal_pending(&self) -> Option<u64> {
+        match (self.events.get(self.idx.checked_sub(1)?), self.events.get(self.idx)) {
+            (Some(Event::Exec { .. }), Some(Event::Signal { sig, .. })) => Some(*sig),
+            _ => None,
+        }
     }
 
     /// M51 §3g (C5): consume a terminal `Event::Signal` and the final snapshot, and end the replay.
@@ -2406,6 +2526,12 @@ impl ReplaySession {
     /// `Advance::Exited` the run is complete; calling `advance` again is unspecified (the guest is
     /// past its final landmark) — callers must not.
     pub fn advance(&mut self) -> Result<Advance, Divergence> {
+        // Final review part 2, I2: the C5 terminal's second step. The exec's own landmark is consumed and the
+        // guest has not moved since, so the terminal is reported from here and no guest instruction runs.
+        if let Some(sig) = self.terminal_pending() {
+            let pc = self.b.position();
+            return self.signal_terminal(sig, pc);
+        }
         loop {
             match self.b.run() {
                 Stop::Syscall { num, args } => {
@@ -2708,16 +2834,6 @@ impl ReplaySession {
                             // issue byte-identical (num, args), so without this, a replay that
                             // schedules the wrong thread onto identical code continues in silence.
                             self.verify_thread(*rthread, pc)?;
-                            // M38 mirror of record's exec refusal: recompute the constant, compare.
-                            if let Some(e) = retrace_arch::exec_refusal_errno(num) {
-                                if *ret != e || !*err || !writes.is_empty() {
-                                    return Err(Divergence { landmark: self.idx, pc, detail: format!(
-                                        "exec refusal mismatch: recorded ret {ret} err {err} with {} write(s), \
-                                         expected errno {e}, err, no writes", writes.len()) });
-                                }
-                                self.b.apply_and_return(*ret, *err, writes);
-                                return self.finish_event();
-                            }
                             // M47 mirror of record's fork refusal: recompute the constant, compare.
                             if let Some(e) = retrace_arch::fork_refusal_errno(num) {
                                 if *ret != e || !*err || *ret1 != 0 || !writes.is_empty() {
@@ -3894,7 +4010,14 @@ impl ReplaySession {
                             // in `iovec_prepare` (an invalid count answers EINVAL before the array is read), so
                             // a check here would refuse, or commit pages, where record did neither.
                             if !retrace_arch::is_iovec(num) {
-                                if let Err(e) = self.b.prepare_forward_pointers(num, &args) {
+                                // Final review part 2, I1: a failed exec is this landmark; record made the
+                                // exec pointer step (argv/envp pages too) for every 59/244, so replay does.
+                                let prepared = if num == retrace_arch::SYS_EXECVE || num == retrace_arch::SYS_POSIX_SPAWN {
+                                    self.b.prepare_exec_pointers(num, &args)
+                                } else {
+                                    self.b.prepare_forward_pointers(num, &args)
+                                };
+                                if let Err(e) = prepared {
                                     if !(*err && *ret == e && writes.is_empty()) {
                                         return Err(Divergence { landmark: self.idx, pc, detail: format!(
                                             "syscall {num}: replay refuses a pointer (errno {e}) that the recording forwarded \
@@ -4025,6 +4148,62 @@ impl ReplaySession {
                                         "syscall {num} refused on replay, though the recording accepted it \
                                          — replay diverged before this landmark: {m}") } });
                                 }
+                            }
+                            return self.finish_event();
+                        }
+                        // M54 t3: the mirror of record's exec arm (symmetry rule 1): the same `Box_` methods,
+                        // `read_exec_call` and `exec_image`, with the same arguments, the image rebuilt from the
+                        // event's bytes. Replay reads no file for an exec. A failed exec is an ordinary
+                        // `Syscall` landmark and takes the generic tail above.
+                        Some(Event::Exec { num: rn, args: ra, path: rpath, image: rimage, script: rscript, dylinker: rdyld,
+                                           closed: rclosed, thread: rthread }) => {
+                            if num != *rn || args != *ra {
+                                return Err(Divergence { landmark: self.idx, pc,
+                                    detail: format!("exec mismatch: live (num={num}, args={args:?}) != recorded (num={rn}, args={ra:?})") });
+                            }
+                            // The EIGHTH `verify_thread` site: this arm consumes a landmark and returns, so
+                            // without one it is a hole. After the arm's own field comparison, so a genuine
+                            // argument divergence still reports as itself.
+                            self.verify_thread(*rthread, pc)?;
+                            // Record's pointer check, at the same point: the pages the call reads are made present.
+                            if let Err(e) = self.b.prepare_exec_pointers(num, &args) {
+                                return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                    "exec: replay refuses a pointer (errno {e}) that the recording accepted") });
+                            }
+                            let call = match self.b.read_exec_call(num, args) {
+                                Ok(c) if c.args_refusal.is_none() => c,
+                                Ok(c) => return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                    "exec: replay refuses the argument vector ({:?}) that the recording accepted", c.args_refusal) }),
+                                Err(e) => return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                    "exec: replay cannot read the call ({e:?}) that the recording read") }),
+                            };
+                            if call.path != *rpath {
+                                return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                    "exec path mismatch: replay reads {:?} from guest memory, the recording holds {:?}",
+                                    String::from_utf8_lossy(&call.path), String::from_utf8_lossy(rpath)) });
+                            }
+                            let img = exec::image(&call, rimage, rscript, rdyld, rclosed).map_err(|m| Divergence {
+                                landmark: self.idx, pc, detail: format!("exec: {m}") })?;
+                            if let Err(u) = self.b.exec_image(&img) {
+                                return Err(Divergence { landmark: self.idx, pc, detail: u.marked() });
+                            }
+                            self.guest_task_port = None;
+                            // C5, the mirror of record's release: the same `Box_` method on the same state.
+                            let released = self.b.take_exec_release()
+                                .map_err(|u| Divergence { landmark: self.idx, pc, detail: u.marked() })?;
+                            // Final review part 2, I2: the release is TWO steps here. This one finishes the `Exec`
+                            // landmark like any other (so the debugger reaches C6's exec stop at `(n, 0)`) and
+                            // checks that the recording carries the Signal this release names; the next `advance()`
+                            // ends the run through `signal_terminal` without running the guest
+                            // (`terminal_pending`). Plain replay sees the same `Exited` and report one call later.
+                            let next_sig = match self.events.get(self.idx + 1) {
+                                Some(Event::Signal { sig, .. }) => Some(*sig),
+                                _ => None,
+                            };
+                            if released != next_sig {
+                                return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                    "exec releases signal {released:?} on replay, but the recording's next event is {:?}",
+                                    self.events.get(self.idx + 1)) });
                             }
                             return self.finish_event();
                         }
@@ -4321,6 +4500,10 @@ impl ReplaySession {
     /// `k` retire (no silent clamp; the length substring is a UX contract the reverse-stepi relies
     /// on). The session is spent on Err — the guest is parked mid-window with `k` unsatisfied.
     pub fn step_insns(&mut self, k: u64) -> Result<(), String> {
+        // N1: no instruction of the new image runs before a pending C5 terminal; its window is empty.
+        if k > 0 && self.terminal_pending().is_some() {
+            return Err(format!("window {} ends after 0 instruction(s); cannot step {k}", self.idx));
+        }
         for done in 0..k {
             loop {
                 match self.b.step() {
@@ -4429,6 +4612,8 @@ impl ReplaySession {
     /// re-stepped, exactly as `step_insns` does. Deterministic per (trace, landmark). The session
     /// is spent (parked at the trap).
     pub fn window_len_here(&mut self) -> Result<u64, String> {
+        // Final review part 2, I2: a C5 terminal's window is empty; the guest does not run before it.
+        if self.terminal_pending().is_some() { return Ok(0); }
         let mut n = 0u64;
         loop {
             match self.b.step() {

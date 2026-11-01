@@ -126,13 +126,22 @@ fn a_reader_that_goes_away_does_not_stop_the_recording() {
 }
 
 /// FW-4: retrace's own `refused:` line goes through a writer that drops its error, as the program's
-/// output does. A program that survives a refusal (the exec fixture's `execve`) ends with its own code
-/// when stderr's reader has already gone, not at the bug banner (`eprintln!` panics on EPIPE).
+/// output does. A program that survives a refusal (the fork fixture, whose `fork` is refused with EAGAIN
+/// and which then prints and exits 0) ends with its own code when stderr's reader has already gone, not at
+/// the bug banner (`eprintln!` panics on EPIPE). M54 moved it off `exec_dyn`, whose `execve` now succeeds
+/// and so prints no refusal (Ruling T2-a); the control below shows this fixture's line is printed.
 #[test]
 fn a_refusal_line_to_a_closed_stderr_does_not_become_a_bug() {
+    // Control: with stderr open, the refusal's line is there, so the closed-stderr run below is a run
+    // that had a line to lose.
+    let t = scratch("refused-open.bin");
+    let open = util::run_bounded(util::bin(), &["record-dyn", retrace_guest::FORKFAIL_DYN, "-o", t.to_str().unwrap()], &[], BOUND);
+    assert_eq!(open.code, Some(0), "{}", open.stderr);
+    assert!(open.stderr.lines().any(|l| l.starts_with("retrace: refused: fork") && l.ends_with("returned EAGAIN to the program")),
+        "control: the refusal line is printed when stderr is open:\n{}", open.stderr);
     let t = scratch("refused.bin");
     let mut child = Command::new(util::bin())
-        .args(["record-dyn", retrace_guest::EXEC_DYN, "-o", t.to_str().unwrap()])
+        .args(["record-dyn", retrace_guest::FORKFAIL_DYN, "-o", t.to_str().unwrap()])
         .env_clear().stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
     // The reader goes away before dyld has finished starting the program, so the refusal's line has nowhere to go.
     drop(child.stderr.take());

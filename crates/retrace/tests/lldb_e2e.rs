@@ -628,3 +628,77 @@ fn lldb_backtraces_an_arm64e_guest_through_signed_return_addresses() {
         assert!(frames[i].contains(&format!("`{f}")), "frame #{i} is {f} — a signed LR stripped: {t}");
     }
 }
+
+// ---- M54 task 6: exec epochs under lldb -----------------------------------------------------------
+
+/// `execself_dyn copy <target>`, recorded: the trace, and the copy of `exec_target_dyn` it execs, at a
+/// path whose file name (`exec_tgt`) lldb names its module by.
+fn exec_trace() -> (PathBuf, PathBuf) {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!("retrace-lldbexec-{}-{}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+    std::fs::create_dir_all(&dir).unwrap();
+    let target = dir.join("exec_tgt");
+    std::fs::copy(retrace_guest::EXEC_TARGET_DYN, &target).unwrap();
+    let trace = dir.join("t.bin");
+    let r = util::run_bounded(util::bin(), &["record-dyn", retrace_guest::EXECSELF_DYN, "-o", trace.to_str().unwrap(),
+                                             "--", "copy", target.to_str().unwrap()], &[], 300);
+    assert_eq!(r.code, Some(0), "record the exec: {}", r.stderr);
+    (trace, target)
+}
+
+#[test]
+fn lldb_follows_an_exec_forward() {
+    if !lldb_runs() {
+        util::announce("SKIPPED lldb_follows_an_exec_forward: `/usr/bin/lldb --version` did not run. This gate did NOT run.");
+        return;
+    }
+    let (trace, target) = exec_trace();
+    // `break main` is set AFTER the exec stop, so it must resolve in the new image (t0 M6 left that open).
+    let cmds: Vec<String> = ["process continue", "image list", "breakpoint set -n main", "process continue", "bt", "register read pc"]
+        .iter().map(|s| s.to_string()).collect();
+    let (code, out, err) = session(&trace, &cmds);
+    let t = format!("exit {code:?}\n--- stdout\n{out}\n--- stderr\n{err}");
+    assert!(out.lines().any(|l| l.trim() == "END"), "{t}");
+    assert_eq!(code, Some(0), "{t}");
+    assert!(out.contains("stop reason = exec"), "lldb accepts the exec stop: {t}");
+    let tail = &out[out.find("stop reason = exec").unwrap()..];
+    assert!(tail.contains("exec_tgt"), "the new image is in lldb's module list: {t}");
+    assert!(tail.contains("stop reason = breakpoint"), "the breakpoint set after the exec is hit: {t}");
+    assert!(tail.contains("exec_tgt`main"), "`bt` names the new image's main: {t}");
+    let _ = std::fs::remove_dir_all(target.parent().unwrap());
+}
+
+#[test]
+fn lldb_stops_at_an_exec_in_reverse_and_does_not_cross_it() {
+    // Ruling T6-e, measured (`.superpowers/sdd/2026-10-29-retrace-m54-exec/t6/lldb-reverse.txt`): lldb
+    // re-reads its module list at a `reason:exec` stop and at no other, so it cannot follow a reverse
+    // run into the old epoch (it kept the NEW image's modules at the start-of-recording stop). The
+    // reverse stop AT the exec is reported, and a further reverse resume is refused by value with the
+    // position unchanged. lldb's direction is sticky, so the forward continue is `-F`.
+    if !lldb_runs() {
+        util::announce("SKIPPED lldb_stops_at_an_exec_in_reverse_and_does_not_cross_it: `/usr/bin/lldb --version` did not run. This gate did NOT run.");
+        return;
+    }
+    let (trace, target) = exec_trace();
+    let cmds: Vec<String> = ["process continue", "process continue", "process continue -R", "process plugin packet monitor where",
+                             "process continue -R", "process plugin packet monitor where", "rsi",
+                             "process plugin packet monitor where", "process continue -F"]
+        .iter().map(|s| s.to_string()).collect();
+    let (code, out, err) = session(&trace, &cmds);
+    let t = format!("exit {code:?}\n--- stdout\n{out}\n--- stderr\n{err}");
+    assert!(out.lines().any(|l| l.trim() == "END"), "{t}");
+    assert_eq!(code, Some(0), "{t}");
+    assert_eq!(out.matches("stop reason = exec").count(), 2, "forward to the exec, and backward from the end to it: {t}");
+    assert_eq!(out.matches("stop reason = reverse execution across an exec is not supported").count(), 2,
+               "`process continue -R` and `rsi` from the exec stop are both refused by value: {t}");
+    // Final review part 2, M5: the position is read as `(n, k)` through the server's `where`. The registers cannot
+    // carry this claim: the exec stop and the start of the recording are both dyld's entry, so their pcs are equal.
+    let n = retrace_trace::Reader::open(&trace).unwrap().into_iter().position(|e| matches!(e, retrace_trace::Event::Exec { .. }))
+        .expect("an Exec landmark") + 1;
+    let w = wheres(&out);
+    assert_eq!(w.len(), 3, "{t}");
+    assert!(w.iter().all(|l| l.starts_with(&format!("{n}, 0) phase=Bp"))),
+            "the refusals leave the position at the exec stop ({n}, 0), not the start of the recording (1, 0): {t}");
+    assert!(out.rfind("exited (code 0)") > out.rfind("not supported"), "and a forward continue still runs on to the end: {t}");
+    let _ = std::fs::remove_dir_all(target.parent().unwrap());
+}

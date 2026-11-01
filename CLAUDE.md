@@ -41,12 +41,12 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
   cargo test -p retrace --bins -- --test-threads=1          # don't omit — see below
   ```
   **Do not omit the `--bins` chunk.** `--test <name>` selects integration-test targets only, so the
-  34 unit tests inside the `retrace` binary itself (20 in `crates/retrace/src/debug.rs`, 13 in
+  35 unit tests inside the `retrace` binary itself (20 in `crates/retrace/src/debug.rs`, 14 in
   `crates/retrace/src/rsp.rs`, 1 in `crates/retrace/src/main.rs`) run in **none** of
   the other chunks; only the unchunked `--workspace` run, or a whole-package `cargo test -p retrace`
   with no `--test` filter, reaches them — which is why closes before M17 are not owed a
   correction. Leaving it out silently costs
-  34 tests and one binary — and nothing fails to warn you. Contrast `cargo test -p retrace --lib`,
+  35 tests and one binary — and nothing fails to warn you. Contrast `cargo test -p retrace --lib`,
   which is invalid for this crate (there is no lib target) and fails the whole invocation
   **loudly**: the trap is that the wrong flag is loud and the missing one is silent.
 
@@ -73,8 +73,8 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
   joins it), `thread_watch_e2e` (a guest whose two threads write different cells, where
   `reverse-continue` must name the thread that wrote the watched one), `sigthread_e2e` (a guest
   whose main signals its child by name, so the *child* runs the handler), `cpython_e2e` (rung 7 —
-  the real CPython interpreter running `-c 'print(1)'`, plus the launcher shim that pins
-  exec-in-place as unmodelled), `bigread_e2e` (a guest whose one `read` returns more than the
+  the real CPython interpreter running `-c 'print(1)'`, plus the launcher shim, which since M54
+  execs the real interpreter in place and must print what native prints), `bigread_e2e` (a guest whose one `read` returns more than the
   record-side diff window, guarding the M26 truncation class — repo-owned precisely because
   `cpython_e2e` *skips* without Homebrew Python and so cannot guard anything), `bigwrite_e2e` (its
   mirror on the write side: a guest whose one `write` sends more than the diff window, guarding the
@@ -86,8 +86,12 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
   guest minimum, a number no host `dup` could produce; since M44 also `F_DUPFD_CLOEXEC` then
   `F_GETFD` reading 1, as native does), `atfdcwd_e2e` (a guest whose
   `fstatat(AT_FDCWD, …)` must carry the 32-bit sentinel `0xfffffffe` in the trace AND succeed),
-  `exec_e2e` (a guest whose `execve`/`posix_spawn` are refused — asserted on the recorder's
-  refusal line, because the errno alone is what the old forward also returned), `cpython_crash_e2e`
+  `exec_e2e` (M54: exec in place — `execve`, `SETEXEC` `posix_spawn` and `#!` scripts run as native,
+  a chain of twenty images, an exec from a worker thread, native's errnos, a pending signal ending the run
+  as natively, and replay never reading the new binary from disk; each wall is asserted on its line and its
+  `#process-creation` anchor), `execdebug_e2e` (M54: the debugger's exec epochs — `where` and `break` in the
+  new image's symbols, an exec stop both ways, a checkpointed seek across an exec equal to a cold one, and the
+  gdbserver's `reason:exec` stop and its refusal to reverse across one, through lldb as well), `cpython_crash_e2e`
   (rung 8 — the real interpreter on the repo's `crash.py`, asserting the marker line, the
   `Event::Crash` at the address the script computed from its data file, two byte-identical replays,
   and a scripted `reverse-continue` that reaches the store by its **effect** rather than by a
@@ -212,7 +216,7 @@ are gitignored); build/run recipes and findings are in `spikes/README.md`.
   the trampoline's vector padding without bumping, and a pre-M23 trace then restored its old padding
   under code that assumed the new — M24 bumped for it (to `RT\x00\x09` then; moved again by M38
   for `ret1`, by M47 for the `mach_vm_map` alignment mask, and by M49 for the store-exclusive
-  rewrite and native's `si_code`, and by M51 for `Event::Crash`'s `sig`, and by M52 for the synthetic clock's stride, and by M53 for the iovec translation, so it is `RT\x00\x0f` now).
+  rewrite and native's `si_code`, and by M51 for `Event::Crash`'s `sig`, and by M52 for the synthetic clock's stride, and by M53 for the iovec translation, and by M54 for `Event::Exec`, so it is `RT\x00\x10` now).
   `open_checked` drops a torn/corrupt tail rather than panicking, and since M47 a trace whose header
   is another `RT` version is refused by name ("recorded by a different retrace trace format (not
   torn)") rather than as torn.
@@ -266,6 +270,17 @@ and threads.
    M42's store-exclusive emulation is also below the trace, but it is debugger-only: it lives in
    `step()` and `run()`'s pair prologue, engages only when single-stepping or at a debug stop, and
    record and plain replay assert its shadow is never set.
+
+**Exec is one method, run by both sides (M54).** A successful `execve`, `SETEXEC` `posix_spawn` or `#!` script
+is `Event::Exec`, which carries the path, the selected slice of the image (a script's interpreter) and of its
+dynamic linker, a script's first line and the guest descriptors exec closed; argv, envp and a spawn's
+attributes and file actions are read from guest memory on both sides, not recorded. Record and replay both call
+`Box_::exec_image` with the same `ExecImage`, and replay never reads the new binary from disk, so symmetry
+rule 1 holds by construction. Everything that can refuse (`read_exec_call`, `resolve`, the spawn-action
+validation) runs **before the point of no return**, `exec_image`'s first line: past it a failure is a bug,
+never a wall, so a new exec check belongs before it. `exec_epochs` splits a recording at its `Exec` events, an
+exec's position is `(n, 0)` at the new entry, and the debugger resolves symbols, breakpoints and the crash
+line in the epoch of the position. What exec keeps and resets is in `docs/superpowers/specs/2026-10-29-retrace-m54-exec-design.md` §3d.
 
 **A guest-reachable refusal is a wall, never a plain panic (M50).** A box method refuses with
 `Err(retrace_arch::wall(category, …))`, which `record_box` ends the recording on; a deep shared
@@ -366,7 +381,7 @@ which PAC-fails on the guest's pthread struct) — and **nothing asserts against
 arm in `record_box` (`crates/retrace-core/src/lib.rs`) sits before the generic forward arm and that ordering is
 the only guard. The generic arm's asserts are `is_signal_syscall`, the workq pair, `kevent_qos`
 (M45), since M52 `thread_selfid` (372), `writes_via_nested_pointer`, since M47 `madvise` and `fork`, since M48 `kevent` (363),
-since M53 the poll family (`is_poll_family`), `setitimer` and `getitimer`, and the four iovec calls (`is_iovec`),
+since M53 the poll family (`is_poll_family`), `setitimer` and `getitimer`, and the four iovec calls (`is_iovec`), since M54 `execve` and `posix_spawn` (`num != 59 && num != 244`: a child spawn is a wall and an exec goes to its own arm, so no exec reaches the generic arm),
 and every SDK psynch number (`retrace_arch::is_psynch`), and since M49 `__semwait_signal` (334)
 and its `_nocancel` twin (423) only; since M50 both generic arms call
 `retrace_arch::refusal_before_forward`, which ends the recording at a wall for an unrowed number, a
@@ -427,30 +442,30 @@ timer's `SIGALRM` go to the first live thread, main first, that does not mask th
 masks it, it pends on main and is taken when main unmasks. Measured (t0 §M8 and its Correction), and it
 replaces the earlier rule that retrace delivered it to the caller. `__pthread_kill` names its thread and is
 unchanged. A signal also ends a `__semwait_signal` sleep, whoever sends it, and `sigsuspend` is woken by one
-the call's mask lets through. `verify_thread` stays at seven: the poll, `sigsuspend` and `setitimer` mirrors sit
+the call's mask lets through. `verify_thread` stayed at seven through M53: the poll, `sigsuspend` and `setitimer` mirrors sit
 inside the `Syscall` chain after its arm-top check, and `thread_oracle.rs` retags one landmark of each.
 
 **The divergence oracle checks thread identity.** Every landmark variant carries a `thread` tag —
 `Syscall` since M15, and `Exit`/`Crash`/`Signal`/`SignalDelivery` since M16 (which bumped
-`TRACE_MAGIC` for it; the magic is **now** `RT\x00\x0f`, moved again by M24, then by M38 for
+`TRACE_MAGIC` for it; the magic is **now** `RT\x00\x10`, moved again by M24, then by M38 for
 `ret1`, by M47 for the `mach_vm_map` alignment mask, by M49 for the store-exclusive rewrite and
-native's `si_code`, by M51 for `Event::Crash`'s `sig`, by M52 for the synthetic clock's stride, and by M53 for the iovec translation, so every pre-M53 recording is unreadable)
-— and replay recomputes the current thread and compares it. `verify_thread` has **seven** call
-sites, one in each arm that consumes a landmark and `return`s, each placed *after* that arm's own
+native's `si_code`, by M51 for `Event::Crash`'s `sig`, by M52 for the synthetic clock's stride, by M53 for the iovec translation, and by M54 for `Event::Exec`, so every pre-M54 recording is unreadable)
+— and replay recomputes the current thread and compares it. `verify_thread` has **eight** call
+sites (M54's `Event::Exec` mirror is the eighth; `thread_oracle.rs` retags an exec landmark made from a worker), one in each arm that consumes a landmark and `return`s, each placed *after* that arm's own
 field comparison so a genuine argument divergence still reports as itself; the `SignalDelivery`
-landmark is checked by an eighth, inline comparison in `mirror_delivery`, deliberately not
+landmark is checked by a further inline comparison in `mirror_delivery`, deliberately not
 `verify_thread`, because its tag is the **receiving** thread rather than the current one. M48's
 `kevent` and psynch mirrors sit inside the `Syscall` chain after its arm-top check, so the count
-stays seven; `thread_oracle.rs` retags one landmark of each. M49's 334 mirror and 1000 route sit
+stayed seven; `thread_oracle.rs` retags one landmark of each. M49's 334 mirror and 1000 route sit
 inside the same chain; `thread_oracle.rs` retags one landmark of each. M51's abort_with_payload
 terminal reaches the kill mirror's Signal consumption through ReplaySession::signal_terminal, which
-holds that site, so the count stays seven; thread_oracle.rs retags a payload landmark. That
+holds that site, so the count stayed seven then; thread_oracle.rs retags a payload landmark. That
 count is the thing to check when adding an arm: each site exists because a mirror `return`s
 before reaching the generic dispatch, so **every new mirror silently creates a new hole until its
 oracle call is added** — nothing structural couples the two. Without
 the check, two threads running the same code issue byte-identical `(num, args)` and a wrong-thread
 replay continues in silence. `Event::Sched` is **gone**, not reserved: emitting it would silently
-renumber every landmark, and nothing in either dispatch loop can see a switch. **All seven sites are
+renumber every landmark, and nothing in either dispatch loop can see a switch. **All eight sites are
 exercised**, the last of them only since the M18 fast-follow: `Crash` had no fixture, because every
 crashing guest was single-threaded and every threaded guest exited cleanly. `crashthread` (C,
 threaded AND fatal — main blocks in `pthread_join`, the child faults with no handler, so the

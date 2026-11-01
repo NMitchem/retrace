@@ -10,6 +10,8 @@ pub use cache::AuthSlot;
 use cache::{walk_page, CacheMeta, DEFAULT_CACHE_PATH};
 
 mod sig;
+mod exec;
+pub use exec::{decode_spawn, final_args_refusal, image_layout_refusal, script_argv, SHEBANG_MAX, ExecCall, ExecImage, ExecRefusal, FileAction, SpawnFail, SpawnPlan, SpawnTxn};
 pub mod thread;
 pub mod kq;
 pub mod jit;
@@ -182,6 +184,23 @@ pub const COMMPAGE_IPA: u64 = 0x0000_000F_FFFF_C000;
 /// `mach_absolute_time` adds to the counter it reads (t0 M1(c)). The commpage is a copy frozen at
 /// load and restored from the snapshot, so this word is identical on every rebuild path.
 const COMMPAGE_TIMEBASE_OFFSET_IPA: u64 = COMMPAGE_IPA + 0x88;
+/// M54 t0b: pin the frozen commpage copy's `_COMM_PAGE_TIMEBASE_OFFSET` (`COMMPAGE_TIMEBASE_OFFSET_IPA`)
+/// to 0. The live word is -(the host's accumulated sleep time) in ticks. The guest's
+/// `mach_absolute_time` is `synthetic_tsc + this` and `synthetic_tsc` starts at 2^32, so a host that
+/// has slept more than 2^32 ticks (~3 min) wrapped the guest clock below zero and broke every timed
+/// wait that compares or converts it (fc_sw_sleep, fc_rs_threads). `Box_::timebase_offset` reads the
+/// same word back from guest memory, so the write and read sides share one constant. Only this word
+/// is pinned: `+0x98` (the continuous-time offset) is a positive sleep total that never wraps and
+/// rides in the snapshot, so it stays as the host has it (Ruling T0b-a).
+pub fn pin_commpage_timebase_offset(granule: &mut [u8]) {
+    let at = (COMMPAGE_TIMEBASE_OFFSET_IPA - COMMPAGE_IPA) as usize;
+    granule[at..at + 8].fill(0);
+}
+
+/// M54 t1: what `stage_image` returns; the start writes it to the new vCPU (`start_sysregs`), exec
+/// (t3) to the live one.
+struct StagedImage { sp: u64, entry: u64, ttbr0: u64, l2_host: *mut u8, next_l3: u64, pac: bool, cache: CacheMeta }
+
 /// M48 §2c: the two commpage words `pthread_jit_write_protect_np` loads and `msr`s into
 /// `S3_6_C15_C1_5` (`pthread-jit-disasm.txt`): `+0x110` write-enables the thread's `MAP_JIT`
 /// pages and `+0x118`, eight bytes on, protects them (t0 M1(c)). Frozen with the rest of the
@@ -1076,6 +1095,17 @@ impl FdTable {
         self.slots[gfd as usize] = FdSlot::Closed;
         self.host[gfd as usize] = None;
         true
+    }
+
+    /// M54 t4: a spawn's `open` action put a plain open descriptor at `gfd` (growing the table if need
+    /// be) with `host` as its host mapping (record; replay passes `None`), and hands back the host
+    /// mapping it displaced, for the CALLER to close if it is > 2.
+    pub fn set_open(&mut self, gfd: u64, host: Option<i32>) -> Option<i32> {
+        self.grow_to(gfd as usize);
+        let displaced = self.host[gfd as usize];
+        self.slots[gfd as usize] = FdSlot::Open;
+        self.host[gfd as usize] = host;
+        displaced
     }
 
     pub fn slots(&self) -> Vec<FdSlot> { self.slots.clone() }
@@ -2613,51 +2643,84 @@ impl Box_ {
         let mut backings = Backings::new();
         let vm = Vm::create().expect("hv_vm_create");
         let vcpu = Vcpu::create(&vm).expect("hv_vcpu_create");
-        let map = |vm: &Vm, backings: &mut Backings, ipa: u64, src: &[u8], memsz: usize| {
-            let (host, len) = alloc_pages(memsz.max(src.len()).max(GRANULE));
-            unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), host, src.len()); }
-            assert!(ipa.is_multiple_of(GRANULE as u64), "retrace-box: guest region IPA {ipa:#x} is not 16 KiB-granule-aligned (hv_vm_map requires it); a differently-linked guest needs 16 KiB-aligned segments");
-            vm.map(host, ipa, len, MemFlags::RWX).expect("hv_vm_map");
-            backings.push(Backing { host, ipa, len });
+        let argv_b: Vec<Vec<u8>> = argv.iter().map(|a| a.clone().into_bytes()).collect();
+        let mut before_tsd = |vm: &Vm, backings: &mut Backings| {
+            // EL1 vector table (see build_vector_table): `hvc #0` heads, trapping padding.
+            let vectors = build_vector_table();
+            Self::stage_map(vm, backings, TRAMPOLINE_IPA, &vectors, 0x800);
+            // Frozen commpage copies (see COMMPAGE_IPA / COMMPAGE2_IPA): SAFETY — each is a live RO
+            // kernel mapping at this exact VA in every process; read one granule of each.
+            for &cp in &[COMMPAGE_IPA, COMMPAGE2_IPA] {
+                let mut bytes = unsafe { std::slice::from_raw_parts(cp as *const u8, GRANULE) }.to_vec();
+                if cp == COMMPAGE_IPA {
+                    // M54 t0b: see pin_commpage_timebase_offset.
+                    pin_commpage_timebase_offset(&mut bytes);
+                }
+                Self::stage_map(vm, backings, cp, &bytes, GRANULE);
+            }
         };
+        let st = Self::stage_image(&vm, &mut backings, exe, dyld, &argv_b, envp, argv_b.first().map(Vec::as_slice).unwrap_or(b""), thread::MAIN_THREAD_ID, &mut before_tsd);
+        Self::set_pac_keys(&vcpu);
+        Self::start_sysregs(&vcpu, &st);
+        let StagedImage { l2_host, next_l3, pac, cache: cache_meta, .. } = st;
+        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default(), sleep: sleep::SleepModel::default(), sems: sema::Semaphores::default(), itimer: timer::RealTimer::default(), stall: None };
+        b.reserve_believed_stack();
+        // M14: thread 0's context was zeroed above (the table exists before the vCPU does); overwrite
+        // it with the real startup state just written to the vCPU so it reflects reality from the
+        // first `switch_to_thread` rather than an all-zero placeholder.
+        let ctx0 = b.save_ctx();
+        *b.threads.ctx_mut(0) = ctx0;
+        b
+    }
+
+    /// M54 t1: one anonymous region, copied from `src`, mapped and pushed in call order.
+    fn stage_map(vm: &Vm, backings: &mut Backings, ipa: u64, src: &[u8], memsz: usize) {
+        let (host, len) = alloc_pages(memsz.max(src.len()).max(GRANULE));
+        unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), host, src.len()); }
+        assert!(ipa.is_multiple_of(GRANULE as u64), "retrace-box: guest region IPA {ipa:#x} is not 16 KiB-granule-aligned (hv_vm_map requires it); a differently-linked guest needs 16 KiB-aligned segments");
+        vm.map(host, ipa, len, MemFlags::RWX).expect("hv_vm_map");
+        backings.push(Backing { host, ipa, len });
+    }
+
+    /// M54 t1 (spec §3c): stage the exe, dyld, the stack and the TSD, write the start stack and build
+    /// the tables; no vCPU is touched. Backings are pushed in the opening snapshot's order: exe,
+    /// dyld, stack, whatever `before_tsd` maps (the start: vector table and commpages; exec: nothing,
+    /// it keeps both), TSD, tables.
+    #[allow(clippy::too_many_arguments)]
+    fn stage_image(vm: &Vm, backings: &mut Backings, exe: &Loaded, dyld: &Loaded, argv: &[Vec<u8>], envp: &[Vec<u8>], exec_path: &[u8], main_tid: u64, before_tsd: &mut dyn FnMut(&Vm, &mut Backings)) -> StagedImage {
+        let map = Self::stage_map;
         // M49 §3e X3: each executable segment's discarded-status exclusive pairs are rewritten in
         // the backing `map` just pushed, before the guest runs and before `record_box`'s opening
         // snapshot captures it. Replay restores that snapshot and never calls this (R4: the
         // static `load` above stages its segments untouched).
         // exe at its own vmaddrs (arm64 PIE: __PAGEZERO skipped, __TEXT at 4 GiB).
         for s in &exe.segments {
-            map(&vm, &mut backings, s.vaddr, &s.data, s.memsz);
+            map(vm, backings, s.vaddr, &s.data, s.memsz);
             // SAFETY: the last backing is the fresh allocation `map` just filled; no guest ran.
             if s.exec { unsafe { rewrite_staged_code(backings.last().expect("map pushed it").host, s.data.len()); } }
         }
         // dyld slid to DYLD_BASE (it is PIE at vmaddr 0 and self-relocates from PC, so its bytes
         // map as they are, apart from the rewrite).
         for s in &dyld.segments {
-            map(&vm, &mut backings, s.vaddr + DYLD_BASE, &s.data, s.memsz);
+            map(vm, backings, s.vaddr + DYLD_BASE, &s.data, s.memsz);
             // SAFETY: as for the exe's segments.
             if s.exec { unsafe { rewrite_staged_code(backings.last().expect("map pushed it").host, s.data.len()); } }
         }
         // Dynamic stack (anon, zero-filled). Capture its index NOW, before build_tables pushes the
         // page-table backings, so build_start_stack can address the stack backing by index.
         let stack_idx = backings.len();
-        map(&vm, &mut backings, DYN_STACK_TOP - DYN_STACK_SIZE, &[], DYN_STACK_SIZE as usize);
-        // EL1 vector table (see build_vector_table): `hvc #0` heads, trapping padding.
-        let vectors = build_vector_table();
-        map(&vm, &mut backings, TRAMPOLINE_IPA, &vectors, 0x800);
-        // Frozen commpage copies (see COMMPAGE_IPA / COMMPAGE2_IPA): SAFETY — each is a live RO
-        // kernel mapping at this exact VA in every process; read one granule of each.
-        for &cp in &[COMMPAGE_IPA, COMMPAGE2_IPA] {
-            let bytes = unsafe { std::slice::from_raw_parts(cp as *const u8, GRANULE) }.to_vec();
-            map(&vm, &mut backings, cp, &bytes, GRANULE);
-        }
+        map(vm, backings, DYN_STACK_TOP - DYN_STACK_SIZE, &[], DYN_STACK_SIZE as usize);
+        // F1's order is exe, dyld, stack, vectors, commpages, TSD, tables: the start maps the vector
+        // table and the commpages here; exec keeps both and passes a no-op.
+        before_tsd(vm, backings);
         // Thread-pointer TSD region (see TSD_IPA): a zeroed region spanning below+above the thread
         // pointer (TPIDRRO_EL0 = TSD_IPA sits in its middle) so both TSD-key and pthread-field accesses land in it.
         // M52 §3c: main's thread id sits in this region's pthread struct, written before the first
         // snapshot so record and replay both restore it.
         let tid_at = (TSD_IPA - 0xe0 + PTHREAD_TID_OFF - TSD_REGION_BASE) as usize;
         let mut tsd_init = vec![0u8; tid_at + 8];
-        tsd_init[tid_at..].copy_from_slice(&thread::MAIN_THREAD_ID.to_le_bytes());
-        map(&vm, &mut backings, TSD_REGION_BASE, &tsd_init, TSD_REGION_SIZE as usize);
+        tsd_init[tid_at..].copy_from_slice(&main_tid.to_le_bytes());
+        map(vm, backings, TSD_REGION_BASE, &tsd_init, TSD_REGION_SIZE as usize);
 
         // The main executable's mach-header address (dyld4's KernelArgs.mainExecutable): the exe
         // segment whose bytes begin with MH_MAGIC_64. dyld dereferences this to parse the main exe.
@@ -2666,7 +2729,7 @@ impl Box_ {
             .map(|s| s.vaddr)
             .expect("load_dynamic: no exe segment carries the Mach-O header (MH_MAGIC_64)");
         // Build the XNU start stack in the (already-mapped, zeroed) stack backing; get guest SP.
-        let sp = Self::build_start_stack(&backings[stack_idx], argv, envp, main_hdr);
+        let sp = Self::build_start_stack(&backings[stack_idx], argv, envp, exec_path, main_hdr);
 
         // W^X exec ranges: trampoline + exe exec segs (unslid) + dyld exec segs (slid) + the shared
         // cache's executable regions. The cache text stage-1 MUST be ATTR_CODE BEFORE the guest ever
@@ -2686,15 +2749,21 @@ impl Box_ {
             exec.push((addr, size, ATTR_CODE));
         }
         let pt_start = backings.len();
-        let (ttbr0, l2_host, next_l3) = Self::build_tables(&mut backings, &exec);
+        let (ttbr0, l2_host, next_l3) = Self::build_tables(backings, &exec);
         for bk in &backings[pt_start..] { vm.map(bk.host, bk.ipa, bk.len, MemFlags::RWX).expect("hv_vm_map (pt)"); }
+        // Derived from the MAIN executable's cpusubtype, not dyld's — dyld is itself arm64e, and
+        // deriving from it would recreate the bug this task fixes (M7's wall).
+        let pac = pac_posture(exe.cpusubtype);
+        StagedImage { sp, entry: dyld.entry + DYLD_BASE, ttbr0, l2_host, next_l3, pac, cache: cache_meta }
+    }
 
-        Self::set_pac_keys(&vcpu);
+    /// M54 t1: the sysregs and registers a staged image starts with; call after `set_pac_keys`.
+    fn start_sysregs(vcpu: &Vcpu, st: &StagedImage) {
         vcpu.set_sys(sysreg::VBAR_EL1, TRAMPOLINE_IPA).unwrap();
         vcpu.set_trap_debug_exceptions(true).unwrap();          // route SS/breakpoint exits to the VMM (Box_::step)
         vcpu.set_sys(sysreg::MAIR_EL1,  MAIR_EL1_V).unwrap();
         vcpu.set_sys(sysreg::TCR_EL1,   TCR_EL1_V).unwrap();
-        vcpu.set_sys(sysreg::TTBR0_EL1, ttbr0).unwrap();
+        vcpu.set_sys(sysreg::TTBR0_EL1, st.ttbr0).unwrap();
         vcpu.set_sys(sysreg::CPACR_EL1, CPACR_FP_ON).unwrap(); // FPEN=0b11: EL0/EL1 FP/SIMD (dyld uses NEON)
         vcpu.set_sys(sysreg::TPIDRRO_EL0, TSD_IPA).unwrap();   // thread pointer (kernel-provided TSD)
         // TPIDR_EL0 is NOT a second TSD pointer: macOS 26 reads the current CPU number from
@@ -2703,21 +2772,10 @@ impl Box_ {
         // must be 0 -- TSD_IPA (0x30000) would read as cluster 48 and blow libmalloc xzone's
         // per-cluster segment-group index out of bounds (M2-cpuid).
         vcpu.set_sys(sysreg::TPIDR_EL0,   0).unwrap();
-        // Derived from the MAIN executable's cpusubtype, not dyld's — dyld is itself arm64e, and
-        // deriving from it would recreate the bug this task fixes (M7's wall).
-        let pac = pac_posture(exe.cpusubtype);
-        vcpu.set_sys(sysreg::SCTLR_EL1, sctlr_mmu_on(pac)).unwrap();
-        vcpu.set_sys(sysreg::SP_EL0, sp).unwrap();
+        vcpu.set_sys(sysreg::SCTLR_EL1, sctlr_mmu_on(st.pac)).unwrap();
+        vcpu.set_sys(sysreg::SP_EL0, st.sp).unwrap();
         vcpu.set_reg(reg::CPSR, 0).unwrap();                        // EL0t
-        vcpu.set_reg(reg::PC, dyld.entry + DYLD_BASE).unwrap();     // dyld's SLID entry
-        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default(), sleep: sleep::SleepModel::default(), sems: sema::Semaphores::default(), itimer: timer::RealTimer::default(), stall: None };
-        b.reserve_believed_stack();
-        // M14: thread 0's context was zeroed above (the table exists before the vCPU does); overwrite
-        // it with the real startup state just written to the vCPU so it reflects reality from the
-        // first `switch_to_thread` rather than an all-zero placeholder.
-        let ctx0 = b.save_ctx();
-        *b.threads.ctx_mut(0) = ctx0;
-        b
+        vcpu.set_reg(reg::PC, st.entry).unwrap();     // dyld's SLID entry
     }
 
     // Build dyld4's process-start stack (its `KernelArgs`) in the zeroed stack backing; return SP.
@@ -2736,17 +2794,16 @@ impl Box_ {
     // non-zero values (identical on record & replay — deterministic; these are opaque cookies the
     // guest only XORs/stores, never checks against anything external). `executable_path=` gives dyld
     // the main exe's path.
-    fn build_start_stack(stack: &Backing, argv: &[String], envp: &[Vec<u8>], main_hdr: u64) -> u64 {
+    fn build_start_stack(stack: &Backing, argv: &[Vec<u8>], envp: &[Vec<u8>], exec_path: &[u8], main_hdr: u64) -> u64 {
         let base_ipa = stack.ipa;
         let top = stack.ipa + stack.len as u64;
-        let argv0 = argv.first().map(String::as_str).unwrap_or("");
         // strings: argv[0..argc], then envp[0..envc], then the apple[] entries (order irrelevant —
         // parsed by key).
         let mut strings: Vec<Vec<u8>> = Vec::new();
         let push = |mut v: Vec<u8>, out: &mut Vec<Vec<u8>>| { v.push(0); out.push(v); };
-        for a in argv { push(a.clone().into_bytes(), &mut strings); }            // argv[0..argc]
+        for a in argv { push(a.clone(), &mut strings); }            // argv[0..argc]
         for e in envp { push(e.clone(), &mut strings); }                          // envp[0..envc]
-        push(format!("executable_path={argv0}").into_bytes(), &mut strings);     // apple[0]
+        push([b"executable_path=".as_slice(), exec_path].concat(), &mut strings);     // apple[0]
         push(b"ptr_munge=0x1a2b3c4d5e6f7a8b".to_vec(), &mut strings);            // libpthread cookie (nonzero)
         push(b"stack_guard=0x000a0b0c0d0e0f00".to_vec(), &mut strings);          // __stack_chk_guard (low byte 0)
         push(b"malloc_entropy=0x00112233445566778899aabbccddeeff".to_vec(), &mut strings); // libmalloc 2x64 entropy
@@ -7609,6 +7666,9 @@ impl Box_ {
         if num == retrace_arch::SYS_MAP_WITH_LINKING_NP { return Ok(()); }
         let shape = retrace_arch::shape_of(num, args);
         for (i, kind) in shape.args.iter().enumerate() {
+            // M54 final review M2: the kernel copies an exec's path first and the argument arrays after the
+            // file is found, so a bad array is `read_exec_call`'s refusal (the file's own errno comes first).
+            if *kind == NestedSource && (num == retrace_arch::SYS_EXECVE || num == retrace_arch::SYS_POSIX_SPAWN) { continue; }
             let write = match kind {
                 Path | Source | NestedSource => false,
                 // M51 §3h (I-1): `retrace_arch::ptr_use` classifies every `Ptr` position (a unit test keeps
@@ -9456,9 +9516,10 @@ mod stack_geometry_tests {
     fn the_start_stack_carries_the_environment_between_argv_and_apple() {
         let (host, len) = alloc_pages(DYN_STACK_SIZE as usize);
         let stack = Backing { host, ipa: DYN_STACK_TOP - DYN_STACK_SIZE, len };
-        let argv = ["/bin/prog".to_owned(), "one".to_owned()];
+        let argv_s = ["/bin/prog".to_owned(), "one".to_owned()];
+        let argv: Vec<Vec<u8>> = argv_s.iter().map(|a| a.clone().into_bytes()).collect();
         let envp = [b"A=1".to_vec(), b"B=\xff=x".to_vec(), b"C=".to_vec()];
-        let sp = Box_::build_start_stack(&stack, &argv, &envp, EXE_BASE);
+        let sp = Box_::build_start_stack(&stack, &argv, &envp, b"/bin/prog", EXE_BASE);
         let at = |a: u64| unsafe { host.add((a - stack.ipa) as usize) };
         let word = |a: u64| u64::from_le_bytes(unsafe { std::slice::from_raw_parts(at(a), 8) }.try_into().unwrap());
         let cstr = |a: u64| unsafe { std::ffi::CStr::from_ptr(at(word(a)) as *const std::ffi::c_char) }.to_bytes().to_vec();
@@ -9467,7 +9528,25 @@ mod stack_geometry_tests {
         assert_eq!([cstr(sp + 40), cstr(sp + 48), cstr(sp + 56)], envp, "envp, in order, byte for byte");
         assert_eq!(word(sp + 64), 0, "envp's terminator");
         assert_eq!(cstr(sp + 72), b"executable_path=/bin/prog".to_vec(), "apple[0] follows");
-        assert_eq!(start_args_bytes(&argv, &envp), (10 + 4 + 4 + 6 + 3) + 5 * 8 + 16, "strings with NULs, one pointer each, two terminators");
+        assert_eq!(start_args_bytes(&argv_s, &envp), (10 + 4 + 4 + 6 + 3) + 5 * 8 + 16, "strings with NULs, one pointer each, two terminators");
+    }
+
+    // M54 t3 (Task 1's owed test): exec's `executable_path=` is the path argument as the guest passed it,
+    // which is neither argv[0] nor a resolved path (Ruling T0-c), so the stack carries the two apart.
+    #[test]
+    fn the_start_stack_carries_executable_path_apart_from_argv0() {
+        let (host, len) = alloc_pages(DYN_STACK_SIZE as usize);
+        let stack = Backing { host, ipa: DYN_STACK_TOP - DYN_STACK_SIZE, len };
+        let argv = [b"argv-zero".to_vec(), b"x".to_vec()];
+        let sp = Box_::build_start_stack(&stack, &argv, &[], b"./tgt", EXE_BASE);
+        let at = |a: u64| unsafe { host.add((a - stack.ipa) as usize) };
+        let word = |a: u64| u64::from_le_bytes(unsafe { std::slice::from_raw_parts(at(a), 8) }.try_into().unwrap());
+        let cstr = |a: u64| unsafe { std::ffi::CStr::from_ptr(at(word(a)) as *const std::ffi::c_char) }.to_bytes().to_vec();
+        assert_eq!(word(sp + 8), 2, "argc");
+        assert_eq!((cstr(sp + 16), cstr(sp + 24)), (b"argv-zero".to_vec(), b"x".to_vec()), "argv[0] stays what the guest passed");
+        // argv terminator at +32, envp terminator at +40, apple[0] at +48.
+        assert_eq!((word(sp + 32), word(sp + 40)), (0, 0));
+        assert_eq!(cstr(sp + 48), b"executable_path=./tgt".to_vec(), "apple[0] is the path argument, as given");
     }
 
     // Fail loud, never default: a snapshot naming no stack we recognize must not silently answer
