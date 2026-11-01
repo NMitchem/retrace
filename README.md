@@ -10,7 +10,7 @@ wrote it.
 It's a technical preview. It runs Rust and C programs, Homebrew's `jq`, the CPython interpreter,
 Homebrew's `node` with its JIT on, Xcode's `git` for local work, and most of `/bin` and `/usr/bin`.
 The big differences from rr: threads only switch when one blocks, so races that need preemption
-won't reproduce, and there's no `fork` or `exec`. See [Limits](#limits).
+won't reproduce, and there's no `fork`: a program that starts a child process stops at a wall. See [Limits](#limits).
 
 ## Example
 
@@ -79,20 +79,22 @@ behind it. These are the ones you'll hit first:
   the run; after 20 seconds of that the recorder prints one `retrace: thread N has run for 20 s`
   line naming the threads it is starving (ready to run, or waiting on a timeout). A program that spins
   without a system call never reaches its `alarm` either.
-- No `fork`, `exec` or `posix_spawn`. `exec` and `posix_spawn` are refused with a message; `fork`
-  fails with `EAGAIN`. Record the program that does the work, not a launcher: Homebrew's `python3`
-  re-executes the real interpreter, and `/usr/bin/git` is an `xcrun` shim for Xcode's `git`.
+- One process. A program that replaces itself (`execve`, `posix_spawn` with `POSIX_SPAWN_SETEXEC`, a `#!`
+  script) runs, recorded and replayed, and the debugger follows each image. A program that starts a
+  child with `posix_spawn`, `system()` or `popen()` stops at a wall, and `fork` fails with `EAGAIN`. With
+  Xcode selected, an `xcrun` shim such as `/usr/bin/git` can start a child first (when xcrun's cache is
+  cold), which stops at that wall; run the tool itself or select the Command Line Tools.
 - Command-line programs only. XPC service lookups, I/O Kit and GUI frameworks aren't modelled, and
   kqueue, `poll` and `select` readiness cover only a program's own pipes, so nothing that waits on a socket, a terminal
   or an inherited descriptor runs.
 - A syscall or Mach message retrace has no model for stops the recording with one line naming
   it, `retrace: unsupported: …`, and exit status 4; [`docs/walls.md`](docs/walls.md) explains each
-  kind. In the latest sweep, 43 of the 54 Apple binaries in the committed sample recorded and
-  replayed with native's stdout, stderr and exit status, and 47 recorded and replayed identically
+  kind. In the latest sweep, 46 of the 54 Apple binaries in the committed sample recorded and
+  replayed with native's stdout, stderr and exit status, and <<7b: the second figure, recorded and replayed identically (47 at M53)>> recorded and replayed identically
   (most of the rest start another process, which stops at a wall, or print host state).
-- Of the 35 small C, C++, Rust and Swift programs in the first-contact corpus
-  (`firstcontact_e2e`), the kind a newcomer tries first, 33 record and replay as they run natively
-  (up from 31). The other two are Swift programs that stop at a libdispatch call retrace does not model (a workloop, a workqueue opcode).
+- Of the 39 small C, C++, Rust and Swift programs in the first-contact corpus
+  (`firstcontact_e2e`), the kind a newcomer tries first, <<gate: 36 expected>> record and replay as they run natively
+  (up from 33). The other three are a program that starts a child process, which stops at a wall, and two Swift programs that stop at a libdispatch call retrace does not model (a workloop, a workqueue opcode).
 - A recording holds the program's environment, so a recording you share shares it; run retrace under env -i to pass only what the program needs.
 - Traces are big: tens of MiB to over a GiB, uncompressed. node's `console.log(1)` is about 501 MiB
   because retrace backs V8's address-space reservations in full. The format isn't stable, and

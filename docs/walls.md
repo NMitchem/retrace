@@ -30,7 +30,8 @@ Please report it at https://github.com/NMitchem/retrace/issues with the line it 
 
 Some calls retrace answers with an error the program can handle, rather than stopping at a wall.
 For those it prints `retrace: refused: <call>, returned <error> to the program` and keeps
-recording. Starting another program with `posix_spawn` or `execve`, and `fork`, are refused this way.
+recording. `fork` is refused this way. (Until M54, `posix_spawn` and `execve` were too; they run now, see
+[Process creation](#process-creation).)
 
 A program that crashes or is killed by a signal ends with one line of retrace's own, after the
 program's output, such as `retrace: the program was killed by SIGSEGV (fault at 0x0, pc 0x100003f2c in main+0x2c)`.
@@ -70,15 +71,40 @@ system services, such as I/O Kit or an XPC service, reach this.
 ## Process creation
 
 The program tried to wait for another process, with `wait4` or `waitid`, or to start one. retrace
-records one process, so a `posix_spawn` that starts a child ends the recording here; that is
-retrace's limit, and the same call can succeed natively. A `posix_spawn` with `POSIX_SPAWN_SETEXEC`
-and an `execve` replace the image instead and are refused as before, and `fork` returns `EAGAIN`.
-What the program does next with that error is up to it, and a shell that then waits for its child
-stops here.
+records one process, so a `posix_spawn` that starts a child (one without `POSIX_SPAWN_SETEXEC`, which
+`system()` and `popen()` reach through libc) ends the recording here, with
+`retrace: unsupported: posix_spawn of a child process (syscall 244)`. That is retrace's limit, and the same
+call can succeed natively. `fork` returns `EAGAIN`, and what the program does next with that error is up
+to it; a shell that then waits for its child stops at `wait4`.
+
+Since M54 a program may replace its own image: `execve`, a `posix_spawn` with `POSIX_SPAWN_SETEXEC` and a
+`#!` script (one level) run in place, recorded and replayed. These shapes of exec stop here, each
+naming itself in the line:
+
+- an x86_64-only image, which macOS runs under Rosetta, and a universal binary with no arm64 slice;
+- a static image (one with no dynamic linker), a setuid or setgid file, and an image whose segments
+  overlap retrace's own low memory, the commpage or the shared region, are not 16 KiB aligned or end past
+  2^36 bytes;
+- arguments and environment together past retrace's 128 KiB start-stack limit (past 1 MiB the call returns
+  `E2BIG`, as natively);
+- a `posix_spawn` attribute or extension retrace does not model, named by value: a flag other than
+  `SETEXEC`, `SETSIGMASK`, `SETSIGDEF` or `CLOEXEC_DEFAULT`, a binary preference with no arm64 entry, a
+  non-default priority, memory-limit, QoS or jetsam field, port actions, MAC, coalition, persona or
+  credential extensions, a subsystem root, a conclave id, a fileport `dup2` action, and an `addinherit_np`
+  of a guest kqueue. macOS accepts all of these, so the wall is retrace's limit;
+- a `posix_spawn` with `chdir` file actions from a working directory retrace cannot save (one the
+  program made unreadable or deleted): the line reads `the working directory could not be saved for a chdir
+  file action`;
+- `__mac_execve`.
+
+A dylib, bundle or object file given to exec, a nested `#!`, a missing file and a bad pointer return native's
+errno instead; they are not walls. A signal the new image would be stopped by stops the recording under
+[Signals](#signals), because stopping a process is not modelled.
 
 With Xcode selected, `/usr/bin/git`, `/usr/bin/python3` and the other xcrun shims run
-`xcodebuild -license check` as a child first, which ends at this wall. Run the tool itself
-(`$(xcrun -f git)`) or select the Command Line Tools (`DEVELOPER_DIR=/Library/Developer/CommandLineTools`).
+`xcodebuild -license check` as a child first when xcrun's cache is cold, which ends at this wall. With a
+warm cache they exec the real tool in place. Run the tool itself (`$(xcrun -f git)`) or select the Command
+Line Tools (`DEVELOPER_DIR=/Library/Developer/CommandLineTools`).
 
 ## Signals
 
@@ -89,7 +115,10 @@ The program used a signal in a way retrace does not model yet. These reach it to
 - `kill` with a signal other than 0 to another process;
 - `terminate_with_payload`, which ends a process by its pid;
 - `setitimer` or `getitimer` on `ITIMER_VIRTUAL` or `ITIMER_PROF`, which count CPU time the synthetic clock does not have (`only ITIMER_REAL is modelled`);
-- a signal sent to the process (`kill(getpid(), …)`, a timer's `SIGALRM`) when the main thread has exited and every other thread masks it.
+- a signal sent to the process (`kill(getpid(), …)`, a timer's `SIGALRM`) when the main thread has exited and every other thread masks it;
+- a stop signal (`SIGSTOP`, `SIGTSTP`, `SIGTTIN`, `SIGTTOU`) pending at an exec that would stop the new image (`… pending at exec, which stops the new image: stopping a process is not modelled`);
+- `sigreturn` with a null context and `UC_SET_ALT_STACK` or `UC_RESET_ALT_STACK`, which libplatform's `longjmp` issues after a refused `fork` (`csh`, `tcsh`, `flex`); the line says the sigreturn token does not match, which misdescribes a legitimate call;
+- a signal blocked, raised and then unblocked at its default action, which ends the recording where native exits 128 plus the signal.
 
 Since M53 `pause()` and `sigsuspend()` wait for a signal and return `EINTR` after its handler, `ITIMER_REAL` (so
 `alarm`) runs on the synthetic clock, a signal ends a `sleep` early, and `kill` with a signal number outside 0 to 31
