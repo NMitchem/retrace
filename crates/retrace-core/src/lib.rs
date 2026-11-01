@@ -2204,6 +2204,28 @@ impl DecodedTrace {
     pub fn is_complete(&self) -> bool { trace_complete(&self.events) }
 }
 
+/// M54 §3i: one image's stretch of a recording. A recording is a sequence of epochs, one per image:
+/// epoch 0's images come from the opening snapshot, and epoch k's from the k-th `Event::Exec`'s slices.
+/// `first_event` is the index in the event list of the event that begins the epoch: 0 for the opening
+/// snapshot, an `Exec`'s own index otherwise. A position `(n, k)` has consumed `n` events, so it is in
+/// the last epoch whose `first_event < n`, and the exec's own stop `(first_event + 1, 0)` is the
+/// first position of its epoch. `path` is what the program passed to the exec (a `#!` script's own
+/// path, while `image` is the interpreter's slice), and `image` and `dylinker` are the arm64 slices.
+/// Epoch 0 has an empty path and image: its bytes are in the snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Epoch { pub first_event: usize, pub path: Vec<u8>, pub image: Vec<u8>, pub dylinker: Vec<u8> }
+
+/// The recording's epochs, in order: epoch 0, then one per `Event::Exec`.
+pub fn exec_epochs(events: &[Event]) -> Vec<Epoch> {
+    let mut v = vec![Epoch { first_event: 0, path: Vec::new(), image: Vec::new(), dylinker: Vec::new() }];
+    for (i, e) in events.iter().enumerate() {
+        if let Event::Exec { path, image, dylinker, .. } = e {
+            v.push(Epoch { first_event: i, path: path.clone(), image: image.clone(), dylinker: dylinker.clone() });
+        }
+    }
+    v
+}
+
 /// M50 §3c (R5, C2): whether a recording has its end, a terminal event (an exit, a crash or a fatal
 /// signal). A recording that stopped at a wall, or whose recorder was killed, has none.
 fn trace_complete(events: &[Event]) -> bool {

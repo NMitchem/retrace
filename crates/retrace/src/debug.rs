@@ -7,6 +7,7 @@ use std::io::Write;
 use std::path::Path;
 use retrace_core::{checkpointed_seek, Advance, Armed, CheckpointCache, Outcome, ReplayReport, ReplaySession, Stepped, ThreadState};
 use retrace_core::symbols::Symbols;
+use retrace_core::{exec_epochs, Epoch};
 
 /// The `x <addr> <len>` length ceiling: a larger span is a *parse* error (deterministic Err → exit
 /// 5), guarding the inherited u64 span-overflow edge at the CLI boundary before any VM work.
@@ -330,6 +331,9 @@ pub(crate) enum Halt {
     Terminal(ReplayReport),
     /// `reverse-continue` found nothing before the cursor, which did not move.
     NoEarlierHit,
+    /// M54 §3i (C6): a motion reached an `Exec` landmark and stopped on it, parked at `(n, 0)`, the new
+    /// image's entry, with `path` the one the program passed.
+    Exec { path: Vec<u8> },
     /// A step completed.
     Stepped,
     /// `reverse-stepi` stopped at (1, 0).
@@ -381,13 +385,19 @@ pub(crate) struct Exec<'a> {
     /// the phase.
     phase: Phase,
     cache: CheckpointCache,
+    /// M54 §3i: every image's symbols, one per epoch: epoch 0's built ONCE per session from the
+    /// recording's opening snapshot (M19, below), and epoch k's from the k-th `Event::Exec`'s slices
+    /// (`Symbols::from_exec`, C8). The epoch of a position is the last one whose `first_event` is
+    /// before the position's landmark count (`epoch_of`), so a position at an exec stop is the new
+    /// image's and the svc before it the old one's.
+    ///
     /// M19: address → name, built ONCE per session from the recording's opening snapshot.
     ///
     /// Preserves this module's bit-reproducibility contract (see the file header): the names derive
     /// from *guest state* — the `__LINKEDIT` bytes the snapshot already carries — not from a host
     /// path, the host's own symbols, or anything timing- or iteration-order-dependent. An empty
     /// table (static guest, stripped binary) simply formats every address as bare hex.
-    syms: Symbols,
+    epochs: Vec<(Epoch, Symbols)>,
 }
 
 impl<'a> Exec<'a> {
@@ -409,15 +419,21 @@ impl<'a> Exec<'a> {
         // Snapshot, stripped binary — yields an empty table and bare-hex output rather than an
         // error: symbolication is presentation, and must never be able to fail a debug session.
         // M40: from the cache's one decode, not a second read of the file.
-        let syms = cache.decoded(trace).ok()
-            .and_then(|t| t.events().iter().find_map(|e| match e {
-                retrace_trace::Event::Snapshot { mem, .. } => Some(Symbols::from_snapshot(mem)),
-                _ => None,
-            }))
-            .unwrap_or_default();
+        let epochs = cache.decoded(trace).ok().map(|t| {
+            let ev = t.events();
+            exec_epochs(ev).into_iter().map(|e| {
+                let syms = if e.first_event == 0 {
+                    ev.iter().find_map(|x| match x {
+                        retrace_trace::Event::Snapshot { mem, .. } => Some(Symbols::from_snapshot(mem)),
+                        _ => None,
+                    }).unwrap_or_default()
+                } else { Symbols::from_exec(&e.image, &e.dylinker) };
+                (e, syms)
+            }).collect::<Vec<_>>()
+        }).unwrap_or_default();
         Ok(Exec {
             trace, session: Some(session), n: 1, k: 0,
-            breakpoints: Vec::new(), watches: Vec::new(), phase: Phase::Bp, cache, syms,
+            breakpoints: Vec::new(), watches: Vec::new(), phase: Phase::Bp, cache, epochs,
         })
     }
 
@@ -429,12 +445,54 @@ impl<'a> Exec<'a> {
     /// greps `"guest crashed: pc={pc:#x} far=..."`, `debug_cli` greps `"hit 0x{pc:x} at ("` — so an
     /// insertion would break them for no gain. A suffix leaves every one of those substrings
     /// intact, which is why this returns an annotation rather than a replacement for the address.
-    fn annot(&self, addr: u64) -> String {
-        match self.syms.resolve(addr) {
+    fn annot(&self, n: usize, addr: u64) -> String {
+        match self.syms_at(n).resolve(addr) {
             Some((n, 0)) => format!("  in {n}"),
             Some((n, off)) => format!("  in {n}+{off:#x}"),
             None => String::new(),
         }
+    }
+
+    /// M54 §3i: the index of the epoch a position that has consumed `n` landmarks is in.
+    pub(crate) fn epoch_of(&self, n: usize) -> usize {
+        self.epochs.iter().rposition(|(e, _)| e.first_event < n).unwrap_or(0)
+    }
+
+    /// The epoch the cursor is in.
+    pub(crate) fn epoch_index(&self) -> usize { self.epoch_of(self.n) }
+
+    /// How many epochs the recording holds: one more than its execs.
+    pub(crate) fn epoch_count(&self) -> usize { self.epochs.len().max(1) }
+
+    /// The symbols of the epoch at landmark count `n`. Empty when the trace could not be decoded.
+    fn syms_at(&self, n: usize) -> &Symbols {
+        static EMPTY: std::sync::OnceLock<Symbols> = std::sync::OnceLock::new();
+        match self.epochs.get(self.epoch_of(n)) { Some((_, s)) => s, None => EMPTY.get_or_init(Symbols::default) }
+    }
+
+    /// M54 §3i: the path of the exec whose landmark has just been consumed at count `n`: the exec
+    /// stop `(n, 0)`, the first position of the epoch it began. `None` for any other landmark.
+    fn exec_at(&self, n: usize) -> Option<&[u8]> {
+        self.epochs.iter().skip(1).find(|(e, _)| e.first_event + 1 == n).map(|(e, _)| e.path.as_slice())
+    }
+
+    /// M54 §3i, T6-e: whether the cursor stands on an exec stop, `(n, 0)` of an exec landmark, where
+    /// any move backward would leave the new epoch for the old one.
+    pub(crate) fn at_exec_stop(&self) -> bool { self.k == 0 && self.exec_at(self.n).is_some() }
+
+    /// Whether the event that ends window `n` (the trap at its end) is an exec.
+    fn exec_ahead(&self, n: usize) -> bool { self.exec_at(n + 1).is_some() }
+
+    /// M54 §3i (C6): stop on the exec landmark just crossed, if landmark count `n` is one. Prints the
+    /// line, parks the cursor at `(n, 0)` as an arrival (R4: a breakpoint at the new image's entry is
+    /// not reported on top of it), and leaves the live session hit-clean.
+    fn exec_stop<W: Write>(&mut self, n: usize, out: &mut W) -> Result<Option<Halt>, String> {
+        let Some(path) = self.exec_at(n).map(<[u8]>::to_vec) else { return Ok(None) };
+        line(out, format_args!("exec {} at ({n}, 0)", String::from_utf8_lossy(&path)))?;
+        self.sess_mut().clear_breakpoints();
+        self.sess_mut().clear_watchpoints();
+        (self.n, self.k, self.phase) = (n, 0, Phase::Bp);
+        Ok(Some(Halt::Exec { path }))
     }
 
     pub(crate) fn sess(&self) -> &ReplaySession { self.session.as_ref().expect("live session") }
@@ -532,7 +590,7 @@ impl<'a> Exec<'a> {
         match op {
             Operand::Addr(a) => Ok(*a),
             Operand::Sym(name) => {
-                let hits = self.syms.addrs_of(name);
+                let hits = self.syms_at(self.n).addrs_of(name);
                 match hits.len() {
                     0 => Err(format!("no symbol \"{name}\"")),
                     1 => Ok(hits[0]),
@@ -559,7 +617,7 @@ impl<'a> Exec<'a> {
         // feedback, and it makes the ambiguity error above actionable. Safe by inspection — both
         // existing assertions on this line use `contains("breakpoint at 0x…")`, never `ends_with`,
         // which is the check M19's four broken assertions earned.
-        line(out, format_args!("breakpoint at {}", self.syms.format(addr)))
+        line(out, format_args!("breakpoint at {}", self.syms_at(self.n).format(addr)))
     }
 
     pub(crate) fn cmd_delete<W: Write>(&mut self, addr: u64, out: &mut W) -> Result<(), String> {
@@ -649,7 +707,7 @@ impl<'a> Exec<'a> {
 
     fn cmd_where<W: Write>(&mut self, out: &mut W) -> Result<(), String> {
         let pc = self.sess().pc();
-        let a = self.annot(pc);
+        let a = self.annot(self.n, pc);
         line(out, format_args!("at ({}, {}) pc={pc:#x} thread={}{a}",
             self.n, self.k, self.sess().current_thread()))
     }
@@ -675,6 +733,27 @@ impl<'a> Exec<'a> {
             // An arrival (R4) only if it moved: `stepi 0` stands still, so the cursor stays (§3b).
             Ok(()) => { self.k += count; if count > 0 { self.phase = Phase::Bp; } Ok(Halt::Stepped) }
             Err(msg) => {
+                // M54 §3i (T6-d): standing on the svc of an exec, the step is the exec: it crosses the
+                // landmark and stops there, as `continue` does.
+                if count > 0 && self.exec_ahead(self.n) {
+                    let (n0, k0, p0) = (self.n, self.k, self.phase);
+                    if self.probe_window_len(n0)? == k0 {
+                        self.reseek(n0, k0)?;
+                        let adv = self.sess_mut().advance().map_err(|d|
+                            format!("stepi diverged at landmark {} pc {:#x}: {}", d.landmark, d.pc, d.detail))?;
+                        match adv {
+                            Advance::Exited(report) => return self.park_at_terminal(report, out),
+                            Advance::Event => {
+                                let n = self.sess().landmark();
+                                if let Some(h) = self.exec_stop(n, out)? { return Ok(h); }
+                                return Err("stepi: the exec trap's landmark is not an exec stop".into());
+                            }
+                            _ => return Err("stepi: a hardware stop during a one-event crossing".into()),
+                        }
+                    }
+                    self.reseek(n0, k0)?;
+                    self.phase = p0;
+                }
                 let head = msg.split("; cannot step").next().unwrap_or(&msg);
                 line(out, format_args!("error: {head}"))?;
                 // The position did not change, so neither does the cursor.
@@ -735,7 +814,7 @@ impl<'a> Exec<'a> {
         match &report.outcome {
             Outcome::Exit { code } => line(out, format_args!("exited (code {code})"))?,
             Outcome::Crash { pc, esr, far, .. } => {
-                let a = self.annot(*pc);
+                let a = self.annot(self.sess().landmark(), *pc);
                 line(out, format_args!("guest crashed: pc={pc:#x} far={far:#x} esr={esr:#x}{a}"))?
             }
             // M11: terminal like a crash, and it inherits the same seek machinery — but it is NOT
@@ -806,7 +885,7 @@ impl<'a> Exec<'a> {
                 let on_bp = bps.contains(&pc);
                 if self.phase == Phase::Sys && on_bp {
                     // A breakpoint behind a syscall hit at (n, 0) is still ahead (t0 M5).
-                    let a = self.annot(pc);
+                    let a = self.annot(self.n, pc);
                     line(out, format_args!("hit {pc:#x} at ({}, 0){a}", self.n))?;
                     self.phase = Phase::Bp;
                     return Ok(Halt::Break);
@@ -828,7 +907,7 @@ impl<'a> Exec<'a> {
                         let thread = self.sess().current_thread();
                         self.phase = Phase::Watch; // parked pre-retire on the store
                         if self.watch_thread_matches(watched, thread) {
-                            let a = self.annot(pc);
+                            let a = self.annot(n, pc);
                             line(out, format_args!("hit watch {watched:#x} (write at {pc:#x}) at ({n}, {k}){a}"))?;
                             return Ok(Halt::Watch { watched });
                         }
@@ -860,6 +939,8 @@ impl<'a> Exec<'a> {
                                 self.sess_mut().clear_watchpoints();
                                 let n = self.sess().landmark();
                                 (self.n, self.k, self.phase) = (n, 0, Phase::Sys);
+                                // M54 §3i: the trap crossed was an exec, so the stop is at its landmark.
+                                if let Some(h) = self.exec_stop(n, out)? { return Ok(h); }
                             }
                             Advance::Break | Advance::Watch { .. } => return Err(
                                 "continue: a hardware stop during a one-event crossing (breakpoints are off \
@@ -879,7 +960,7 @@ impl<'a> Exec<'a> {
                     Advance::Break => {
                         let n = self.sess().landmark();
                         let p_hit = self.sess().pc();
-                        let a = self.annot(p_hit);
+                        let a = self.annot(n, p_hit);
                         line(out, format_args!("hit {p_hit:#x} at ({n}, +?){a}"))?;
                         // M40's R11, fixed: resolve FROM kctx, not kctx + 1. In the start window
                         // kctx is the scan's start, where a breakpoint is still ahead (the finish
@@ -893,6 +974,9 @@ impl<'a> Exec<'a> {
                         return Ok(Halt::Break);
                     }
                     Advance::Event => {
+                        // M54 §3i (C6): an exec landmark ends the run, before anything at its position.
+                        let n = self.sess().landmark();
+                        if let Some(h) = self.exec_stop(n, out)? { return Ok(h); }
                         if let Some(t) = until {
                             if self.sess().current_thread() == t {
                                 let n = self.sess().landmark();
@@ -905,7 +989,7 @@ impl<'a> Exec<'a> {
                         let pc = self.sess().pc(); // the INCOMING thread's after a block (§3a)
                         if bps.contains(&pc) {
                             let n = self.sess().landmark();
-                            let a = self.annot(pc);
+                            let a = self.annot(n, pc);
                             line(out, format_args!("hit {pc:#x} at ({n}, 0){a}"))?;
                             self.sess_mut().clear_breakpoints(); // keep this session, hit-clean
                             self.sess_mut().clear_watchpoints();
@@ -924,7 +1008,7 @@ impl<'a> Exec<'a> {
                         let watched = watched_of(&ws, self.sess().far());
                         let matched = self.watch_thread_matches(watched, thread);
                         if matched {
-                            let a = self.annot(p_hit);
+                            let a = self.annot(n, p_hit);
                             line(out, format_args!("hit watch {watched:#x} (write at {p_hit:#x}) at ({n}, +?){a}"))?;
                         }
                         // The FIRST watch stop from kctx is this hit, found by the hardware BY
@@ -1027,6 +1111,8 @@ impl<'a> Exec<'a> {
                     }
                     Advance::Event => {
                         let n = self.sess().landmark();
+                        // M54 §3i (T6-d): a step across the exec svc is the exec stop.
+                        if let Some(h) = self.exec_stop(n, out)? { return Ok(h); }
                         if self.sess().current_thread() == t {
                             (self.n, self.k, self.phase) = (n, 0, Phase::Bp);
                             if self.sess().pc() == pc0 {
@@ -1122,7 +1208,7 @@ impl<'a> Exec<'a> {
     /// thread FILTER applies only where `last` is decided (M15 Task 8; spec R4). A breakpoint on a
     /// watched store yields both hits, breakpoint first (R3): its step-off keeps the watches armed.
     pub(crate) fn cmd_reverse_continue<W: Write>(&mut self, out: &mut W) -> Result<Halt, String> {
-        enum RHit { Bp { pc: u64, ord: u64 }, Watch { watched: u64, pc: u64, ord: u64 }, WatchSys { watched: u64, thread: u32 } }
+        enum RHit { Exec, Bp { pc: u64, ord: u64 }, Watch { watched: u64, pc: u64, ord: u64 }, WatchSys { watched: u64, thread: u32 } }
         let (pn, pk, pphase) = (self.n, self.k, self.phase);
         let bps = self.breakpoints.clone();
         let ws: Vec<(u64, u64)> = self.watches.iter().map(|&(a, l, _)| (a, l)).collect();
@@ -1143,7 +1229,12 @@ impl<'a> Exec<'a> {
                 let n = s.landmark();
                 if n != win { win = n; bp_ord = 0; w_ord = 0; }
                 match adv {
-                    Advance::Event => {}
+                    // M54 §3i (C6): an exec landmark before P is a stop, at its arrival (n, 0, Bp).
+                    Advance::Event => {
+                        if self.exec_at(n).is_some() && (n, 0u64, Phase::Bp) < (pn, pk, pphase) {
+                            last = Some((n, RHit::Exec));
+                        }
+                    }
                     // Exited covers BOTH terminals (exit and crash): either way the scan is over.
                     Advance::Exited(_) => { ended = true; break; }
                     Advance::Break => {
@@ -1255,11 +1346,22 @@ impl<'a> Exec<'a> {
                 Err(format!("reverse-continue: resolved ({n}, {k}, {ph:?}) is not before P ({pn}, {pk}, {pphase:?})"))
             }
         };
+        // M54 §3i: the exec stop's report, shared by the exec hit itself and by a breakpoint on the new
+        // image's entry, which is the same position (an arrival at (n, 0): R4 reports the exec alone).
+        let exec_hit = |me: &mut Self, n: usize, out: &mut W| -> Result<Halt, String> {
+            before_p(n, 0, Phase::Bp)?;
+            let path = me.exec_at(n).expect("an exec landmark").to_vec();
+            line(out, format_args!("exec {} at ({n}, 0)", String::from_utf8_lossy(&path)))?;
+            me.reseek(n, 0)?; // phase Bp
+            Ok(Halt::Exec { path })
+        };
         match last {
+            Some((n, RHit::Exec)) => exec_hit(self, n, out),
             Some((n, RHit::Bp { pc, ord })) => {
                 let k = resolve_nth(self.trace, &mut self.cache, n, 0, HitKind::Break(&bps), ord, pc)?;
                 before_p(n, k, Phase::Bp)?;
-                let a = self.annot(pc);
+                if k == 0 && self.exec_at(n).is_some() { return exec_hit(self, n, out); }
+                let a = self.annot(n, pc);
                 line(out, format_args!("hit {pc:#x} at ({n}, {k}){a}"))?;
                 self.reseek(n, k)?; // phase Bp
                 Ok(Halt::Break)
@@ -1267,7 +1369,7 @@ impl<'a> Exec<'a> {
             Some((n, RHit::Watch { watched, pc, ord })) => {
                 let k = resolve_nth(self.trace, &mut self.cache, n, 0, HitKind::Watch(&ws), ord, pc)?;
                 before_p(n, k, Phase::Watch)?;
-                let a = self.annot(pc);
+                let a = self.annot(n, pc);
                 line(out, format_args!("hit watch {watched:#x} (write at {pc:#x}) at ({n}, {k}){a}"))?;
                 self.reseek(n, k)?;
                 self.phase = Phase::Watch;

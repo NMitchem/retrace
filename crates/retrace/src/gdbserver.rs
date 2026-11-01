@@ -89,7 +89,12 @@ pub(crate) struct Server<'a> {
     /// load commands. None when no path is known or that header does not parse, and then lldb gets
     /// neither `os_version` nor an image list. Advertising `os_version` without an image to answer
     /// with is t0 `l2_osver`: the new loader runs and unloads the exe.
-    exe_image: Option<String>,
+    ///
+    /// M54 §3i, T6-b: one per epoch. Epoch 0's is built at the start; epoch k's when the server
+    /// first stops at the k-th exec (`exec_image_of` at that position: the header from memory at
+    /// `EXE_BASE`, `argv0` from the new start stack), because the exec stop is the only way into an
+    /// epoch. `--exe` names epoch 0's image only.
+    exe_images: Vec<Option<String>>,
     no_ack: bool,
     /// The reply to `?`: the last stop reported.
     last_stop: String,
@@ -110,16 +115,24 @@ pub(crate) struct Server<'a> {
 impl<'a> Server<'a> {
     fn new(trace: &'a Path, exe_arg: Option<String>) -> Result<Self, String> {
         let ex = Exec::new(trace)?;
-        let s = ex.sess();
-        let head = s.read_mem_prefix(EXE_BASE, 32);
-        let sizeofcmds = head.get(20..24).map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap()) as usize);
-        let exe_hdr = s.read_mem_prefix(EXE_BASE, 32usize.saturating_add(sizeofcmds).min(MAX_HDR));
-        let exe_image = exe_arg.or_else(|| argv0(s))
-            .and_then(|path| rsp::image_json(&exe_hdr, EXE_BASE, &path).ok());
-        let mut srv = Server { ex, exe_image, no_ack: false, last_stop: String::new(), last_tid: 0, hg: 0, hc: 0,
+        let mut exe_images = vec![None; ex.epoch_count()];
+        exe_images[0] = exec_image_of(ex.sess(), exe_arg);
+        let mut srv = Server { ex, exe_images, no_ack: false, last_stop: String::new(), last_tid: 0, hg: 0, hc: 0,
                                rsi_armed: false, dead: None };
         srv.stop(StopKind::HistoryBegin("start of recording".into()), None); // the answer to `?`
         Ok(srv)
+    }
+
+    /// The image list of the epoch the cursor is in.
+    fn exe_image(&self) -> &Option<String> {
+        self.exe_images.get(self.ex.epoch_index()).unwrap_or(&None)
+    }
+
+    /// M54 §3i: stopped at an exec, so build the new epoch's image list from this position.
+    fn exec_stop(&mut self, path: &[u8]) -> String {
+        let k = self.ex.epoch_index();
+        if let Some(slot) = self.exe_images.get_mut(k) { *slot = exec_image_of(self.ex.sess(), None); }
+        self.stop(StopKind::Exec(String::from_utf8_lossy(path).into_owned()), None)
     }
 
     /// `(RSP tid, pc)` for every thread that has not exited, in id order.
@@ -164,7 +177,7 @@ impl<'a> Server<'a> {
         if is_resume(body) && body != "bc" { self.rsi_armed = false; }
         match body {
             "QStartNoAckMode" | "QThreadSuffixSupported" | "QListThreadsInStopReply" | "QEnableErrorStrings" => one("OK"),
-            "qHostInfo" => one(&match self.exe_image { Some(_) => format!("{QHOSTINFO}{OS_VERSION}"), None => QHOSTINFO.into() }),
+            "qHostInfo" => one(&match self.exe_image() { Some(_) => format!("{QHOSTINFO}{OS_VERSION}"), None => QHOSTINFO.into() }),
             "qProcessInfo" => one(QPROCESSINFO),
             "vCont?" => one("vCont;c;C;s;S"),
             "?" => (vec![self.last_stop.clone()], false),
@@ -224,7 +237,7 @@ impl<'a> Server<'a> {
             _ if body.starts_with("qRcmd,") => self.monitor(&body["qRcmd,".len()..]),
             _ if body.starts_with("jGetLoadedDynamicLibrariesInfos:") => {
                 let arg = &body["jGetLoadedDynamicLibrariesInfos:".len()..];
-                match &self.exe_image {
+                match self.exe_image() {
                     None => one(""),
                     Some(_) if arg.is_empty() => one("OK"), // the support probe (t0 L2)
                     Some(image) => {
@@ -258,7 +271,7 @@ impl<'a> Server<'a> {
             "bs" => (vec![self.back_step()], false),
             // §3e: an armed `bc` is `rsi`'s reverse step, and spends the arming.
             "bc" => (vec![if std::mem::take(&mut self.rsi_armed) { self.back_step() } else {
-                self.motion(|s| { let h = s.ex.cmd_reverse_continue(&mut std::io::sink())?; s.reply_backward(h) })
+                self.motion(|s| { s.refuse_reverse_across_exec()?; let h = s.ex.cmd_reverse_continue(&mut std::io::sink())?; s.reply_backward(h) })
             }], false),
             _ if body.starts_with('Z') || body.starts_with('z') => one(&self.z_packet(body)),
             _ => one(""), // §3h: every other packet is unsupported
@@ -316,11 +329,27 @@ impl<'a> Server<'a> {
 
     /// §3e: one instruction back, on whichever thread ran it.
     fn back_step(&mut self) -> String {
-        self.motion(|s| match s.ex.cmd_reverse_stepi(1, &mut std::io::sink())? {
+        self.motion(|s| {
+            s.refuse_reverse_across_exec()?;
+            match s.ex.cmd_reverse_stepi(1, &mut std::io::sink())? {
             Halt::Stepped => Ok(s.stop(StopKind::Trace, None)),
             Halt::AtStart => Ok(s.stop(StopKind::HistoryBegin("start of recording".into()), None)),
             other => Err(format!("reverse-stepi reported {other:?}")),
+            }
         })
+    }
+
+    /// M54 §3i, T6-e: a reverse resume from an exec stop would leave the new epoch for the old one.
+    /// Measured (`lldb_e2e`, `docs/…/t6/lldb-reverse.txt`): lldb-2100 re-reads its module list at a
+    /// `reason:exec` stop and at no other, so a history stop in the old epoch would be read against the
+    /// NEW image's modules and symbolised wrongly. So it is refused by value, through `motion`'s
+    /// non-moving exception stop, and the position stays on the exec stop. The reverse stop AT the
+    /// exec is still reported (`reply_backward`'s `Halt::Exec`).
+    fn refuse_reverse_across_exec(&self) -> Result<(), String> {
+        if self.ex.at_exec_stop() {
+            return Err("reverse execution across an exec is not supported".into());
+        }
+        Ok(())
     }
 
     /// §3b: one motion, bracketed. An `Err` re-seeks the saved cursor and becomes a non-moving
@@ -358,6 +387,7 @@ impl<'a> Server<'a> {
                 self.stop(kind, Some(thread))
             }
             Halt::Terminal(r) => self.terminal(&r.outcome),
+            Halt::Exec { path } => self.exec_stop(&path),
             other => return Err(format!("a forward motion reported {other:?}")),
         })
     }
@@ -398,6 +428,8 @@ impl<'a> Server<'a> {
                 self.ex.park_before_event(n)?;
                 self.stop(StopKind::Watch(watched), None)
             }
+            // M54 §3i: the exec stop, reported at the exec's own position, the new image's entry.
+            Halt::Exec { path } => self.exec_stop(&path),
             Halt::NoEarlierHit => {
                 self.ex.recover((1, 0, Phase::Bp))?;
                 self.stop(StopKind::HistoryBegin("start of recording".into()), None)
@@ -488,6 +520,15 @@ impl Server<'_> {
             _ => (vec!["E01".into()], false),
         }
     }
+}
+
+/// §3g: the one-image JSON for the executable mapped at `EXE_BASE` in `s`: its header and load
+/// commands read from memory, named by `exe_arg` or else by the start stack's `argv[0]`.
+fn exec_image_of(s: &ReplaySession, exe_arg: Option<String>) -> Option<String> {
+    let head = s.read_mem_prefix(EXE_BASE, 32);
+    let sizeofcmds = head.get(20..24).map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap()) as usize);
+    let exe_hdr = s.read_mem_prefix(EXE_BASE, 32usize.saturating_add(sizeofcmds).min(MAX_HDR));
+    exe_arg.or_else(|| argv0(s)).and_then(|path| rsp::image_json(&exe_hdr, EXE_BASE, &path).ok())
 }
 
 /// §3g (t0 R3): `record-dyn`'s argv[0], out of the opening stack: `[sp]` is the main image's
