@@ -166,7 +166,12 @@ fn resolve_file(path_bytes: &[u8], call: &ExecCall, allow_script: bool) -> Resul
         }
     };
     if slice.len() < 32 || le32(slice, 0) != 0xfeed_facf || le32(slice, 12) != MH_EXECUTE { return Err(ExecRefusal::Errno(ENOEXEC)); }
-    let loaded = retrace_guest::try_parse_macho(slice).map_err(|_| ExecRefusal::Errno(ENOEXEC))?;
+    // Final review part 2, I3: load commands that cannot be walked are a wall, by value. Natively the kernel
+    // accepts the file and then kills the process with SIGKILL while loading it (measured, exec_e2e), which
+    // is no errno retrace can answer. Every other parse refusal keeps ENOEXEC.
+    let loaded = retrace_guest::try_parse_macho(slice).map_err(|why| if why == retrace_guest::MALFORMED {
+        wall(format!("{} of an image whose load commands cannot be walked (natively the kernel kills the process with SIGKILL while loading it)", cname(call)))
+    } else { ExecRefusal::Errno(ENOEXEC) })?;
     let Some(dyld) = loaded.dylinker.as_deref() else {
         return Err(wall(format!("{} of a static image (no LC_LOAD_DYLINKER)", cname(call))));
     };
@@ -393,6 +398,36 @@ mod tests {
         assert!(text(&c).contains("execve of an x86_64-only image"), "{}", text(&c));
         c.num = 244;
         assert!(text(&c).contains("posix_spawn of an x86_64-only image"), "{}", text(&c));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Final review part 2, I3: thin arm64 `MH_EXECUTE` headers whose load commands cannot be walked.
+    fn malformed() -> Vec<(&'static str, Vec<u8>)> {
+        let hdr = |ncmds: u32, sizeofcmds: u32, cmds: &[u8]| {
+            let mut b = Vec::new();
+            for w in [0xfeed_facfu32, retrace_arch::CPU_TYPE_ARM64, 0, 2, ncmds, sizeofcmds, 0, 0] { b.extend_from_slice(&w.to_le_bytes()); }
+            b.extend_from_slice(cmds);
+            b
+        };
+        vec![("truncated: ncmds 1, no command bytes", hdr(1, 8, &[])),
+             ("cmdsize 0", hdr(1, 8, &[0x19, 0, 0, 0, 0, 0, 0, 0])),
+             ("huge ncmds", hdr(u32::MAX, 8, &[0x19, 0, 0, 0, 0, 0, 0, 0]))]
+    }
+
+    #[test]
+    fn a_malformed_image_is_a_wall_on_record_and_an_error_on_replay_never_a_panic() {
+        let d = scratch("malformed");
+        for (i, (what, bytes)) in malformed().into_iter().enumerate() {
+            let p = d.join(format!("bad{i}"));
+            std::fs::write(&p, &bytes).unwrap();
+            mode(&p, 0o755);
+            match resolve(&call(p.to_str().unwrap())) {
+                Err(ExecRefusal::Wall(m)) => assert!(m.contains("load commands"), "{what}: {m}"),
+                other => panic!("{what}: expected a wall, got {:?}", other.err()),
+            }
+            let e = image(&call("/x"), &bytes, &[], &bytes, &[]);
+            assert!(e.is_err(), "{what}: replay's image() answers an error");
+        }
         let _ = std::fs::remove_dir_all(&d);
     }
 }

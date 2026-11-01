@@ -367,8 +367,8 @@ pub fn image_layout_refusal(exe: &Loaded, dyld: &Loaded) -> Option<String> {
             if !va.is_multiple_of(g) {
                 return Some(format!("{who} has a segment at {va:#x}, which is not 16 KiB-aligned (retrace maps whole 16 KiB granules)"));
             }
-            let len = (s.memsz.max(s.data.len()).max(GRANULE) as u64).next_multiple_of(g);
-            let Some(end) = va.checked_add(len).filter(|&e| e <= 1 << 36) else {
+            let len = (s.memsz.max(s.data.len()).max(GRANULE) as u64).checked_next_multiple_of(g);
+            let Some(end) = len.and_then(|len| va.checked_add(len)).filter(|&e| e <= 1 << 36) else {
                 return Some(format!("{who} has a segment at {va:#x} past the 36-bit guest address space"));
             };
             spans.push((va, end, format!("{who}'s segment at {va:#x}")));
@@ -461,6 +461,10 @@ impl Box_ {
     pub fn prepare_exec_pointers(&mut self, num: u64, args: &[u64; 8]) -> Result<(), u64> {
         self.prepare_forward_pointers(num, args)?;
         let (argv, envp) = if num == retrace_arch::SYS_POSIX_SPAWN { (args[3], args[4]) } else { (args[1], args[2]) };
+        // F1-d(a): a spawn's args descriptor is read from guest memory too; present its first page.
+        if num == retrace_arch::SYS_POSIX_SPAWN && args[2] != 0 {
+            let _ = self.present_page(args[2], false);
+        }
         let mut budget = EXEC_ARG_MAX;
         for arr in [argv, envp] {
             if arr == 0 { continue; }
@@ -477,7 +481,9 @@ impl Box_ {
                     if self.present_page(a, false).is_err() { break; }
                     let n = (((a | (GRANULE as u64 - 1)) + 1 - a) as usize).min(budget);
                     let chunk = self.read_va_prefix(a, n);
-                    budget = budget.saturating_sub(n.max(1));
+                    // M6: charge to the NUL, not to the page end.
+                    let used = chunk.iter().position(|&c| c == 0).map_or(n, |p| p + 1);
+                    budget = budget.saturating_sub(used.max(1));
                     if chunk.len() < n || chunk.contains(&0) || budget == 0 { break; }
                     a = a.wrapping_add(n as u64);
                 }

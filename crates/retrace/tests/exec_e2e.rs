@@ -167,6 +167,20 @@ fn execves_errors_answer_as_natively() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Final review part 2, I1: a failed exec's argv and envp strings sit on a page the program never touches. Record
+/// presents every exec argument page before it knows the call fails, so replay's landmark for the failure must
+/// present the same ones, or the exit compare finds a backing record has and replay lacks.
+#[test]
+fn a_failed_exec_presents_the_pages_record_presented() {
+    let dir = scratch("untouched");
+    std::fs::create_dir_all(&dir).unwrap();
+    let (out, t) = as_natively(&["untouched", dir.to_str().unwrap()], false);
+    has(&out, "untouched errno=2");
+    assert!(execs(&t).is_empty(), "no Exec landmark for a failed exec");
+    let _ = std::fs::remove_file(&t);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A bad total is E2BIG as natively; past retrace's start-stack limit but under native's is a wall.
 #[test]
 fn an_argument_vector_past_native_is_e2big_and_past_retrace_is_a_wall() {
@@ -225,6 +239,29 @@ fn assert_wall(args: &[&str], what: &str, anchor: &str, stdout_so_far: &str) -> 
     assert!(execs(&t).is_empty(), "{args:?}: the refused exec left no Exec landmark");
     let _ = std::fs::remove_file(&t);
     line
+}
+
+/// Final review part 2, I3: a thin arm64 `MH_EXECUTE` whose load commands cannot be walked (a header with no
+/// command bytes, a command with `cmdsize` 0). Measured natively: `execve` accepts the file and the kernel kills
+/// the process with SIGKILL while loading it, so there is no errno to answer (the review guessed EBADMACHO; it is
+/// not that). Retrace refuses by value, and used to panic (the first) or loop on 2^32 segments (the second).
+#[test]
+fn a_malformed_image_is_refused_where_native_kills_the_process() {
+    let dir = scratch("malformed");
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, cmds) in [("shorthdr", &[][..]), ("cmdsize0", &[0x19u8, 0, 0, 0, 0, 0, 0, 0][..])] {
+        let mut b = Vec::new();
+        for w in [0xfeed_facfu32, 0x0100_000c, 0, 2, 1, 8, 0, 0] { b.extend_from_slice(&w.to_le_bytes()); }
+        b.extend_from_slice(cmds);
+        let p = dir.join(name);
+        std::fs::write(&p, &b).unwrap();
+        std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let native = util::run_bounded(retrace_guest::EXECSELF_DYN, &["copy", p.to_str().unwrap()], &[], BOUND);
+        assert_eq!(native.code, Some(137), "{name}: native is killed by SIGKILL (128 + 9), not an exit. stdout:\n{}", lossy(&native.stdout));
+        assert!(!lossy(&native.stdout).contains("exec failed"), "{name}: and execve did not return an errno");
+        assert_wall(&["copy", p.to_str().unwrap()], "execve of an image whose load commands cannot be walked", "process-creation", "");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

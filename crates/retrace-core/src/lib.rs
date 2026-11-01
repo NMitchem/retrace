@@ -1842,8 +1842,9 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
             // them the call is `Event::Exec` and `Box_::exec_image`, the same method replay calls with the
             // same input rebuilt from the event, so symmetry rule 1 holds by construction (spec 3c).
             Stop::Syscall { num, args } if num == retrace_arch::SYS_EXECVE || num == retrace_arch::SYS_POSIX_SPAWN => {
-                // M51 §3h (C3): the generic arm's pointer check, so the pages the exec call reads are
-                // present as replay's generic tail makes them for a failed one.
+                // M51 §3h (C3): the generic arm's pointer check plus every argv/envp page. Replay's generic
+                // tail calls this same method for 59/244 (final review part 2, I1), so a failed exec leaves
+                // the same backings on both sides; a successful one reaches the `Exec` mirror.
                 if let Err(e) = b.prepare_exec_pointers(num, &args) {
                     append_refused(&mut w, &mut b, &mut count, num, args, e, true, thread)?;
                     continue;
@@ -2330,6 +2331,18 @@ impl ReplaySession {
                            truncated: trace.truncated })
     }
 
+    /// Final review part 2, I2: the signal of a C5 terminal waiting at the cursor, if one is. An exec that releases a
+    /// fatal pending signal appends the `Exec` and then the terminal `Signal` with nothing between, and replay
+    /// finishes the `Exec` before the terminal (the `Exec` mirror checks that the box's release names that signal).
+    /// A `Signal` straight after an `Exec` is never anything else: the new image runs dyld's syscalls before any
+    /// raise. Derived from the position rather than held in a field, so a checkpoint taken at `(n, 0)` carries it.
+    pub fn terminal_pending(&self) -> Option<u64> {
+        match (self.events.get(self.idx.checked_sub(1)?), self.events.get(self.idx)) {
+            (Some(Event::Exec { .. }), Some(Event::Signal { sig, .. })) => Some(*sig),
+            _ => None,
+        }
+    }
+
     /// M51 §3g (C5): consume a terminal `Event::Signal` and the final snapshot, and end the replay.
     /// The kill mirror's fatal raise and the `abort_with_payload` arm both end here, so this holds
     /// that landmark's `verify_thread`, and the call-site count stays seven.
@@ -2513,6 +2526,12 @@ impl ReplaySession {
     /// `Advance::Exited` the run is complete; calling `advance` again is unspecified (the guest is
     /// past its final landmark) — callers must not.
     pub fn advance(&mut self) -> Result<Advance, Divergence> {
+        // Final review part 2, I2: the C5 terminal's second step. The exec's own landmark is consumed and the
+        // guest has not moved since, so the terminal is reported from here and no guest instruction runs.
+        if let Some(sig) = self.terminal_pending() {
+            let pc = self.b.position();
+            return self.signal_terminal(sig, pc);
+        }
         loop {
             match self.b.run() {
                 Stop::Syscall { num, args } => {
@@ -3991,7 +4010,14 @@ impl ReplaySession {
                             // in `iovec_prepare` (an invalid count answers EINVAL before the array is read), so
                             // a check here would refuse, or commit pages, where record did neither.
                             if !retrace_arch::is_iovec(num) {
-                                if let Err(e) = self.b.prepare_forward_pointers(num, &args) {
+                                // Final review part 2, I1: a failed exec is this landmark; record made the
+                                // exec pointer step (argv/envp pages too) for every 59/244, so replay does.
+                                let prepared = if num == retrace_arch::SYS_EXECVE || num == retrace_arch::SYS_POSIX_SPAWN {
+                                    self.b.prepare_exec_pointers(num, &args)
+                                } else {
+                                    self.b.prepare_forward_pointers(num, &args)
+                                };
+                                if let Err(e) = prepared {
                                     if !(*err && *ret == e && writes.is_empty()) {
                                         return Err(Divergence { landmark: self.idx, pc, detail: format!(
                                             "syscall {num}: replay refuses a pointer (errno {e}) that the recording forwarded \
@@ -4165,10 +4191,19 @@ impl ReplaySession {
                             // C5, the mirror of record's release: the same `Box_` method on the same state.
                             let released = self.b.take_exec_release()
                                 .map_err(|u| Divergence { landmark: self.idx, pc, detail: u.marked() })?;
-                            if let Some(sig) = released {
-                                self.idx += 1;
-                                let npc = self.b.position();
-                                return self.signal_terminal(sig, npc);
+                            // Final review part 2, I2: the release is TWO steps here. This one finishes the `Exec`
+                            // landmark like any other (so the debugger reaches C6's exec stop at `(n, 0)`) and
+                            // checks that the recording carries the Signal this release names; the next `advance()`
+                            // ends the run through `signal_terminal` without running the guest
+                            // (`terminal_pending`). Plain replay sees the same `Exited` and report one call later.
+                            let next_sig = match self.events.get(self.idx + 1) {
+                                Some(Event::Signal { sig, .. }) => Some(*sig),
+                                _ => None,
+                            };
+                            if released != next_sig {
+                                return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                    "exec releases signal {released:?} on replay, but the recording's next event is {:?}",
+                                    self.events.get(self.idx + 1)) });
                             }
                             return self.finish_event();
                         }
@@ -4573,6 +4608,8 @@ impl ReplaySession {
     /// re-stepped, exactly as `step_insns` does. Deterministic per (trace, landmark). The session
     /// is spent (parked at the trap).
     pub fn window_len_here(&mut self) -> Result<u64, String> {
+        // Final review part 2, I2: a C5 terminal's window is empty; the guest does not run before it.
+        if self.terminal_pending().is_some() { return Ok(0); }
         let mut n = 0u64;
         loop {
             match self.b.step() {

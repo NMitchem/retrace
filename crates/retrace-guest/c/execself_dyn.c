@@ -28,6 +28,8 @@
 //   execself_dyn pipe <target>          writes "hello" to a pipe whose read end is fd 20, then the target
 //   execself_dyn chain <n>              execs itself with n-1 until 0, then prints "chain done"
 //   execself_dyn errs <dir> <target>    execve's errors, one `<name> errno=<n>` line each
+//   execself_dyn untouched <dir>        final review part 2 I1: a failed exec whose argv string sits on a mapped page the
+//                                       program never touches, then a clean exit (replay must hold the same backings)
 //   execself_dyn copy <path>            execs <path> (the no-disk guard)
 //   execself_dyn e2big <target>         an argument past native's 1 MiB limit: E2BIG
 //   execself_dyn bigargs <target>       an argument of 200 KB: past retrace's 128 KiB start-stack limit
@@ -43,6 +45,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/event.h>
+#include <sys/mman.h>
+#include <mach/mach_vm.h>
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <unistd.h>
@@ -337,6 +341,19 @@ int main(int argc, char **argv) {
         printf("exec failed: errno=%d\n", errno); return 1;
     }
     if (strcmp(mode, "errs") == 0) { errs(argv[2], argv[3]); return 0; }
+    if (strcmp(mode, "untouched") == 0) {
+        // Reserved with no access and then opened RW, so nothing has committed the page when the exec reads it.
+        mach_vm_address_t va = 0;
+        if (mach_vm_map(mach_task_self(), &va, 0x4000, 0, VM_FLAGS_ANYWHERE, MACH_PORT_NULL, 0, 0,
+                        VM_PROT_NONE, VM_PROT_ALL, VM_INHERIT_DEFAULT) != KERN_SUCCESS) { printf("reserve failed\n"); return 1; }
+        char *pg = (char *)va;
+        mprotect(pg, 0x4000, PROT_READ | PROT_WRITE);
+        char missing[1024]; snprintf(missing, sizeof missing, "%s/missing", argv[2]);
+        char *a0[] = { pg + 0x2000, NULL }; char *e0[] = { pg + 0x3000, NULL };
+        execve(missing, a0, e0);
+        printf("untouched errno=%d\n", errno);
+        return 0;
+    }
     if (strcmp(mode, "copy") == 0) {
         char *nargv[] = { argv[2], "x", NULL }; char *nenv[] = { "X=copy", NULL };
         execve(argv[2], nargv, nenv);

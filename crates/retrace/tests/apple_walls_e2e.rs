@@ -43,15 +43,15 @@ const XCODE: &str = "/Applications/Xcode.app/Contents/Developer";
 // M54: `records_and_replays_clean` with a developer directory named. xcrun's shims (desdp, dyld_info,
 // flex) look for one; `util::run`'s environment is empty, so without the pair they take xcrun's
 // cold-cache path. Skips loudly when the directory is absent.
-fn records_and_replays_clean_env(path: &str, env: &[(&str, &str)]) {
+fn records_and_replays_clean_env(path: &str, env: &[(&str, &str)]) -> Option<util::RunOut> {
     if !std::path::Path::new(path).exists() {
         util::announce(&format!("SKIPPED: {path} is not present on this machine"));
-        return;
+        return None;
     }
     for (k, v) in env {
         if *k == "DEVELOPER_DIR" && !std::path::Path::new(v).exists() {
             util::announce(&format!("SKIPPED: {k}={v} is not present on this machine"));
-            return;
+            return None;
         }
     }
     let (rec, trace) = util::record_dynamic_env(path, env);
@@ -60,6 +60,7 @@ fn records_and_replays_clean_env(path: &str, env: &[(&str, &str)]) {
     let rp = util::replay(&trace);
     assert_eq!(rp.code, 0, "{path}: replay exited {}: {}", rp.code, rp.stderr.lines().last().unwrap_or(""));
     assert_eq!(rp.stdout, rec.stdout, "{path}: replay stdout differs from the recording");
+    Some(rec)
 }
 
 #[test]
@@ -113,7 +114,17 @@ fn automationmodetool_records_and_replays() { records_and_replays_clean("/usr/bi
 fn desdp_records_and_replays() { records_and_replays_clean_env("/usr/bin/desdp", &[("DEVELOPER_DIR", XCODE)]); }
 
 #[test]
-fn dyld_info_records_and_replays() { records_and_replays_clean_env("/usr/bin/dyld_info", &[("DEVELOPER_DIR", CLT)]); }
+fn dyld_info_records_and_replays() {
+    let Some(rec) = records_and_replays_clean_env("/usr/bin/dyld_info", &[("DEVELOPER_DIR", CLT)]) else { return };
+    // Final review part 2, T7-h: its stderr is native's too (it prints its usage there), with retrace's own
+    // `retrace: ` lines dropped as the sweep's `mask_err` drops them. The exit code and stdout are compared by
+    // the shared helper, and a run that exits 0 with the wrong text would pass without this.
+    let native = util::run_bounded("/usr/bin/dyld_info", &[], &[("DEVELOPER_DIR", CLT)], 60);
+    let keep = |s: &str| s.lines().filter(|l| !l.starts_with("retrace: ")).collect::<Vec<_>>().join("\n");
+    assert_eq!(native.code, Some(rec.code), "dyld_info: native and the recording exit alike");
+    assert_eq!(rec.stdout, native.stdout, "dyld_info: the recording's stdout is native's");
+    assert_eq!(keep(&rec.stderr), keep(&native.stderr), "dyld_info: the recording's stderr is native's");
+}
 
 #[test]
 #[ignore = "M54 wall, class C (process creation: a forked child, then the alt-stack sigreturn), parked, routed to the successor. /usr/bin/flex under DEVELOPER_DIR=/Library/Developer/CommandLineTools: xcrun now execs in place (M54), flex prints `<stdin>:1: premature EOF` as native does (native rc 1), then forks. retrace refuses the fork with EAGAIN, flex prints `flex: fork failed`, and libplatform longjmp issues `sigreturn(uctx=0, infostyle=0x80000000 UC_RESET_ALT_STACK)`, which reaches the Signals wall `retrace: unsupported: sigreturn token mismatch: got 0x0, expected ... for uctx 0x0`, exit 4 (measured at M54 Task 7b, docs/sweep-evidence/2026-11-01-m54/). csh and tcsh reach the same wall after their refused fork. UN-IGNORE when the box models fork or the alt-stack sigreturn(NULL, UC_SET/RESET_ALT_STACK) is answered as xnu does."]

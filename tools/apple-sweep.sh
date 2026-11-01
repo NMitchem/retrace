@@ -76,9 +76,10 @@
 # else of the caller's environment is added, and every run still starts under `env -i`. The row's name
 # gains ` env:NAME=VALUE` for each, after its arguments, so the same binary under two environments is two
 # distinguishable rows on every PASS/FAIL/REFUSED/ROW line, and its kept evidence carries the list line
-# number. A VALUE that is an absolute path and does not exist skips the row loudly, one line
-# `SKIPPED <row> (env NAME=VALUE: <path> is absent)`, counted in `skip`; never a pass, never a fail. A
-# value is a single field, so it may not hold a TAB or a newline.
+# number. A VALUE that is an absolute path (it starts with `/` and holds no `:`, so a `PATH=/a:/b` list is
+# not one) and does not exist skips the row loudly, one line `SKIPPED <row> (env NAME=VALUE: <path> is
+# absent)` that names each absent variable in turn, separated by `; `, counted once in `skip`; never a pass,
+# never a fail. A value is a single field, so it may not hold a TAB or a newline.
 # M51 (spec §3j, R9): `TALLY-RR` follows `TALLY`: the same rows judged record against replay alone, as
 # before M51, so the charter's record-against-replay figure stays checkable. With native on, an
 # out-of-scope row is REFUSED only if what it printed before the wall, stdout and stderr, is a prefix of
@@ -291,7 +292,8 @@ while IFS= read -r g <&3; do
                 _kv=${1#env:}; ROWENV="$ROWENV$_kv
 "; envrow="$envrow env:$_kv"
                 _val=${_kv#*=}
-                case "$_val" in /*) [ -e "$_val" ] || envskip="$envskip${envskip:+ }${_kv%%=*}=$_val" ;; esac
+                # Final review part 2, M8: a path is an absolute value with no `:`; `PATH=/usr/bin:/bin` is a list.
+                case "$_val" in *:*) ;; /*) [ -e "$_val" ] || envskip="$envskip${envskip:+; }env $_kv: $_val is absent" ;; esac
                 shift ;;
             *) break ;;
         esac
@@ -302,7 +304,7 @@ while IFS= read -r g <&3; do
     row=$g; [ "$nargs" -gt 0 ] && row="$g $*"
     row="$row$envrow"
     if [ -n "$envskip" ]; then
-        echo "SKIPPED $row (env ${envskip%% *}: ${envskip#*=} is absent)"; skip=$((skip+1)); continue
+        echo "SKIPPED $row ($envskip)"; skip=$((skip+1)); continue
     fi
     cd "$ROOT" || { echo "TALLY ABORTED (cannot cd to $ROOT)"; exit 2; }
     if [ ! -x "$g" ]; then echo "SKIP $g (not present)"; skip=$((skip+1)); continue; fi

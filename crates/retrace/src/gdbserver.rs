@@ -528,7 +528,30 @@ fn exec_image_of(s: &ReplaySession, exe_arg: Option<String>) -> Option<String> {
     let head = s.read_mem_prefix(EXE_BASE, 32);
     let sizeofcmds = head.get(20..24).map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap()) as usize);
     let exe_hdr = s.read_mem_prefix(EXE_BASE, 32usize.saturating_add(sizeofcmds).min(MAX_HDR));
-    exe_arg.or_else(|| argv0(s)).and_then(|path| rsp::image_json(&exe_hdr, EXE_BASE, &path).ok())
+    exe_arg.or_else(|| exec_path(s)).or_else(|| argv0(s)).and_then(|path| rsp::image_json(&exe_hdr, EXE_BASE, &path).ok())
+}
+
+/// Final review part 2, M1 (amends Ruling T6-b): the path the kernel used, `executable_path=` (apple[0]) on the same start
+/// stack, which a program's own `argv[0]` (a bare name from `Command::exec`, or a launcher's own) need not name. It is
+/// the path as the exec call wrote it (for a script, the interpreter as written), and `argv[0]` for epoch 0 by C3.
+/// Read as `argv0` reads argv, past envp's NULL: `[sp + 8]` is argc, argv follows, then envp, then apple. Only an
+/// absolute path is trusted, for the same reason as there.
+fn exec_path(s: &ReplaySession) -> Option<String> {
+    let sp = s.thread_ctx(0)?.regs.sp_el0;
+    let word = |a: u64| <[u8; 8]>::try_from(s.read_mem_prefix(a, 8)).ok().map(u64::from_le_bytes);
+    if word(sp)? != EXE_BASE { return None; }
+    let argc = word(sp + 8)?;
+    if argc > 1 << 16 { return None; }
+    // argv's `argc` entries and its NULL, then envp up to its NULL, and apple[0] is the next word.
+    let mut at = sp + 16 + 8 * (argc + 1);
+    for _ in 0..(1 << 16) {
+        if word(at)? == 0 { break; }
+        at += 8;
+    }
+    let bytes = s.read_mem_prefix(word(at + 8)?, 1024);
+    let end = bytes.iter().position(|&b| b == 0)?;
+    let path = String::from_utf8(bytes[..end].to_vec()).ok()?.strip_prefix("executable_path=")?.to_owned();
+    path.starts_with('/').then_some(path)
 }
 
 /// §3g (t0 R3): `record-dyn`'s argv[0], out of the opening stack: `[sp]` is the main image's

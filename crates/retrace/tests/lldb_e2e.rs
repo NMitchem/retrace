@@ -680,8 +680,9 @@ fn lldb_stops_at_an_exec_in_reverse_and_does_not_cross_it() {
         return;
     }
     let (trace, target) = exec_trace();
-    let cmds: Vec<String> = ["process continue", "process continue", "process continue -R", "register read pc",
-                             "process continue -R", "register read pc", "rsi", "register read pc", "process continue -F"]
+    let cmds: Vec<String> = ["process continue", "process continue", "process continue -R", "process plugin packet monitor where",
+                             "process continue -R", "process plugin packet monitor where", "rsi",
+                             "process plugin packet monitor where", "process continue -F"]
         .iter().map(|s| s.to_string()).collect();
     let (code, out, err) = session(&trace, &cmds);
     let t = format!("exit {code:?}\n--- stdout\n{out}\n--- stderr\n{err}");
@@ -690,9 +691,14 @@ fn lldb_stops_at_an_exec_in_reverse_and_does_not_cross_it() {
     assert_eq!(out.matches("stop reason = exec").count(), 2, "forward to the exec, and backward from the end to it: {t}");
     assert_eq!(out.matches("stop reason = reverse execution across an exec is not supported").count(), 2,
                "`process continue -R` and `rsi` from the exec stop are both refused by value: {t}");
-    let pcs = values(&out, "pc = ");
-    assert_eq!(pcs.len(), 3, "{t}");
-    assert!(pcs.iter().all(|&p| p == pcs[0]), "the refusals leave the position where it was: {t}");
+    // Final review part 2, M5: the position is read as `(n, k)` through the server's `where`. The registers cannot
+    // carry this claim: the exec stop and the start of the recording are both dyld's entry, so their pcs are equal.
+    let n = retrace_trace::Reader::open(&trace).unwrap().into_iter().position(|e| matches!(e, retrace_trace::Event::Exec { .. }))
+        .expect("an Exec landmark") + 1;
+    let w = wheres(&out);
+    assert_eq!(w.len(), 3, "{t}");
+    assert!(w.iter().all(|l| l.starts_with(&format!("{n}, 0) phase=Bp"))),
+            "the refusals leave the position at the exec stop ({n}, 0), not the start of the recording (1, 0): {t}");
     assert!(out.rfind("exited (code 0)") > out.rfind("not supported"), "and a forward continue still runs on to the end: {t}");
     let _ = std::fs::remove_dir_all(target.parent().unwrap());
 }
