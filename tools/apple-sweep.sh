@@ -70,6 +70,15 @@
 # M50 (spec §3g): a list line whose path starts `out:` is a row out of scope (charter §3). It passes by
 # matching native, like any row, or by refusing cleanly (REFUSED above); anything else fails it. The
 # mark is not part of the row's name, so its PASS/FAIL/ROW lines stay comparable with older sweeps.
+# M54 (spec §3m, C7): a list line may start with `env:NAME=VALUE` fields, each followed by a TAB and
+# repeatable, before the path field (which keeps its `out:` mark). The row's variables are added to all
+# three runs of the row, native, record and replay, after the allowlisted ones and so over them; nothing
+# else of the caller's environment is added, and every run still starts under `env -i`. The row's name
+# gains ` env:NAME=VALUE` for each, after its arguments, so the same binary under two environments is two
+# distinguishable rows on every PASS/FAIL/REFUSED/ROW line, and its kept evidence carries the list line
+# number. A VALUE that is an absolute path and does not exist skips the row loudly, one line
+# `SKIPPED <row> (env NAME=VALUE: <path> is absent)`, counted in `skip`; never a pass, never a fail. A
+# value is a single field, so it may not hold a TAB or a newline.
 # M51 (spec §3j, R9): `TALLY-RR` follows `TALLY`: the same rows judged record against replay alone, as
 # before M51, so the charter's record-against-replay figure stays checkable. With native on, an
 # out-of-scope row is REFUSED only if what it printed before the wall, stdout and stderr, is a prefix of
@@ -179,11 +188,19 @@ SWEEP_ENV='PATH HOME USER LOGNAME SHELL TMPDIR TERM LANG LC_ALL LC_CTYPE TZ'
 # run_timeout's backgrounded command, whose pid is then CMD's own and the one the watchdog kills.
 clean_run() {
     _mode=$1; shift; _ncmd=$#
+    # (_ncmd counts CMD's words; the variables are appended after them.)
     _names="$SWEEP_ENV ${RETRACE_SWEEP_ENV:-}"
     [ "$_mode" = native ] || _names="$_names $(env | sed -n 's/^\(RETRACE_[A-Za-z0-9_]*\)=.*/\1/p')"
     for _v in $_names; do
         eval "[ -z \"\${$_v+x}\" ] || set -- \"\$@\" \"$_v=\${$_v}\""
     done
+    # M54 (C7): the row's own variables, last, so a row's value wins over an allowlisted one.
+    if [ -n "$ROWENV" ]; then
+        _oifs=$IFS; IFS='
+'; set -f
+        for _kv in $ROWENV; do set -- "$@" "$_kv"; done
+        set +f; IFS=$_oifs
+    fi
     # The assignments went on after CMD; rotate CMD's words behind them.
     while [ "$_ncmd" -gt 0 ]; do set -- "$@" "$1"; shift; _ncmd=$((_ncmd-1)); done
     [ "$_mode" = recorder ] && exec sh -c 'echo "recpid=$$" >&2; exec env -i "$@"' sh "$@"
@@ -203,7 +220,7 @@ keep_row() {
     if [ -n "$KEEP" ] && { [ -n "$KEEP_ALL" ] || [ "$1" != "PASS" ] || [ -n "${2:-}" ]; }; then
         b=$(basename "$g")
         # M49: two rows may run one path with different arguments; their evidence must not collide.
-        [ "$nargs" -gt 0 ] && b="$b.$lno"
+        { [ "$nargs" -gt 0 ] || [ -n "$envrow" ]; } && b="$b.$lno"
         cp "$TMP/rec.err" "$KEEP/$b.rec.err"
         [ -f "$TMP/rp.err" ] && cp "$TMP/rp.err" "$KEEP/$b.rp.err"
         [ -e "$TMP/rp.out" ] && cp "$TMP/rp.out" "$KEEP/$b.rp.out"
@@ -266,10 +283,27 @@ while IFS= read -r g <&3; do
     # M49 (spec §3c): split off the row's arguments (see the header). `set --` reuses the
     # positional parameters, which nothing reads after `RAW` above.
     IFS=$TAB; set -f; set -- $g; set +f; IFS=$OLDIFS
+    # M54 (C7): leading `env:NAME=VALUE` fields, before the path.
+    ROWENV=''; envrow=''; envskip=''
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            env:?*=*)
+                _kv=${1#env:}; ROWENV="$ROWENV$_kv
+"; envrow="$envrow env:$_kv"
+                _val=${_kv#*=}
+                case "$_val" in /*) [ -e "$_val" ] || envskip="$envskip${envskip:+ }${_kv%%=*}=$_val" ;; esac
+                shift ;;
+            *) break ;;
+        esac
+    done
     g=$1; shift; nargs=$#
     scope=in
     case "$g" in out:*) scope=out; g=${g#out:} ;; esac
     row=$g; [ "$nargs" -gt 0 ] && row="$g $*"
+    row="$row$envrow"
+    if [ -n "$envskip" ]; then
+        echo "SKIPPED $row (env ${envskip%% *}: ${envskip#*=} is absent)"; skip=$((skip+1)); continue
+    fi
     cd "$ROOT" || { echo "TALLY ABORTED (cannot cd to $ROOT)"; exit 2; }
     if [ ! -x "$g" ]; then echo "SKIP $g (not present)"; skip=$((skip+1)); continue; fi
 

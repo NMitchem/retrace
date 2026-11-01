@@ -10,6 +10,12 @@
 # M50 (spec §3g): `out:` before a path marks a row out of scope (charter §3: Ruby, Perl and the other
 # script runtimes beyond python3 and node). It passes by matching native or by refusing cleanly, and
 # fails on anything else, a retrace bug included.
+# M54 (spec §3m, C7): leading `env:NAME=VALUE` fields, each followed by a TAB and repeatable, set the
+# row's environment (see apple-sweep.sh) and come before the path field, which keeps its `out:` mark.
+# `/usr/bin/python3` and `/usr/bin/git` run twice, under the Command Line Tools (in scope, must pass) and
+# under Xcode (`out:`, must be REFUSED at the child wall, ProcessCreation), so the rows mean the same
+# whatever `xcode-select` says. A row whose developer directory is absent is SKIPPED loudly.
+# `/usr/bin/swift` is `out:` (spec §2a). The rows' names carry ` env:DEVELOPER_DIR=...` now.
 /opt/homebrew/bin/rg	--sort	path	-c	stxr	docs/sweep-evidence/2026-10-06-m49-static
 /opt/homebrew/bin/just	--version
 /usr/bin/sqlite3	:memory:	select 6*7, upper('first contact');
@@ -19,9 +25,11 @@ out:/usr/bin/ruby	-e	puts (1..5).map { |i| i * i }.join(",")
 /opt/homebrew/bin/jq	.name	crates/retrace/tests/fixtures/rung3.json
 /opt/homebrew/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python	-c	print(1)
 /opt/homebrew/bin/python3	-c	print(1)
-/usr/bin/python3	-c	print(1)
+env:DEVELOPER_DIR=/Library/Developer/CommandLineTools	/usr/bin/python3	-c	print(1)
+env:DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer	out:/usr/bin/python3	-c	print(1)
 /opt/homebrew/Cellar/node/25.6.1/bin/node	-e	console.log(1)
 /opt/homebrew/bin/node	-e	console.log(1)
 /Applications/Xcode.app/Contents/Developer/usr/bin/git	log	-1	--format=%s	77ec233
-/usr/bin/git	--version
-/usr/bin/swift	--version
+env:DEVELOPER_DIR=/Library/Developer/CommandLineTools	/usr/bin/git	--version
+env:DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer	out:/usr/bin/git	--version
+out:/usr/bin/swift	--version
