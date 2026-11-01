@@ -333,8 +333,15 @@ int main(int argc, char **argv) {
         sigaddset(&set, SIGUSR1);
         sigprocmask(SIG_BLOCK, &set, NULL);
         raise(SIGUSR1);
+        // M55 N2: the 1 us timer must be due at the unmask on native too, so the wait is by the clock,
+        // not by a call count (1000 calls were about 1 us only on a fast host). The timebase is read
+        // before the timer is armed so that it adds nothing to the wait.
+        mach_timebase_info_data_t tb;
+        mach_timebase_info(&tb);
+        unsigned long long ticks = 2000ull * tb.denom / tb.numer;
         timer(0, 1, 0, 0);
-        for (int i = 0; i < 1000; i++) (void)mach_absolute_time();
+        unsigned long long t0 = mach_absolute_time();
+        while (mach_absolute_time() - t0 < ticks) {}
         int rc = sigprocmask(SIG_UNBLOCK, &set, NULL);
         // Native measured h2=0 at this point (the 1 us timer's signal is not yet taken), so the
         // counts are read after a sleep, by which time it has been.

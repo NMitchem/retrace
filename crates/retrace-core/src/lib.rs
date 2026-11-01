@@ -1100,13 +1100,13 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                 if !deliverable.is_empty() {
                     return Err(wall(WallCategory::Signals, format!(
                     "semaphore signal woke thread(s) {deliverable:?} carrying a pending deliverable \
-                     signal. M18 Stage 2b deliberately does NOT materialise at this wake: unlike \
-                     __ulock_wake, the saved context of a semaphore-parked thread is unmeasured, so \
-                     the completed-syscall correction M17 applies there would be a guess here — and \
-                     waking the thread without materialising strands the signal where \
-                     assert_no_stranded_signals cannot see it. Measure the parked thread's saved \
-                     x0/SPSR (the blockedctx.rs shape) and mirror the SYS_ULOCK_WAKE arm on BOTH \
-                     sides before allowing this.")));
+                     signal. Since M55 a handled signal interrupts a semaphore wait at the raise and a \
+                     masked one does not count as deliverable, so only a signal unmasked while the \
+                     thread was parked reaches this wake. M18 Stage 2b deliberately does NOT \
+                     materialise there: the saved context of a semaphore-parked thread at a wake is \
+                     unmeasured, so the completed-syscall correction M17 applies would be a guess — \
+                     and waking the thread without materialising strands the signal where \
+                     assert_no_stranded_signals cannot see it.")));
                 }
                 w.append(&Event::Syscall { num, args, ret: rc, ret1: 0, err: false, writes: vec![], thread })
                     .map_err(|e| format!("append sem_signal: {e}"))?; count += 1;
@@ -1376,6 +1376,12 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                 // state, then its disposition — a `Box_` method precisely so replay's mirror and the
                 // timer consult the identical predicate rather than a second copy of it.
                 let kind = b.classify_raise(target, sig);
+                // M55 §3h: a handler for a thread blocked where its interruption is not modelled ends
+                // the recording here, before the append and before anything changes, so the wall's
+                // text is the raise's and a replay never meets a landmark for it.
+                if kind == retrace_box::RaiseKind::Refuse {
+                    return Err(wall(WallCategory::Signals, format!("M55: {}", b.refuse_raise_text(target, sig))));
+                }
                 if kind == retrace_box::RaiseKind::Pend {
                     // M16 replaces M11's assert: M11 modelled no pending set (measured: no gate
                     // guest raised a blocked signal; abort() unblocks SIGABRT before raising), so
@@ -1429,7 +1435,7 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                                 .map_err(|e| format!("append ignored raise: {e}"))?; count += 1;
                             b.set_x0_err_and_return(0, false);
                         }
-                        retrace_box::RaiseKind::Pend => unreachable!("handled above"),
+                        retrace_box::RaiseKind::Pend | retrace_box::RaiseKind::Refuse => unreachable!("handled above"),
                         // TERMINAL. Same shape as the Exit and Crash arms above: the event, then
                         // the final full-memory snapshot, then break. `thread` is the CALLER
                         // here, not `target` (in scope above, for __pthread_kill): Event::Signal's
@@ -2653,6 +2659,13 @@ impl ReplaySession {
                         // surfaced as a divergence rather than as corruption — loud, which is why
                         // it was not a Task 7 defect — but it was still the two dispatch loops
                         // disagreeing about control flow, and the order below closes it.
+                        if kind == retrace_box::RaiseKind::Refuse {
+                            // M55 §3h: record ended its recording at this raise's wall, so no recording
+                            // carries a landmark for it. Reaching it means the replay's state is not the
+                            // recording's, so it is reported as the divergence it is.
+                            return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                "replay reached a raise record refused: M55: {}", self.b.refuse_raise_text(target, sig)) });
+                        }
                         if kind == retrace_box::RaiseKind::Pend {
                             // A pended raise produces ONE landmark — the ordinary Syscall — and no
                             // delivery, so it falls through to the generic dispatch below, which

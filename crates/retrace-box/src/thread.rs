@@ -585,7 +585,11 @@ impl ThreadTable {
         // not make its timeout a wall: `sleep(2)` with SIGALRM blocked returns 0 and the handler
         // runs at the unmask (M16's masked pend). A signal that is deliverable cannot be pending
         // here, because it would have ended the sleep (`interrupt`).
-        let pending = if matches!(self.threads[tid].state, ThreadState::Blocked(BlockReason::Sleep { .. })) {
+        // M55 §3h: the same holds for a semaphore or `kevent` waiter, because a signal that is
+        // deliverable interrupts it at the raise; only a masked one can be pending here, and it rides
+        // through the wake until the unmask (M16).
+        let pending = if matches!(self.threads[tid].state,
+            ThreadState::Blocked(BlockReason::Sleep { .. } | BlockReason::Sem { .. } | BlockReason::Kevent { .. })) {
             self.threads[tid].pending & !self.threads[tid].mask
         } else {
             self.threads[tid].pending
@@ -611,9 +615,9 @@ impl ThreadTable {
     /// thread keeps K8's posture (the signal pends and the wake refuses).
     pub fn interrupt(&mut self, tid: usize) {
         match self.threads[tid].state {
-            ThreadState::Blocked(BlockReason::Sleep { .. }) => {}
+            ThreadState::Blocked(BlockReason::Sleep { .. } | BlockReason::Sem { .. } | BlockReason::Kevent { .. }) => {}
             ThreadState::Blocked(BlockReason::SigSuspend { saved_mask }) => self.threads[tid].frame_mask = Some(saved_mask),
-            s => panic!("M53: interrupt of thread {tid}, which is {s:?}, not asleep or in sigsuspend"),
+            s => panic!("M53: interrupt of thread {tid}, which is {s:?}, not asleep, in sigsuspend, a semaphore wait or kevent"),
         }
         self.threads[tid].state = ThreadState::Runnable;
     }

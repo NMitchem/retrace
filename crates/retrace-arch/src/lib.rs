@@ -1805,6 +1805,8 @@ pub const SWITCH_OPTION_WAIT: u64 = 2;
 /// `kern_return_t` values the semaphore family answers (`mach/kern_return.h`).
 pub const KERN_INVALID_NAME: u64 = 15;
 pub const KERN_INVALID_VALUE: u64 = 18;
+/// M55 §3h (t0 `p0/semsig`): what a handled signal ends a semaphore wait with.
+pub const KERN_ABORTED: u64 = 14;
 pub const KERN_TERMINATED: u64 = 37;
 pub const KERN_OPERATION_TIMED_OUT: u64 = 49;
 

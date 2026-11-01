@@ -1,84 +1,122 @@
-// UN-PARKED (M17 Task 7). This is the gate that comes green because a signal can be delivered to a
-// thread that is blocked in `__ulock_wait` rather than merely not-current — the M16 wall Tasks 3–6
-// cleared.
-//
-// It is committed as real, compiling code with a real guest behind it (`retrace-guest/rs/
-// sigblocked.rs`) rather than as a comment, because honest-gate discipline means the wall is
-// documented where someone hits it — and because a gate that cannot be run cannot be un-parked by
-// simply deleting an attribute.
-//
-// **This asserts on the TRACE, not on the exit code, and that is the whole point of the file.**
-// The guest's `on_usr1` is empty, so stdout is byte-identical whether or not the signal is ever
-// delivered, and an exit-code-only gate would therefore come green under the single most likely
-// wrong fix: making `deliver_signal_to` silently SKIP a blocked target instead of delivering to it.
-// A skipped delivery exits 0 on both sides. CLAUDE.md's rule — "never assert on an exit code a weaker
-// failure would also produce" — is the same rule that made `segv_rust_e2e` assert on its trace, and
-// it applies here with more force, because this gate's whole purpose is to be un-parked by someone
-// who did not write it.
-//
-// **These assertions were written before they could be run**, correct-by-construction from what
-// M16 Task 13 measured and from the guest's own source, and M17 un-parked the gate without
-// modifying one of them — which is the strongest thing that can be said for a parked gate's
-// honesty. What each pins:
-//   - Thread 1 is `a`. Tids are creation-ordered (main 0, `a` 1, `b` 2), and the resolution of
-//     `b`'s `pthread_kill(a_pt, …)` to that tid is the thing this gate exists to check.
-//   - `a` really is blocked in `__ulock_wait` when the signal arrives — the state only
-//     `guest_ulock_wait` produces.
-//   - Sig 30 is `SIGUSR1`, the only signal the guest raises, raised exactly once.
-// M17 delivers the signal at the WAKE that makes `a` runnable again, not at the raise, so the
-// delivery landmark sits after `b`'s wake rather than at `b`'s pthread_kill. Both orderings satisfy
-// the assertions below, and the "blocked BEFORE the delivery" tooth is what keeps that honest.
+// M55 t3 gate (spec §3h; t0 `p0/semsig`, `p0/pipethread`, T0-semtimed, T0-carry). A signal to a thread
+// that is blocked: a terminating one ends the process at the raise whatever the target is doing, a
+// handled one interrupts a semaphore wait or a `kevent` with native's measured return and runs its
+// handler on the thread, and a handled one to a thread blocked where interruption is not modelled (a
+// condition variable) is refused at the raise. Each mode of `crates/retrace-guest/c/sigblocked_dyn.c`
+// is run natively, recorded and replayed twice. Every run is bounded: a wake that never comes leaves
+// the guest blocked forever, which must fail its test rather than stall the gate.
 mod util;
+
 use retrace_trace::Event;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+const BOUND: u64 = 120;
+
+fn native(mode: &str) -> (Option<i32>, String) {
+    let o = util::run_bounded(retrace_guest::SIGBLOCKED_DYN, &[mode], &[], BOUND);
+    (o.code, String::from_utf8_lossy(&o.stdout).into_owned())
+}
+
+fn trace_path() -> PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    std::env::temp_dir().join(format!("retrace-sigblocked-{}-{}.bin", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)))
+}
+
+fn record(mode: &str) -> (util::Bounded, PathBuf) {
+    let trace = trace_path();
+    let rec = util::run_bounded(util::bin(),
+        &["record-dyn", retrace_guest::SIGBLOCKED_DYN, "-o", trace.to_str().unwrap(), "--", mode], &[], BOUND);
+    (rec, trace)
+}
+
+/// Native, then record and two replays: the exit code and the whole of stdout agree in all four, and
+/// nothing stops at a wall. Returns the output and the recording's path.
+fn records_as_native(mode: &str) -> (String, PathBuf) {
+    let (ncode, nout) = native(mode);
+    let ncode = ncode.unwrap_or_else(|| panic!("{mode}: native hung"));
+    let (rec, trace) = record(mode);
+    assert!(!rec.stderr.contains("retrace: unsupported:"), "{mode}: no wall. stderr:\n{}", rec.stderr);
+    assert!(rec.code.is_some(), "{mode}: the recording hung. stderr:\n{}", rec.stderr);
+    let out = String::from_utf8_lossy(&rec.stdout).into_owned();
+    assert_eq!((rec.code, out.as_str()), (Some(ncode), nout.as_str()), "{mode}: record against native. stderr:\n{}", rec.stderr);
+    for k in 1..=2 {
+        let rp = util::run_bounded(util::bin(), &["replay", trace.to_str().unwrap()], &[], BOUND);
+        assert_eq!((rp.code, rp.stdout.as_slice()), (rec.code, rec.stdout.as_slice()), "{mode}: replay {k}: {}", rp.stderr);
+    }
+    (out, trace)
+}
+
+fn events(trace: &PathBuf) -> Vec<Event> { retrace_trace::Reader::open(trace).unwrap() }
+
+// T0-carry: the frame's carry is whatever the thread entered the trap with, and the semaphore call is
+// entered with it clear, so the kernel's frame shows it clear.
+const SEM_FRAME: &str = "  frame: x0=0xe C=0 svc=1\n";
+const KEVENT_FRAME: &str = "  frame: x0=0x4 C=1 svc=1\n";
 
 #[test]
-fn a_signal_reaches_a_thread_blocked_in_ulock_wait() {
-    let (rec, trace) = util::record_dynamic(retrace_guest::SIGBLOCKED);
-    assert_eq!(rec.code, 0, "clean exit; stderr:\n{}", rec.stderr);
+fn a_signal_interrupts_a_semaphore_wait_with_kern_aborted() {
+    let (out, trace) = records_as_native("sem");
+    assert_eq!(out, format!("sem: first=14 second=0 handled=1 on_main=1\n{SEM_FRAME}"));
+    let ev = events(&trace);
+    assert!(ev.iter().any(|e| matches!(e, Event::SignalDelivery { sig: 30, thread: 0, .. })),
+        "the handler was delivered to main");
+}
 
-    let events = retrace_trace::Reader::open(&trace).unwrap();
+#[test]
+fn a_thread_directed_signal_interrupts_a_semaphore_wait() {
+    let (out, _) = records_as_native("semthread");
+    assert_eq!(out, format!("semthread: first=14 second=0 handled=1 on_main=1\n{SEM_FRAME}"));
+}
 
-    // Tooth 1 — the delivery happened, and it named `a`. `b` raises SIGUSR1 exactly once, so the
-    // whole list is the assertion: an empty list is the skip-the-blocked-target non-fix, `[0]` or
-    // `[2]` is the signal landing on whoever held the vCPU (the pre-M16 defect, re-created), and a
-    // second entry would mean the pended bit was materialised twice.
-    let delivered: Vec<u32> = events.iter().filter_map(|e| match e {
-        Event::SignalDelivery { sig: 30, thread, .. } => Some(*thread),
-        _ => None,
-    }).collect();
-    assert_eq!(delivered, vec![1u32],
-        "exactly one SIGUSR1 delivery, to thread 1 — `a`, the thread `b` named by pthread_t. An \
-         EMPTY list is the failure this gate exists to reject: a fix that skips a blocked target \
-         rather than delivering to it exits 0 on both sides and changes no stdout, because this \
-         guest's handler is empty.");
+#[test]
+fn a_timed_semaphore_wait_is_interrupted_as_native() {
+    // T0-semtimed: 14, nothing consumed, and the re-issued wait still waits for the worker's signal.
+    let (out, _) = records_as_native("semtimed");
+    assert_eq!(out, format!("semtimed: first=14 second=0 handled=1 on_main=1\n{SEM_FRAME}"));
+}
 
-    let di = events.iter().position(|e| matches!(e, Event::SignalDelivery { sig: 30, .. }))
-        .expect("the delivery asserted above must have an index");
+#[test]
+fn a_signal_interrupts_kevent_with_eintr() {
+    let (out, _) = records_as_native("kevent");
+    assert_eq!(out, format!("kevent: n=-1 errno=4 then=1 handled=1 on_main=1\n{KEVENT_FRAME}"));
+}
 
-    // Tooth 2 — `a` was genuinely BLOCKED when the signal arrived, and its wait still resumed.
-    // Both halves matter and neither implies the other. The first is what makes this gate about
-    // the blocked-target wall at all rather than about a merely-not-current target (which
-    // `sigthread_e2e` already covers): thread 1 must have entered `__ulock_wait` before the
-    // delivery landmark. The second is the resume: `a` must run again afterwards, which it can
-    // only do by coming back through the wait its saved context was parked in — the exact resume
-    // point the wall's panic says a naive redirect would overwrite.
-    assert!(events[..di].iter().any(|e| matches!(e,
-                Event::Syscall { num, thread: 1, .. } if *num == retrace_arch::SYS_ULOCK_WAIT)),
-        "thread 1 must have blocked in __ulock_wait BEFORE the delivery, or this gate is measuring \
-         the not-current case instead of the blocked case");
-    assert!(events[di + 1..].iter().any(|e| matches!(e, Event::Syscall { thread: 1, .. })),
-        "thread 1 must issue at least one more landmark after taking the signal — the wait has to \
-         resume, not be stranded. It cannot print `a resumed` otherwise.");
+#[test]
+fn a_thread_directed_signal_interrupts_kevent() {
+    let (out, _) = records_as_native("keventthread");
+    assert_eq!(out, format!("keventthread: n=-1 errno=4 then=1 handled=1 on_main=1\n{KEVENT_FRAME}"));
+}
 
-    // The user-visible half of the same claim, in the only order the guest's source permits: `b`
-    // prints after its pthread_kill returns, `a` prints only once its join over `b` returns, and
-    // main prints only once its join over `a` returns. A stranded wait loses the last two lines.
-    let out = String::from_utf8_lossy(&rec.stdout);
-    let lines: Vec<&str> = out.lines().collect();
-    assert_eq!(lines, ["b signalled a", "a resumed", "done"],
-        "the guest's three lines, in program order. Full stdout:\n{out}");
+#[test]
+fn a_handled_signal_to_a_condvar_waiter_is_refused_at_the_raise() {
+    let (rec, _) = record("cv");
+    assert!(rec.stderr.contains(
+        "retrace: unsupported: M55: a handled signal (SIGUSR1) to thread 0, blocked in psynch_cvwait"),
+        "the refusal names the signal and the call. stderr:\n{}", rec.stderr);
+    assert_eq!(rec.code, Some(4), "a wall exits 4. stderr:\n{}", rec.stderr);
+    assert!(!rec.stderr.contains("DEADLOCK"), "not the deadlock wall, whose text would be false. stderr:\n{}", rec.stderr);
+}
 
-    let rep = util::replay(&trace);
-    assert_eq!(rep.code, 0, "replay must be clean; stderr:\n{}", rep.stderr);
-    assert_eq!(rep.stdout, rec.stdout, "replay must be byte-identical");
+#[test]
+fn a_terminating_signal_to_a_joining_main_ends_the_process() {
+    let (out, trace) = records_as_native("term");
+    assert!(!out.contains("killer: still running"), "the worker never prints after the raise: {out:?}");
+    let (rec, _) = (util::run_bounded(retrace_guest::SIGBLOCKED_DYN, &["term"], &[], BOUND), ());
+    assert_eq!(rec.code, Some(143), "native dies of SIGTERM");
+    let ev = events(&trace);
+    let last_landmark = ev.iter().rev().find(|e| !matches!(e, Event::Snapshot { .. })).unwrap();
+    assert!(matches!(last_landmark, Event::Signal { sig: 15, .. }), "the last landmark is the terminal: {last_landmark:?}");
+}
+
+#[test]
+fn a_masked_signal_rides_through_a_semaphore_wake() {
+    let (out, _) = records_as_native("maskedsem");
+    assert_eq!(out, "maskedsem: wait=0 handled=0\nafter unmask: handled=1 on_main=1\n");
+}
+
+#[test]
+fn a_masked_signal_rides_through_a_kevent_wake() {
+    let (out, _) = records_as_native("maskedkevent");
+    assert_eq!(out, "maskedkevent: n=1 handled=0\nafter unmask: handled=1 on_main=1\n");
 }

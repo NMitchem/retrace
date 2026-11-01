@@ -530,6 +530,16 @@ fn main() {
         .status().expect("clang alarm_dyn");
     assert!(status.success(), "alarm_dyn guest build failed");
 
+    // sigblocked_dyn: the M55 t3 fixture — a handled or terminating signal to a thread blocked in a
+    // semaphore wait, kevent, a condition variable or a join. Same recipe as alarm_dyn.
+    let src = format!("{}/c/sigblocked_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/sigblocked_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang sigblocked_dyn");
+    assert!(status.success(), "sigblocked_dyn guest build failed");
+
     // sockpair_dyn: the M55 t1 fixture — a Unix stream socket pair by mode. Same recipe as alarm_dyn.
     let src = format!("{}/c/sockpair_dyn.c", env!("CARGO_MANIFEST_DIR"));
     let bin = format!("{out}/sockpair_dyn");

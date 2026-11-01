@@ -928,8 +928,13 @@ pub enum RaiseKind {
     Terminate,
     /// A runnable thread runs its handler.
     Deliver,
-    /// A sleeping or `sigsuspend`ing thread is ended with `EINTR`, then runs its handler.
+    /// A thread blocked in a sleep, `sigsuspend`, semaphore wait or `kevent` is ended with that call's
+    /// measured return (`Box_::interrupt_for_signal`), then runs its handler.
     Interrupt,
+    /// M55 §3h: a handler for a thread blocked where its interruption is not modelled (`Cv`, `Mutex`,
+    /// `Poll`, `Parked`). Refused at the raise by value (`Box_::refuse_raise_text`), before anything
+    /// changes.
+    Refuse,
 }
 
 /// M51 §3d (T3-b): what a hardware fault's signal does to the thread that took it, as
@@ -7076,28 +7081,50 @@ impl Box_ {
     /// dispatch arms ask this one function (symmetry rule 1).
     pub fn invalid_signal(sig: u64) -> bool { sig as u32 > 31 }
 
-    /// M53 §3f: what raising `sig` on `tid` does, as the one answer the `kill` and `__pthread_kill` arms
-    /// (record and replay) and the timer share. The mask is asked first (M16), then the state:
-    /// - a thread blocked in a sleep or `sigsuspend` is ended by a signal with a handler (`Interrupt`),
-    ///   and ignores one that is ignored or defaults to ignore, as a sleeper does natively (C2);
-    /// - any other blocked thread pends the signal until its wake (M17);
-    /// - a runnable one takes it by its disposition.
+    /// M53 §3f, M55 §3h: what raising `sig` on `tid` does, as the one answer the `kill` and
+    /// `__pthread_kill` arms (record and replay) and the timer share. In order:
+    /// 1. a masked signal pends, for every state (M16);
+    /// 2. one that is ignored or defaults to ignore is discarded, and one that defaults to ending the
+    ///    process ends it, **whatever state the target is in**: natively no thread needs to run for
+    ///    either (M55 t0 `pipethread term`);
+    /// 3. a handler by state: a sleep, `sigsuspend`, semaphore wait or `kevent` is ended by it
+    ///    (`Interrupt`); `Join`, `Wait` and `Yield` pend until their wake (M17); `Cv`, `Mutex`,
+    ///    `Poll` and `Parked` are refused (`Refuse`); a runnable thread takes it (`Deliver`).
     pub fn classify_raise(&self, tid: usize, sig: u64) -> RaiseKind {
-        let by_disposition = |interrupts: bool| match self.sigtable.action(sig).disp {
-            Disposition::Handler(_) => if interrupts { RaiseKind::Interrupt } else { RaiseKind::Deliver },
-            Disposition::Ign => RaiseKind::Ignore,
-            Disposition::Dfl => match retrace_arch::default_action(sig) {
+        if self.threads.is_blocked_for(tid, sig) { return RaiseKind::Pend; }
+        match self.sigtable.action(sig).disp {
+            Disposition::Ign => return RaiseKind::Ignore,
+            Disposition::Dfl => return match retrace_arch::default_action(sig) {
                 retrace_arch::DefaultAction::Ignore => RaiseKind::Ignore,
                 retrace_arch::DefaultAction::Terminate => RaiseKind::Terminate,
             },
-        };
-        if self.threads.is_blocked_for(tid, sig) { return RaiseKind::Pend; }
-        match self.threads.state_of(tid) {
-            thread::ThreadState::Blocked(thread::BlockReason::Sleep { .. } | thread::BlockReason::SigSuspend { .. }) =>
-                by_disposition(true),
-            thread::ThreadState::Blocked(_) => RaiseKind::Pend,
-            _ => by_disposition(false),
+            Disposition::Handler(_) => {}
         }
+        use thread::BlockReason as B;
+        match self.threads.state_of(tid) {
+            thread::ThreadState::Blocked(B::Sleep { .. } | B::SigSuspend { .. } | B::Sem { .. } | B::Kevent { .. }) =>
+                RaiseKind::Interrupt,
+            thread::ThreadState::Blocked(B::Cv { .. } | B::Mutex { .. } | B::Poll { .. } | B::Parked) => RaiseKind::Refuse,
+            thread::ThreadState::Blocked(_) => RaiseKind::Pend,
+            _ => RaiseKind::Deliver,
+        }
+    }
+
+    /// M55 §3h: the text of the wall for a `RaiseKind::Refuse`, which both raise arms and the timer give
+    /// the same words (the arms as `wall`, the timer through `refuse!`).
+    pub fn refuse_raise_text(&self, tid: usize, sig: u64) -> String {
+        use thread::BlockReason as B;
+        let call = match self.threads.state_of(tid) {
+            thread::ThreadState::Blocked(B::Cv { .. }) => "psynch_cvwait",
+            thread::ThreadState::Blocked(B::Mutex { .. }) => "psynch_mutexwait",
+            thread::ThreadState::Blocked(B::Poll { .. }) => "poll, select or pselect",
+            thread::ThreadState::Blocked(B::Parked) => "workq_kernreturn (a parked workqueue thread)",
+            s => panic!("refuse_raise_text for thread {tid}, which is {s:?}"),
+        };
+        format!("a handled signal ({}) to thread {tid}, blocked in {call}: delivery there is not modelled. \
+            The kernel's return for that wait carries an effect (a condition variable's sequence word, a \
+            mutex's state) that retrace does not reproduce, and a delivery over it would leave the program \
+            reading a wait it never finished.", retrace_arch::signal_name(sig))
     }
 
     /// M53 §3f (C2): end `tid`'s sleep or `sigsuspend` for a signal about to be delivered to it. The
@@ -7105,8 +7132,28 @@ impl Box_ {
     /// frame is then built from, so `sigreturn` lands on that return. Called by the `Interrupt` arms of
     /// the raise paths and the timer, ahead of `deliver_signal_to`, on both sides alike.
     pub fn interrupt_for_signal(&mut self, tid: usize) {
+        // M55 §3h: a `kevent` waiter leaves its kqueue's slot without consuming an event; a semaphore
+        // waiter is just its thread's state (the count is the box's `Semaphores`, which a wait that
+        // never completed did not touch).
+        let sem = match self.threads.state_of(tid) {
+            thread::ThreadState::Blocked(thread::BlockReason::Kevent { kq, .. }) => {
+                self.gkq.take_waiter(kq).filter(|w| w.tid == tid).unwrap_or_else(|| panic!(
+                    "M55: thread {tid} is blocked in kevent on kq {kq}, which records no such waiter"));
+                false
+            }
+            thread::ThreadState::Blocked(thread::BlockReason::Sem { .. }) => true,
+            _ => false,
+        };
         self.threads.interrupt(tid);
-        if tid == self.threads.current() {
+        if sem {
+            // T0-carry: a mach trap leaves the carry as the thread entered it; only `x0` (KERN_ABORTED)
+            // is written, and the frame's PSTATE is the entry state untouched.
+            if tid == self.threads.current() {
+                self.vcpu.set_reg(reg::x(0), retrace_arch::KERN_ABORTED).unwrap();
+            } else {
+                self.threads.ctx_mut(tid).regs.x[0] = retrace_arch::KERN_ABORTED;
+            }
+        } else if tid == self.threads.current() {
             self.complete_syscall_before_delivery(retrace_arch::EINTR, true);
         } else {
             let ctx = self.threads.ctx_mut(tid);
@@ -7152,6 +7199,8 @@ impl Box_ {
             RaiseKind::Pend => self.threads.pend(target, sig),
             RaiseKind::Ignore => {}
             RaiseKind::Terminate => self.itimer.set_terminal(sig),
+            // M55 §3h: the timer's SIGALRM has no error channel here, so it is `refuse!`.
+            RaiseKind::Refuse => { let text = self.refuse_raise_text(target, sig); retrace_arch::refuse!(Signals, "M55: {}", text) }
             RaiseKind::Interrupt => {
                 self.interrupt_for_signal(target);
                 self.deliver_signal_to(target, sig, retrace_arch::SI_USER, 0, 0, 0);
