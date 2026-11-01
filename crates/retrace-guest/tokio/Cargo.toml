@@ -1,0 +1,40 @@
+[package]
+name = "retrace-tokio-fixtures"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Its own workspace: the crate is built offline from a committed lock and is not a member of retrace's.
+[workspace]
+
+[dependencies]
+tokio = { version = "=1.54.1", features = ["full"] }
+libc = "0.2"
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "tk_full"
+path = "src/bin/tk_full.rs"
+[[bin]]
+name = "tk_ct"
+path = "src/bin/tk_ct.rs"
+[[bin]]
+name = "tk_sig"
+path = "src/bin/tk_sig.rs"
+[[bin]]
+name = "tk_kill"
+path = "src/bin/tk_kill.rs"
+[[bin]]
+name = "tk_kill_mt"
+path = "src/bin/tk_kill_mt.rs"
+[[bin]]
+name = "tk_chan"
+path = "src/bin/tk_chan.rs"
+[[bin]]
+name = "tk_fs"
+path = "src/bin/tk_fs.rs"
+[[bin]]
+name = "tk_select"
+path = "src/bin/tk_select.rs"
