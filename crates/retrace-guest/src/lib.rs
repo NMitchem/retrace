@@ -314,6 +314,11 @@ pub const POLLSEL_DYN: &str = concat!(env!("OUT_DIR"), "/pollsel_dyn");
 /// `get`, `alarm`, `ignored`, `nohandler`, `target`, `suspend`, `pending`, `sleeper`, `masked`, `einval`,
 /// `long`, `virtual` (see the source's header).
 pub const ALARM_DYN: &str = concat!(env!("OUT_DIR"), "/alarm_dyn");
+/// M55 t1: a Unix stream socket pair by mode — `pair`, `flow`, `big`, `eof`, `level`, `poll`, `select`,
+/// `dup2console`, `execeof`, `shapes`, `dgram`, `refusals <which>`, `worker` (see the source's header).
+pub const SOCKPAIR_DYN: &str = concat!(env!("OUT_DIR"), "/sockpair_dyn");
+/// M55 t1 tier-1 `fc_sockpair`: a nonblocking pair, one message each way, a kqueue level wait, EOF.
+pub const FC_SOCKPAIR: &str = concat!(env!("OUT_DIR"), "/fc_sockpair");
 /// M52 §3i: main spins on a flag a created thread would set; natively it exits 0 at once, under
 /// retrace's cooperative scheduler it never finishes (see the source's header).
 pub const STALL_DYN: &str = concat!(env!("OUT_DIR"), "/stall_dyn");

@@ -5260,6 +5260,30 @@ impl Box_ {
             // the ordinary path — before M38 both leaked in the recorder and the write end never
             // reached the guest at all (`Ret::FdPair`'s doc).
             self.bind_returned_pair(ret as i32, ret1 as i32)
+        } else if let Some(si) = retrace_arch::returns_fd_pair_out(num).filter(|_| !err) {
+            // M55: socketpair. The forward wrote two HOST descriptors through `sv`. Read them, bind both to
+            // guest slots (`sv[0]` first, as `pipe`'s read end is), write the GUEST numbers back and make
+            // that the call's recorded write, so the trace holds guest numbers only and replay compares
+            // its own two `alloc()`s with it. Only AF_UNIX/SOCK_STREAM/0 is modelled; any other shape that
+            // succeeded on the host is closed before the guest sees it and refused (`Syscalls` wall).
+            let sv = gargs[si];
+            let raw = self.read_guest(sv, 8);
+            let h0 = i32::from_le_bytes(raw[..4].try_into().unwrap());
+            let h1 = i32::from_le_bytes(raw[4..].try_into().unwrap());
+            if (gargs[0], gargs[1], gargs[2]) != (1, 1, 0) {
+                // SAFETY: closing the two descriptors the forward just opened for the guest.
+                unsafe { libc::close(h0); libc::close(h1); }
+                retrace_arch::refuse!(Syscalls, "M55: socketpair of domain {} type {} protocol {} succeeded on the host and is not modelled. \
+                                                 syscall 135 args=[{}]", gargs[0], gargs[1], gargs[2], Self::fmt_args(gargs));
+            }
+            let (g0, g1) = self.bind_returned_pair(h0, h1);
+            let mut out = Vec::with_capacity(8);
+            out.extend_from_slice(&(g0 as u32).to_le_bytes());
+            out.extend_from_slice(&(g1 as u32).to_le_bytes());
+            self.write_guest(sv, &out);
+            writes.retain(|r| !(r.ipa < sv + 8 && sv < r.ipa + r.bytes.len() as u64));
+            writes.push(Region { ipa: sv, bytes: out });
+            (ret, 0)
         } else { (ret, 0) };
         // A successful close retires the guest's slot, so a later use of that number is EBADF
         // instead of reaching whatever retrace has open there. An IDENTITY console slot never
@@ -6576,12 +6600,29 @@ impl Box_ {
         let effect = match num {
             SYS_KQUEUE => self.gkq.create(ret),
             n if retrace_arch::returns_fd_pair(n) => self.gkq.pipe(ret, ret1),
+            // M55: `socketpair` wrote its two guest descriptors through `sv`, which both sides read back
+            // (record rewrote them, replay applied the recorded rewrite), so one call serves both.
+            n if retrace_arch::returns_fd_pair_out(n).is_some() => {
+                let si = retrace_arch::returns_fd_pair_out(n).expect("matched just above");
+                match self.read_va_checked(args[si], 8) {
+                    Some(raw) => {
+                        let g0 = u64::from(u32::from_le_bytes(raw[..4].try_into().unwrap()));
+                        let g1 = u64::from(u32::from_le_bytes(raw[4..].try_into().unwrap()));
+                        self.gkq.socket_pair(g0, g1)
+                    }
+                    None => Err(format!("M55: socketpair: the descriptor pair at {:#x} is not readable after the call", args[si])),
+                }
+            }
             n if retrace_arch::is_close_syscall(n) => self.gkq.close(args[0]),
             n if n == retrace_arch::SYS_DUP || n == retrace_arch::SYS_DUP2 || retrace_arch::is_fcntl_dupfd(n, &args) =>
                 self.gkq.dup(args[0], ret),
             retrace_arch::SYS_READ | retrace_arch::SYS_READ_NOCANCEL | SYS_READV | SYS_READV_NOCANCEL =>
                 self.gkq.note_read(args[0], ret),
-            n if retrace_arch::is_write_syscall(n) || n == SYS_WRITEV || n == SYS_WRITEV_NOCANCEL =>
+            // M55: `recvfrom` (29, 403) reads a socket end; MSG_PEEK (0x2) returns bytes it leaves unread.
+            retrace_arch::SYS_RECVFROM | retrace_arch::SYS_RECVFROM_NOCANCEL =>
+                if args[3] & 0x2 != 0 { Ok(()) } else { self.gkq.note_read(args[0], ret) },
+            n if retrace_arch::is_write_syscall(n) || n == SYS_WRITEV || n == SYS_WRITEV_NOCANCEL
+                || matches!(n, retrace_arch::SYS_SENDTO | 413 | 28 | 402) =>
                 self.gkq.note_write(args[0], ret),
             // Not in the fd set: no effect, and no wake (see the doc above).
             _ => return Ok(()),
@@ -6769,13 +6810,15 @@ impl Box_ {
                         if st.write_end {
                             return Err(not_pipe(fd as u64, "a write end in the read set: not modelled".to_string()));
                         }
-                        if st.readable { rout[fd / 8] |= 1 << (fd % 8); count += 1; }
+                        // T0-select: a socket end's read set is also ready on a closed peer.
+                        if st.readable || (st.socket && st.other_closed) { rout[fd / 8] |= 1 << (fd % 8); count += 1; }
                     }
                     if inw {
-                        if !st.write_end {
+                        if !st.write_end && !st.socket {
                             return Err(not_pipe(fd as u64, "a read end in the write set: not modelled".to_string()));
                         }
-                        // Unlike poll, a write end whose reader closed is writable (t0 M7).
+                        // Unlike poll, a write end whose reader closed is writable (t0 M7), and so is a
+                        // socket end whose peer closed (T0-select).
                         if st.writable || st.other_closed { wout[fd / 8] |= 1 << (fd % 8); count += 1; }
                     }
                 }
@@ -7206,6 +7249,49 @@ impl Box_ {
                 "flock (syscall 131) on fd {} would wait for a lock another descriptor or process holds", args[0] as u32)));
         }
         Ok((ret, err))
+    }
+
+    /// M55 §3b, §3c: the socket calls the model cannot answer, refused by value **before any forward**.
+    /// Record-only: a refusal ends the recording at its wall, so replay never reaches one.
+    ///
+    /// - `socketpair(AF_UNIX, SOCK_DGRAM, *)`: only a stream pair is modelled. Every other shape is
+    ///   forwarded, and native's errno comes back (a shape that succeeds anyway is refused after the
+    ///   forward, in `forward_and_diff`);
+    /// - on a guest socket end: `shutdown`, `sendmsg` with control data (an `SCM_RIGHTS` descriptor
+    ///   would be a host number), `sendmsg_x`, and `setsockopt` of `SO_SNDBUF`, `SO_RCVBUF`,
+    ///   `SO_SNDLOWAT` or `SO_RCVLOWAT`, because the model's constants would go stale.
+    pub fn socket_refusal(&self, num: u64, args: [u64; 8]) -> Option<String> {
+        const SOL_SOCKET: u64 = 0xffff;
+        let wall = |why: String| retrace_arch::wall(retrace_arch::WallCategory::Syscalls, format!(
+            "M55: {why}. syscall {num} args=[{}]", Self::fmt_args(args)));
+        if num == retrace_arch::SYS_SOCKETPAIR && args[0] == 1 && args[1] == 2 {
+            return Some(wall("socketpair of SOCK_DGRAM: only a stream pair is modelled".to_string()));
+        }
+        if !matches!(num, 134 | 481 | 28 | 402 | retrace_arch::SYS_SETSOCKOPT) { return None; }
+        if !matches!(self.gkq.kind_of(args[0]), gkq::FdKind::Sock(_)) { return None; }
+        let call = match num {
+            134 => "shutdown".to_string(),
+            481 => "sendmsg_x".to_string(),
+            28 | 402 => {
+                // struct msghdr: msg_control at 32, msg_controllen (u32) at 40.
+                let hdr = self.read_va_checked(args[1], 48)?;
+                let control = u64::from_le_bytes(hdr[32..40].try_into().unwrap());
+                let len = u32::from_le_bytes(hdr[40..44].try_into().unwrap());
+                if control == 0 || len == 0 { return None; }
+                "sendmsg with control data".to_string()
+            }
+            _ => {
+                let name = match (args[1], args[2]) {
+                    (SOL_SOCKET, 0x1001) => "SO_SNDBUF",
+                    (SOL_SOCKET, 0x1002) => "SO_RCVBUF",
+                    (SOL_SOCKET, 0x1003) => "SO_SNDLOWAT",
+                    (SOL_SOCKET, 0x1004) => "SO_RCVLOWAT",
+                    _ => return None,
+                };
+                format!("setsockopt {name}")
+            }
+        };
+        Some(wall(format!("{call} on guest socket fd {} is not modelled", args[0])))
     }
 
     /// M53 §3c: what `readv`, `writev`, `preadv` and `pwritev` do, decided from the guest's memory and

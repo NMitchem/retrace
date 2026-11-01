@@ -365,6 +365,14 @@ fn a_wrong_thread_on_a_setitimer_landmark_is_a_divergence() {
     retag_fixture_and_expect_divergence(retrace_guest::ALARM_DYN, &["target"], retrace_arch::SYS_SETITIMER);
 }
 
+/// M55 Task 1 (spec 3b): `socketpair`'s mirror (the pair check in the generic tail) is a landmark of the
+/// `Syscall` chain, so a 135 landmark made on a worker and retagged to another live thread must diverge as
+/// the schedule. `sockpair_dyn worker` makes its pair on a pthread while main is blocked in `pthread_join`.
+#[test]
+fn a_wrong_thread_on_a_socketpair_landmark_is_a_divergence() {
+    retag_fixture_and_expect_divergence(retrace_guest::SOCKPAIR_DYN, &["worker"], retrace_arch::SYS_SOCKETPAIR);
+}
+
 /// M52 Task 2 (spec §3c): the `thread_selfid` mirror sits inside the `Syscall` chain after the
 /// arm-top `verify_thread`, so a 372 landmark retagged to another live thread must diverge as the
 /// schedule. `tid_dyn routes` runs four threads, each issuing 372.

@@ -530,6 +530,15 @@ fn main() {
         .status().expect("clang alarm_dyn");
     assert!(status.success(), "alarm_dyn guest build failed");
 
+    // sockpair_dyn: the M55 t1 fixture — a Unix stream socket pair by mode. Same recipe as alarm_dyn.
+    let src = format!("{}/c/sockpair_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/sockpair_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang sockpair_dyn");
+    assert!(status.success(), "sockpair_dyn guest build failed");
+
     // stall_dyn: the M52 §3i fixture — main spins on a flag a created thread would set. Same recipe
     // as hello_dyn; pthreads are in libSystem.
     let src = format!("{}/c/stall_dyn.c", env!("CARGO_MANIFEST_DIR"));
@@ -1161,7 +1170,7 @@ fn main() {
     let dir = env!("CARGO_MANIFEST_DIR");
     for name in ["fc_null_load", "fc_null_store", "fc_null_call", "fc_munmapped", "fc_low_store",
                  "fc_stack_overflow", "fc_uaf", "fc_assert", "fc_sleep", "fc_usleep", "fc_nanosleep",
-                 "fc_mutex", "fc_fileio", "fc_env", "fc_c_trap", "fc_signal", "fc_posix", "fc_spawn_child"] {
+                 "fc_mutex", "fc_fileio", "fc_env", "fc_c_trap", "fc_signal", "fc_posix", "fc_spawn_child", "fc_sockpair"] {
         let src = format!("{dir}/c/{name}.c");
         let bin = format!("{out}/{name}");
         println!("cargo:rerun-if-changed={src}");

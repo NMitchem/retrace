@@ -2047,6 +2047,10 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                 // the recording here as a wall. It comes after the "never forwarded" asserts above,
                 // which guard arms that must exist, and before the M27 assert below, which is now a
                 // backstop, like `forwarded_shape`'s panic inside `forward_and_diff`.
+                // M55 §3b, §3c: a datagram pair, and a call on a guest socket end the model cannot answer
+                // (`shutdown` has no row), end the recording at a wall before anything is forwarded. Record-only,
+                // and ahead of the generic refusal so the wall names the socket call.
+                if let Some(m) = b.socket_refusal(num, args) { return Err(m); }
                 if let Some(u) = retrace_arch::refusal_before_forward(num) { return Err(u.marked()); }
                 // M52 §3c (T2-pidinfo): a thread looked up by id names an id the host never issued.
                 if let Some(u) = retrace_arch::proc_info_refusal(num, &args) { return Err(u.marked()); }
@@ -4103,6 +4107,30 @@ impl ReplaySession {
                                         "fd divergence: recording says syscall {num} returned the pair \
                                          ({ret}, {ret1}), but the guest's own open/close sequence yields \
                                          ({g_r}, {g_w})") });
+                                }
+                            }
+                            // M55: socketpair. Two `alloc()`s, `sv[0]` first: the same two calls
+                            // `bind_returned_pair` made on record, compared with the 8 bytes record rewrote
+                            // at `sv` and recorded as the call's write. A mismatch is a divergence that
+                            // names both pairs. Then `apply_and_return` applies those bytes, and
+                            // `note_fd_effects` reads them back to build the socket model, as record does.
+                            if !*err {
+                                if let Some(si) = retrace_arch::returns_fd_pair_out(num) {
+                                    let g0 = self.b.fds_mut().alloc();
+                                    let g1 = self.b.fds_mut().alloc();
+                                    let want: Vec<u8> = [g0 as u32, g1 as u32].iter().flat_map(|v| v.to_le_bytes()).collect();
+                                    let recorded = writes.iter().find(|r| r.ipa == args[si]).map(|r| r.bytes.clone());
+                                    if recorded.as_deref() != Some(want.as_slice()) {
+                                        let show = |b: &[u8]| match b.len() {
+                                            8 => format!("({}, {})", u32::from_le_bytes(b[..4].try_into().unwrap()),
+                                                         u32::from_le_bytes(b[4..].try_into().unwrap())),
+                                            _ => format!("{b:02x?}"),
+                                        };
+                                        return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                            "fd divergence: recording says socketpair wrote the pair {}, but the guest's own \
+                                             open/close sequence yields ({g0}, {g1})",
+                                            recorded.as_deref().map_or("(no write at sv)".to_string(), show)) });
+                                    }
                                 }
                             }
                             if !*err && (num == retrace_arch::SYS_CLOSE
