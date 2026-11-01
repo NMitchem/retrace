@@ -324,6 +324,15 @@ static int mode_refusals(const char *which) {
         memcpy(CMSG_DATA(c), &fd, sizeof fd);
         ssize_t r = sendmsg(sv[0], &m, 0);
         printf("sendmsg rights rc=%zd errno=%d\n", r, r < 0 ? errno : 0);
+    } else if (!strcmp(which, "plainmsg")) {
+        // F-5: a plain sendmsg, one iovec and no control data. Native sends; retrace refuses it by value.
+        char msg[] = "hello";
+        struct iovec iov = { msg, 5 };
+        struct msghdr m;
+        memset(&m, 0, sizeof m);
+        m.msg_iov = &iov; m.msg_iovlen = 1;
+        ssize_t r = sendmsg(sv[0], &m, 0);
+        printf("sendmsg rc=%zd errno=%d\n", r, r < 0 ? errno : 0);
     } else if (!strcmp(which, "sndbuf")) {
         int v = 4096;
         int rc = setsockopt(sv[0], SOL_SOCKET, SO_SNDBUF, &v, sizeof v);
@@ -337,6 +346,19 @@ static int mode_refusals(const char *which) {
         printf("unknown refusal %s\n", which);
         return 2;
     }
+    return 0;
+}
+
+// F-1: MSG_NOSIGNAL suppresses SIGPIPE for send and sendto; with SIGPIPE at its default, a send without it
+// ends the process (the 141 test), so only the suppressed forms run here and the program lives to print.
+static int mode_nosignal(void) {
+    mk();
+    close(sv[1]);
+    char c = 'x';
+    ssize_t r = send(sv[0], &c, 1, MSG_NOSIGNAL);
+    printf("send MSG_NOSIGNAL rc=%zd errno=%d\n", r, r < 0 ? errno : 0);
+    r = sendto(sv[0], &c, 1, MSG_NOSIGNAL, NULL, 0);
+    printf("sendto MSG_NOSIGNAL rc=%zd errno=%d\n", r, r < 0 ? errno : 0);
     return 0;
 }
 
@@ -593,6 +615,7 @@ int main(int argc, char **argv) {
     if (!strcmp(m, "shapes")) return mode_shapes();
     if (!strcmp(m, "dgram")) return mode_dgram();
     if (!strcmp(m, "refusals")) return argc > 2 ? mode_refusals(argv[2]) : 2;
+    if (!strcmp(m, "nosignal")) return mode_nosignal();
     if (!strcmp(m, "worker")) return mode_worker();
     if (!strcmp(m, "clearsock")) return mode_clearsock();
     if (!strcmp(m, "clearedges")) return mode_clearedges();

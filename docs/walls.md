@@ -68,9 +68,11 @@ it. What still stops here, each line starting `M55:` and naming the call and its
 - a `socketpair` of another type or domain (`M55: socketpair of SOCK_DGRAM: only a stream pair is modelled`,
   or `M55: socketpair of domain … succeeded on the host and is not modelled`). Natively a datagram pair works;
   retrace has no model of datagram boundaries;
-- on a guest socket end, `shutdown`, `sendmsg` with control data (an `SCM_RIGHTS` descriptor would carry a
+- on a guest socket end, `shutdown`, `sendmsg` (any: its msghdr iovec is not translated; with control data an `SCM_RIGHTS` descriptor would also carry a
   host number), `sendmsg_x`, and `setsockopt` of `SO_SNDBUF`, `SO_RCVBUF`, `SO_SNDLOWAT` or `SO_RCVLOWAT`,
   because the model's buffer constants would go stale (`… on guest socket fd N is not modelled`);
+- a blocking `recv` with `MSG_WAITALL` for more bytes than are held, on a guest socket end whose peer is open, which would wait
+  for another thread to send the rest (`… with MSG_WAITALL would wait for N more bytes …`);
 - `fcntl(F_SETFL)` on a guest pipe or socket end with a status flag beyond `O_NONBLOCK`, `O_APPEND` and
   `O_ASYNC` (`M55: fcntl(F_SETFL, 0x…) on guest fd N: a status flag … is not modelled`);
 - a guest end whose byte count the model lost, for example after a read that returned more than it counted

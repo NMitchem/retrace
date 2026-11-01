@@ -116,6 +116,21 @@ static void *pipe_writer(void *a) {
     return NULL;
 }
 
+// F-2 (I2): SIGPIPE to a main blocked in a condition variable. Retrace refuses it at the raise, after the
+// write's landmark; its replay must end at the incomplete-recording line.
+static void *cvpipe_worker(void *a) {
+    (void)a;
+    usleep(20000);
+    ssize_t r = write(pipefds[1], "x", 1);
+    printf("worker: write r=%zd errno=%d\n", r, errno);
+    fflush(stdout);
+    pthread_mutex_lock(&mu);
+    ready = 1;
+    pthread_cond_signal(&cv);
+    pthread_mutex_unlock(&mu);
+    return NULL;
+}
+
 static void mask_usr1(int how) {
     sigset_t s;
     sigemptyset(&s);
@@ -190,6 +205,20 @@ int main(int argc, char **argv) {
         pthread_create(&w, NULL, pipe_writer, NULL);
         pthread_join(w, NULL);
         printf("main: joined ran=%d on_main=%d si_code=%#x si_pid_is_self=%d\n", pran, pon_main, pcode, ppid == getpid());
+    } else if (!strcmp(mode, "cvpipe")) {
+        struct sigaction ps;
+        memset(&ps, 0, sizeof ps);
+        ps.sa_sigaction = ph;
+        ps.sa_flags = SA_SIGINFO;
+        sigaction(SIGPIPE, &ps, NULL);
+        pipe(pipefds);
+        close(pipefds[0]);
+        pthread_create(&w, NULL, cvpipe_worker, NULL);
+        pthread_mutex_lock(&mu);
+        while (!ready) pthread_cond_wait(&cv, &mu);
+        pthread_mutex_unlock(&mu);
+        pthread_join(w, NULL);
+        printf("main: done ran=%d\n", pran);
     } else if (!strcmp(mode, "term")) {
         pthread_create(&w, NULL, killer, NULL);
         pthread_join(w, NULL);

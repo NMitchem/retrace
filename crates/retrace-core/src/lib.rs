@@ -2427,10 +2427,9 @@ impl ReplaySession {
                     si_code: u64, kernel: bool, pc: u64, ret: u64, err: bool) -> Result<Option<Advance>, Divergence> {
         use retrace_box::RaiseKind as K;
         match kind {
-            K::Refuse => Err(Divergence { landmark: self.idx, pc, detail: format!(
-                // M55 §3h: record ended its recording at this raise's wall, so no recording carries a landmark
-                // for it; reaching it means the replay's state is not the recording's.
-                "replay reached a raise record refused: M55: {}", self.b.refuse_raise_text(target, sig)) }),
+            // F-2: a marked wall, so `end_or_diverge` reads it as the incomplete recording's end.
+            K::Refuse => Err(Divergence { landmark: self.idx, pc, detail: retrace_arch::wall(
+                retrace_arch::WallCategory::Signals, format!("M55: {}", self.b.refuse_raise_text(target, sig))) }),
             K::Pend => {
                 if kernel { self.b.threads_mut().pend_kernel(target, sig); } else { self.b.threads_mut().pend(target, sig); }
                 Ok(None)
@@ -2525,7 +2524,9 @@ impl ReplaySession {
         // still compared below.
         let rpid = rwrites.first().and_then(|r| {
             let code = u32::from_le_bytes(r.bytes.get(8..12)?.try_into().unwrap());
-            (code == 0).then(|| u32::from_le_bytes(r.bytes.get(12..16).unwrap().try_into().unwrap()))
+            // F-4: only a recorded SIGPIPE delivery supplies it.
+            if code != 0 || sig != retrace_arch::SIGPIPE { return None; }
+            Some(u32::from_le_bytes(r.bytes.get(12..16)?.try_into().unwrap()))
         });
         self.b.sigtable_mut().set_pid_override(rpid);
         let (mine, _resume_pc) = self.b.deliver_signal_to(tid, sig, si_code, si_addr, esr, far);

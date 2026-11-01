@@ -125,6 +125,20 @@ static int mode_fitswrite(void) {
     return 0;
 }
 
+/* waitall: 10 bytes unread, recv of 100 with MSG_WAITALL on a blocking end with the peer open: natively it
+ * waits for the other 90 (the review's probe ended it with an alarm), so it is a wall. waitallfits asks for
+ * exactly the 10 held: it completes at once. */
+static int mode_waitall(size_t want) {
+    int s[2];
+    socketpair(AF_UNIX, SOCK_STREAM, 0, s);
+    write(s[1], "0123456789", 10);
+    printf("start\n"); fflush(stdout);
+    char b[100];
+    ssize_t r = recv(s[0], b, want, MSG_WAITALL);
+    printf("waitall r=%zd\n", r);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     const char *m = argc > 1 ? argv[1] : "";
     if (!strcmp(m, "pipe")) return mode_read(0);
@@ -134,6 +148,8 @@ int main(int argc, char **argv) {
     if (!strcmp(m, "nonblock")) return mode_nonblock();
     if (!strcmp(m, "cleared")) return mode_cleared();
     if (!strcmp(m, "dontwait")) return mode_dontwait();
+    if (!strcmp(m, "waitall")) return mode_waitall(100);
+    if (!strcmp(m, "waitallfits")) return mode_waitall(10);
     if (!strcmp(m, "fitswrite")) return mode_fitswrite();
     puts("unknown mode");
     return 2;

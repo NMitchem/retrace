@@ -616,8 +616,9 @@ impl ThreadTable {
         if pending != 0 {
             retrace_arch::refuse!(Threads, "M48: a signal is pending on thread {tid} (set {pending:#x}; bit n is signal n+1, \
                  masked or not), and this wake would write its reply over the blocked context. \
-                 Measure the kernel's EINTR answer for a thread blocked in kevent or psynch_cvwait, \
-                 as blockedctx.rs does for __ulock_wait, before modelling it.");
+                 What still reaches this is a masked or unmasked signal on a condition-variable, mutex or poll waiter's \
+                 wake (a kevent, semaphore or sleep waiter is interrupted at the raise, M55). Measure the kernel's \
+                 EINTR answer for that wait, as blockedctx.rs does for __ulock_wait, before modelling it.");
         }
         assert!(matches!(self.threads[tid].state,
                 ThreadState::Blocked(BlockReason::Kevent { .. } | BlockReason::Cv { .. } | BlockReason::Sleep { .. }

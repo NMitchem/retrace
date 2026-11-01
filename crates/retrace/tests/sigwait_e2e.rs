@@ -153,3 +153,18 @@ fn a_default_sigpipe_ends_the_process_with_141() {
     let last = ev.iter().rev().find(|e| !matches!(e, Event::Snapshot { .. })).unwrap();
     assert!(matches!(last, Event::Signal { sig: 13, thread, .. } if *thread != 0), "the terminal is SIGPIPE, tagged with the writer: {last:?}");
 }
+
+/// F-2 (I2): a SIGPIPE refused at the raise ends the recording at a wall, and the replay of that recording
+/// reaches the same refusal and reports the incomplete-recording line (exit 4), never a divergence (before
+/// the fix it printed "DIVERGENCE ... replay reached a raise record refused", exit 3).
+#[test]
+fn a_refused_sigpipe_replays_to_the_incomplete_recording_line() {
+    let (rec, trace) = record("cvpipe");
+    assert_eq!(rec.code, Some(4), "stderr:\n{}", rec.stderr);
+    assert!(rec.stderr.contains("retrace: unsupported: M55: a handled signal (SIGPIPE) to thread 0, blocked in psynch_cvwait"),
+        "stderr:\n{}", rec.stderr);
+    let rp = util::run_bounded(util::bin(), &["replay", trace.to_str().unwrap()], &[], BOUND);
+    assert_eq!(rp.code, Some(4), "replay stderr:\n{}", rp.stderr);
+    assert!(!rp.stderr.contains("DIVERGENCE"), "no divergence: {}", rp.stderr);
+    assert!(rp.stderr.contains("incomplete"), "the incomplete-recording line: {}", rp.stderr);
+}

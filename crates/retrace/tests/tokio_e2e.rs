@@ -27,8 +27,15 @@ fn fixtures() -> &'static Result<HashMap<String, String>, String> {
             Command::new(&cargo).args([sub, "--manifest-path", MANIFEST, "--release", "--offline", "-j", "6"])
                 .args(extra).env("CARGO_TARGET_DIR", target).output().expect("spawn cargo")
         };
-        let first_err = |o: &std::process::Output| String::from_utf8_lossy(&o.stderr).lines()
-            .find(|l| l.contains("error")).unwrap_or("(no error line)").to_string();
+        // T5-a: only cargo's offline-fetch failure is a skip (no cached registry crate, or a network request
+        // refused under --offline). Any other build failure, a compile error in a fixture included, is a
+        // failure: `prog` panics on an error that does not start with `OFFLINE:`.
+        let first_err = |o: &std::process::Output| {
+            let err = String::from_utf8_lossy(&o.stderr);
+            let line = err.lines().find(|l| l.contains("error")).unwrap_or("(no error line)");
+            let offline = err.contains("offline mode (--offline)") || err.contains("--offline was specified");
+            format!("{}{line}", if offline { "OFFLINE:" } else { "BUILD:" })
+        };
         let b = run("build", &["--message-format=json"]);
         if !b.status.success() { return Err(first_err(&b)); }
         let t = run("test", &["--no-run", "--message-format=json"]);
@@ -53,10 +60,11 @@ fn fixtures() -> &'static Result<HashMap<String, String>, String> {
 fn prog(name: &str) -> Option<String> {
     match fixtures() {
         Ok(m) => Some(m.get(name).unwrap_or_else(|| panic!("no fixture {name}: {m:?}")).clone()),
-        Err(e) => {
+        Err(e) if e.starts_with("OFFLINE:") => {
             util::announce(&format!("SKIPPED: tokio fixtures do not build offline: {e}"));
             None
         }
+        Err(e) => panic!("the tokio fixtures failed to build: {e}"),
     }
 }
 

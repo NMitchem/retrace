@@ -404,7 +404,7 @@ T1-a). `FdKind::Sock` (`gkq.rs`) carries the end's model (`Socks`: peer, unread 
 never read from the kernel, so readiness is a pure function of the guest's calls and `poll`, `select` and
 the kqueue filters (`EV_CLEAR` as an edge queued once per activation, `EV_RECEIPT` by T0's abort-at-error
 rule; `EV_DISPATCH` still refused) agree on both sides. A count the model has lost refuses by value. Every
-other socket call, a `SOCK_DGRAM` pair, `shutdown`, control messages, `sendmsg_x` and the buffer-size options are
+other socket call, a `SOCK_DGRAM` pair, `shutdown`, `sendmsg` (any, since its msghdr iovec is not translated), `sendmsg_x` and the buffer-size options are
 walls named by `Box_::socket_refusal`, which record calls ahead of `refusal_before_forward`; a read or write
 that **would block** (`Box_::would_block`: the end is blocking, the other side open, and the call cannot
 complete from the model's counts; a pipe's capacity here is 65536, T0-blockwrite, apart from the 16384 of

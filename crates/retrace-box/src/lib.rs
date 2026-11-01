@@ -5741,7 +5741,8 @@ impl Box_ {
         // M55 §3f: a kernel-raised signal (SIGPIPE after an EPIPE) has `si_code` 0 and carries the pid; a
         // pended one is told apart by its thread's origin bit, which this consumes.
         let si_code = if si_code == retrace_arch::SI_USER && self.threads.take_kernel_origin(tid, sig) { 0 } else { si_code };
-        let si_pid = if si_code == 0 { self.sigtable.frame_pid() } else { 0 };
+        // F-4: only the kernel's SIGPIPE carries the pid; a `brk` is (SIGTRAP, si_code 0) and its si_pid is 0 as native.
+        let si_pid = if si_code == 0 && sig == retrace_arch::SIGPIPE { self.sigtable.frame_pid() } else { 0 };
         let inp = FrameInput {
             sig, si_code, si_pid, si_addr, esr, far, ts, ns,
             mask: frame_mask.unwrap_or_else(|| self.threads.mask_of(tid)),   // the PRE-signal mask: what sigreturn restores
@@ -7376,11 +7377,10 @@ impl Box_ {
             481 => "sendmsg_x".to_string(),
             28 | 402 => {
                 // struct msghdr: msg_control at 32, msg_controllen (u32) at 40.
-                let hdr = self.read_va_checked(args[1], 48)?;
-                let control = u64::from_le_bytes(hdr[32..40].try_into().unwrap());
-                let len = u32::from_le_bytes(hdr[40..44].try_into().unwrap());
-                if control == 0 || len == 0 { return None; }
-                "sendmsg with control data".to_string()
+                // F-5: the msghdr's iovec is a nested guest pointer the forward never translates (the host
+                // answers EFAULT), so every `sendmsg` on a guest socket end is refused by value. A successor
+                // translates it with M53's iovec spans.
+                "sendmsg (its msghdr iovec is not translated)".to_string()
             }
             _ => {
                 let name = match (args[1], args[2]) {
@@ -7452,6 +7452,10 @@ impl Box_ {
             if unread == 0 {
                 return Err(wall(&format!("read on guest {what} fd {fd} would wait for another thread to write")));
             }
+            // F-3: MSG_WAITALL (0x40) on a recv waits natively until `len` bytes arrive.
+            if matches!(num, 29 | 403) && flags & 0x40 != 0 && len > unread {
+                return Err(wall(&format!("read on guest {what} fd {fd} with MSG_WAITALL would wait for {} more bytes from another thread", len - unread)));
+            }
         } else {
             let held = e.held.ok_or_else(|| gkq::lost_count(fd, e.socket))?;
             if len > e.capacity.saturating_sub(held) {
@@ -7466,7 +7470,9 @@ impl Box_ {
     /// bit is clear. Read from the descriptor's kind, not from an effect: a failed call never reaches
     /// `note_fd_effects`. Both dispatch loops call it with the call's recorded values, after its landmark.
     pub fn sigpipe_due(&self, num: u64, args: [u64; 8], ret: u64, err: bool) -> bool {
-        err && ret == EPIPE
+        // F-1: `MSG_NOSIGNAL` (0x80000) suppresses it: `sendto` carries flags in args[3], `sendmsg` in args[2].
+        let nosignal = match num { 133 | 413 => args[3], 28 | 402 => args[2], _ => 0 } & 0x80000 != 0;
+        err && ret == EPIPE && !nosignal
             && matches!(num, 4 | 398 | SYS_WRITEV | SYS_WRITEV_NOCANCEL | 133 | 413 | 28 | 402)
             && self.gkq.io_end(args[0]).is_some_and(|e| e.writable && !e.nosigpipe)
     }
@@ -7517,7 +7523,7 @@ impl Box_ {
         if spans.is_empty() && partial { return Ok(IovPrep::Answer(EFAULT)); }
         let reach_total: u64 = reach.iter().map(|e| e.1).sum();
         let kind = self.gkq.kind_of(args[0]);
-        if partial && matches!(kind, gkq::FdKind::PipeRead(_) | gkq::FdKind::PipeWrite(_)) {
+        if partial && matches!(kind, gkq::FdKind::PipeRead(_) | gkq::FdKind::PipeWrite(_) | gkq::FdKind::Sock(_)) {
             return Err(retrace_arch::wall(retrace_arch::WallCategory::Syscalls, format!(
                 "{what} with an unreachable entry after the first, on guest pipe fd {}: natively measured for \
                  `readv`, a pipe transfers only into entry 0 and drains nothing, which the pipe model cannot reproduce; a \

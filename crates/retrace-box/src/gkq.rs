@@ -800,7 +800,8 @@ impl GuestKqueues {
                 // unreported (`filt_proc` re-evaluates); a level one is kept in step by `refresh`.
                 Some(w) => match ready_of(pipes, socks, key.0, w, key.1)? {
                     Some((eof, data)) => (eof, data, 0),
-                    None => { n.active = None; continue; }
+                    None if n.flags & EV_CLEAR != 0 => { n.active = None; continue; }
+                    None => unreachable!("refresh keeps a level knote's activation in step with its filter"),
                 },
             };
             out.push(Kevent { ident: key.0, filter: key.1, flags: (n.flags & ADD_FLAGS_RETURNED) | eof,

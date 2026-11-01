@@ -183,6 +183,26 @@ fn calls_outside_the_model_are_refused_by_value() {
     }
 }
 
+/// F-1: `MSG_NOSIGNAL` on `send` and `sendto` answers EPIPE and raises nothing, as native does (the review's
+/// probe: before the fix record and replay ended with "killed by SIGPIPE", exit 141).
+#[test]
+fn msg_nosignal_suppresses_sigpipe_as_native() {
+    let (out, _) = records_as_native(&["nosignal"]);
+    assert_eq!(out, "send MSG_NOSIGNAL rc=-1 errno=32\nsendto MSG_NOSIGNAL rc=-1 errno=32\n");
+}
+
+/// F-5: a plain `sendmsg` on a guest socket end is a wall, never the EFAULT its untranslated iovec gave
+/// (native sends 5 bytes).
+#[test]
+fn a_plain_sendmsg_on_a_socket_is_refused_by_value() {
+    let (rec, _) = record(&["refusals", "plainmsg"], BOUND);
+    assert_eq!(rec.code, Some(4), "stderr:\n{}", rec.stderr);
+    let lines: Vec<&str> = rec.stderr.lines().filter(|l| l.starts_with("retrace: unsupported: ")).collect();
+    assert_eq!(lines.len(), 1, "{}", rec.stderr);
+    assert!(lines[0].contains("M55: ") && lines[0].contains("sendmsg") && lines[0].contains("is not modelled"), "{}", lines[0]);
+    assert_eq!(String::from_utf8_lossy(&rec.stdout), "pair ok\n");
+}
+
 /// A pair made on a worker thread is tagged with the worker's id (the retag lives in `thread_oracle`).
 #[test]
 fn a_pair_made_on_a_worker_thread_records_and_replays() {

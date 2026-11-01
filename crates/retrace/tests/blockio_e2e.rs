@@ -107,3 +107,18 @@ fn the_would_block_capacity_is_not_the_kqueue_models() {
     assert_eq!(retrace_box::gkq::PIPE_WRITE_CAPACITY, 65536);
     assert_eq!(retrace_box::gkq::SOCK_CAPACITY, 8192);
 }
+
+/// F-3 (I3): `recv(MSG_WAITALL)` for more than the unread count waits natively for the rest; forwarded, it
+/// blocked the recorder (exit 142 under the review's 15 s bound). It is a wall, naming the bytes it would wait for.
+#[test]
+fn recv_waitall_for_more_than_is_held_is_a_wall() {
+    is_a_wall("waitall", "M55: read on guest socket fd", "start\n");
+    let (rec, _) = record("waitall", WALL_BOUND);
+    assert!(rec.stderr.contains("with MSG_WAITALL would wait for 90 more bytes"), "{}", rec.stderr);
+}
+
+#[test]
+fn recv_waitall_for_what_is_held_records_as_native() {
+    let out = records_as_native("waitallfits");
+    assert_eq!(out, "start\nwaitall r=10\n");
+}
