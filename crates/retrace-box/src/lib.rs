@@ -6460,8 +6460,10 @@ impl Box_ {
     /// 1. The timeout is copied in before the kqueue is looked up (K5).
     /// 2. The kqueue, the counts and the lists are checked. Every change is read before any event
     ///    is written (Review Focus 1: libuv's runtime detection passes one buffer as both lists).
-    /// 3. The changes are applied, all or nothing (`GuestKqueues::apply`). A waiter whose kqueue
-    ///    now holds an event is woken, with its reply written at the wake (`deliver_wake`).
+    /// 3. The changes are applied in order (`GuestKqueues::apply_room`). A waiter whose kqueue
+    ///    now holds an event is woken, with its reply written at the wake (`deliver_wake`). Since M55 a
+    ///    receipt or error event ends the call here with those events, no scan and no block; a failing
+    ///    change with no room left for its event returns -1 and its errno (T0-receipt).
     /// 4. With no event list, it returns 0, whatever the timeout (F7).
     /// 5. Otherwise it writes the events it finds and returns their count.
     /// 6. With none found, a zero timeout returns 0, and anything else blocks the caller. A NULL
@@ -6512,13 +6514,8 @@ impl Box_ {
         let changes: Vec<retrace_arch::Kevent> = bytes.chunks_exact(gkq::KEVENT_BYTES)
             .map(|c| retrace_arch::Kevent::from_bytes(c.try_into().expect("chunks_exact")))
             .collect();
-        for (i, c) in changes.iter().enumerate() {
-            if matches!(c.filter, retrace_arch::EVFILT_READ | retrace_arch::EVFILT_WRITE) && !self.fds.is_open(c.ident) {
-                return Err(fail(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("M48: kevent change {i}: filter {} on fd {}, which is not open: the \
-                                         kernel answers an EBADF EV_ERROR event, which is not modelled (K4)",
-                                        c.filter, c.ident))));
-            }
-        }
+        // M55: a descriptor that is not open is an EBADF error event on its add, never a wall (T0-receipt).
+        let open: Vec<bool> = changes.iter().map(|c| self.fds.is_open(c.ident)).collect();
         // Probed with the write's own condition (`check_writable_va`), not by reading: an event list
         // the guest has not written yet may reach into a reserved page no store has committed.
         if let Err(why) = self.check_writable_va(elist, nevents * gkq::KEVENT_BYTES) {
@@ -6532,8 +6529,17 @@ impl Box_ {
                                      blocked on it; which thread takes an event is unmeasured (K2)", w.tid))));
         }
         // 3. The changes, then any waiter they readied.
-        self.gkq.apply(kq, &changes).map_err(fail)?;
+        let applied = self.gkq.apply_room(kq, &changes, &open, nevents).map_err(fail)?;
         self.wake_kevent_waiters().map_err(fail)?;
+        // 3b. M55: a receipt or an error event is the call's whole answer. It scans nothing and blocks
+        // nowhere, and a failing change with no room left for its event ends the call with its errno,
+        // the events already stored staying stored (T0-receipt).
+        if !applied.events.is_empty() {
+            let out: Vec<u8> = applied.events.iter().flat_map(|e| e.to_bytes()).collect();
+            self.write_va_committing(elist, &out).map_err(|m| fail(format!("M55: kevent event list: {m}")))?;
+        }
+        if let Some(errno) = applied.errno { return Ok((errno, true)); }
+        if !applied.events.is_empty() { return Ok((applied.events.len() as u64, false)); }
         // 4. F7: no event list, no scan.
         if nevents == 0 { return Ok((0, false)); }
         // 5. The events found.

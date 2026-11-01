@@ -6,6 +6,8 @@
 // first `socketpair` was a wall. Every run is bounded so that a regression fails rather than stalls.
 mod util;
 
+use retrace_core::ReplaySession;
+use retrace_trace::Event;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -168,4 +170,186 @@ fn calls_outside_the_model_are_refused_by_value() {
 fn a_pair_made_on_a_worker_thread_records_and_replays() {
     let (out, _) = records_as_native(&["worker"]);
     assert_eq!(out, "worker pair d=1 lowest=1\nworker read 2 hi\nmain joined\n");
+}
+
+// ---- M55 t2: EV_CLEAR, EV_RECEIPT and error events (spec 2b, 2c, 3d; t0 T0-receipt, T0-clear-oneshot) ----
+
+/// Spec 2b: an `EV_CLEAR` knote on an end is queued by the peer's write (read), the peer's read (write) and
+/// the peer's last close (both, `EV_EOF`, write first), and never by the end's own calls or a non-last close.
+#[test]
+fn an_edge_triggered_socket_knote_fires_on_the_peers_calls_only() {
+    let (out, _) = records_as_native(&["clearsock"]);
+    assert_eq!(out, concat!(
+        "registered: n=1 [+0 write flags=0x21 data=8192 u=0]\n",
+        "A writes 1 byte: n=0\n",
+        "B writes 1 byte to A: n=1 [+0 read flags=0x21 data=1 u=0]\n",
+        "A reads it: n=0\n",
+        "B reads A's byte: n=1 [+0 write flags=0x21 data=8192 u=0]\n",
+        "dup+close of B (not the last): n=0\n",
+        "last close of B: n=2 [+0 write flags=0x8021 data=8192 u=0] [+0 read flags=0x8021 data=0 u=0]\n",
+    ));
+}
+
+/// `p0/sockprobe.txt`: a read edge per write whatever is unread, no edge from a read or a drain, and a write
+/// edge only when a peer read leaves at least the 2048-byte low-water mark free, again with each later read.
+#[test]
+fn edge_triggered_read_and_write_follow_natives_edges() {
+    let (out, _) = records_as_native(&["clearedges"]);
+    assert_eq!(out, concat!(
+        "registered: n=1 [+0 write flags=0x21 data=8192 u=0]\n",
+        "after 2 bytes: n=1 [+0 read flags=0x21 data=2 u=0]\n",
+        "again, 2 unread: n=0\n",
+        "after 1 more byte: n=1 [+0 read flags=0x21 data=3 u=0]\n",
+        "after reading 1: n=0\n",
+        "after draining: n=0\n",
+        "after fill: n=0\n",
+        "peer read 1: n=0\n",
+        "peer read 1023 more: n=0\n",
+        "peer read 2048 more: n=1 [+0 write flags=0x21 data=3072 u=0]\n",
+        "peer read the rest: n=1 [+0 write flags=0x21 data=8192 u=0]\n",
+        "peer drained: n=0\n",
+    ));
+}
+
+/// Spec 2c: any read or write of a pipe activates both ends' knotes, each only while its filter holds (a full
+/// pipe fires read alone, a drained one write alone), write first; the last write-end close fires read, `EV_EOF`.
+#[test]
+fn an_edge_triggered_pipe_knote_fires_on_any_read_or_write() {
+    let (out, _) = records_as_native(&["clearpipe"]);
+    assert_eq!(out, concat!(
+        "add read: n=0\n",
+        "add write: n=1 [+1 write flags=0x21 data=16384 u=0]\n",
+        "empty: n=0\n",
+        "again: n=0\n",
+        "after 2 bytes: n=2 [+1 write flags=0x21 data=16382 u=0] [+0 read flags=0x21 data=2 u=0]\n",
+        "again: n=0\n",
+        "after 1 more: n=2 [+1 write flags=0x21 data=16381 u=0] [+0 read flags=0x21 data=3 u=0]\n",
+        "after reading 1: n=2 [+1 write flags=0x21 data=16382 u=0] [+0 read flags=0x21 data=2 u=0]\n",
+        "after fill: n=1 [+0 read flags=0x21 data=65536 u=0]\n",
+        "after reading 512: n=2 [+1 write flags=0x21 data=512 u=0] [+0 read flags=0x21 data=65024 u=0]\n",
+        "drained: n=1 [+1 write flags=0x21 data=65536 u=0]\n",
+        "write end closed: n=1 [+0 read flags=0x8021 data=0 u=0]\n",
+    ));
+}
+
+/// Spec 2c: each change carrying `EV_RECEIPT` is one event (`EV_ERROR` set, `data` 0 or the errno); a call that
+/// made any returns them without scanning, the same array serving as both lists; `nevents` 0 drops them.
+#[test]
+fn receipts_answer_each_change_and_return_without_scanning() {
+    let (out, _) = records_as_native(&["receipt"]);
+    assert_eq!(out, concat!(
+        "register read+write, one array, NULL timeout: n=2 [+0 read flags=0x4061 data=0 u=7] [+0 write flags=0x4061 data=0 u=8]\n",
+        "poll after the receipts: n=1 [+0 write flags=0x61 data=8192 u=8]\n",
+        "poll again: n=0\n",
+        "delete registered, delete 999, add 998: n=3 [+0 read flags=0x4042 data=0 u=0] [#999 read flags=0x4042 data=2 u=0] [#998 read flags=0x4041 data=9 u=0]\n",
+        "re-add read: n=1 [+0 read flags=0x4061 data=0 u=0]\n",
+        "receipt with nevents 0: n=0\n",
+        "poll after it: n=0\n",
+    ));
+}
+
+/// T0-receipt: changes apply in order; a receipt with no room is dropped, a failing change with no room ends the
+/// call with -1 and its errno (the earlier changes applied, the later ones not), and with room it stores its
+/// `EV_ERROR` event and the call goes on. Also T0-clear-oneshot: `EV_CLEAR|EV_ONESHOT` on a socket read is a one-shot.
+#[test]
+fn receipt_overflow_is_natives() {
+    let (out, _) = records_as_native(&["receiptcorner"]);
+    assert_eq!(out, concat!(
+        "receipt bad third nevents=1: n=-1 errno=9 [+0 read flags=0x4041 data=0 u=1]\n",
+        "  later trigger: n=2 [+0 read flags=0x41 data=1 u=1] [+2 read flags=0x41 data=1 u=2]\n",
+        "receipt bad third nevents=2: n=-1 errno=9 [+0 read flags=0x4041 data=0 u=1] [+2 read flags=0x4041 data=0 u=2]\n",
+        "  later trigger: n=2 [+0 read flags=0x41 data=1 u=1] [+2 read flags=0x41 data=1 u=2]\n",
+        "receipt bad third nevents=3: n=3 [+0 read flags=0x4041 data=0 u=1] [+2 read flags=0x4041 data=0 u=2] [#999 read flags=0x4041 data=9 u=3]\n",
+        "  later trigger: n=2 [+0 read flags=0x41 data=1 u=1] [+2 read flags=0x41 data=1 u=2]\n",
+        "receipt bad first nevents=1: n=1 [#999 read flags=0x4041 data=9 u=1]\n",
+        "  later trigger: n=2 [+0 read flags=0x41 data=1 u=2] [+2 read flags=0x41 data=1 u=3]\n",
+        "receipt bad first nevents=2: n=2 [#999 read flags=0x4041 data=9 u=1] [+0 read flags=0x4041 data=0 u=2]\n",
+        "  later trigger: n=2 [+0 read flags=0x41 data=1 u=2] [+2 read flags=0x41 data=1 u=3]\n",
+        "receipt bad first nevents=3: n=3 [#999 read flags=0x4041 data=9 u=1] [+0 read flags=0x4041 data=0 u=2] [+2 read flags=0x4041 data=0 u=3]\n",
+        "  later trigger: n=2 [+0 read flags=0x41 data=1 u=2] [+2 read flags=0x41 data=1 u=3]\n",
+        "plain bad first nevents=0: n=-1 errno=9\n",
+        "  later trigger: n=0\n",
+        "plain delete bad first nevents=0: n=-1 errno=2\n",
+        "  later trigger: n=0\n",
+        "plain bad first nevents=1: n=1 [#999 read flags=0x4001 data=9 u=1]\n",
+        "  later trigger: n=2 [+0 read flags=0x1 data=1 u=2] [+2 read flags=0x1 data=1 u=3]\n",
+        "plain delete bad first nevents=1: n=1 [#999 read flags=0x4002 data=2 u=1]\n",
+        "  later trigger: n=2 [+0 read flags=0x1 data=1 u=2] [+2 read flags=0x1 data=1 u=3]\n",
+        "receipt bad first nevents=0: n=-1 errno=9\n",
+        "  later trigger: n=0\n",
+        "receipt delete bad first nevents=0: n=-1 errno=2\n",
+        "  later trigger: n=0\n",
+        "receipt bad first nevents=1: n=1 [#999 read flags=0x4041 data=9 u=1]\n",
+        "  later trigger: n=2 [+0 read flags=0x41 data=1 u=2] [+2 read flags=0x41 data=1 u=3]\n",
+        "receipt delete bad first nevents=1: n=1 [#999 read flags=0x4042 data=2 u=1]\n",
+        "  later trigger: n=2 [+0 read flags=0x41 data=1 u=2] [+2 read flags=0x41 data=1 u=3]\n",
+        "oneshot register: n=1 [+0 read flags=0x4071 data=0 u=0]\n",
+        "after the peer's write: n=1 [+0 read flags=0x71 data=1 u=0]\n",
+        "after a second write: n=0\n",
+        "delete after delivery: n=1 [+0 read flags=0x4042 data=2 u=0]\n",
+        "register when readable: n=1 [+0 read flags=0x31 data=2 u=0]\n",
+        "then poll: n=0\n",
+    ));
+}
+
+/// Spec 2c: without `EV_RECEIPT` an error is still an `EV_ERROR` event, `ENOENT` for a delete of a knote that is
+/// not registered even on a descriptor not open, and -1 with the errno when `nevents` is 0; a receipt beside a
+/// plain add returns alone, unscanned.
+#[test]
+fn errors_without_receipt_are_error_events() {
+    let (out, _) = records_as_native(&["errnoreceipt"]);
+    assert_eq!(out, concat!(
+        "3 receipts, nevents 1: n=-1 errno=9 [+0 read flags=0x4041 data=0 u=11]\n",
+        "then: n=1 [+0 write flags=0x41 data=8192 u=12]\n",
+        "no receipt: delete registered, delete 996, nevents 3: n=1 [#996 read flags=0x4002 data=2 u=0]\n",
+        "no receipt: delete 996, nevents 0: n=-1 errno=2\n",
+        "mixed: plain add read (data waiting), receipt delete write: n=1 [+0 write flags=0x4042 data=0 u=0]\n",
+    ));
+}
+
+/// Review Focus 5: closing the descriptor a knote was registered on drops the knote even with a dup keeping the
+/// end open, so the peer's write queues nothing; the dup's own knote, added after the peer's last close, sees
+/// `EV_EOF`.
+#[test]
+fn a_knote_on_a_closed_socket_end_is_dropped() {
+    let (out, _) = records_as_native(&["knoteclose"]);
+    assert_eq!(out, concat!(
+        "closed A (a dup kept), B writes: n=0\n",
+        "B closed, the dup's knote added: n=1 [+2 read flags=0x8001 data=1 u=0]\n",
+    ));
+}
+
+fn events(trace: &PathBuf) -> Vec<Event> { retrace_trace::Reader::open(trace).unwrap() }
+
+/// Review Focus 3: a checkpoint taken in the middle of `clearedges`'s socket traffic, continued to the last
+/// landmark, must equal a cold seek there: the socket model and the knotes (box state), registers, saved
+/// contexts and memory. A model `BoxState` did not carry would put the first edge after the checkpoint in the
+/// wrong place, or panic on a socket it had never heard of.
+#[test]
+fn a_seek_into_socket_traffic_continues_as_recorded() {
+    let (_, trace) = records_as_native(&["clearedges"]);
+    let evs = events(&trace);
+    let kevents: Vec<usize> = evs.iter().enumerate()
+        .filter_map(|(i, e)| matches!(e, Event::Syscall { num: 363, .. }).then_some(i)).collect();
+    assert!(kevents.len() >= 10, "clearedges polls many times: {}", kevents.len());
+    let mid = kevents[kevents.len() / 2] + 1;
+    let last = evs.iter().rposition(|e| matches!(e, Event::Syscall { .. })).expect("a last syscall") + 1;
+    assert!(mid < last);
+    // One VM per process: each session ends before the next is built.
+    let cp = {
+        let from = retrace_core::seek(&trace, mid, 0).unwrap();
+        let state = from.dbg_internal_state();
+        assert!(state.contains("socks"), "the checkpoint carries the socket model:\n{state}");
+        from.checkpoint()
+    };
+    let warm = {
+        let mut s = ReplaySession::from_checkpoint(&trace, &cp).unwrap();
+        s.advance_to_landmark(last).unwrap_or_else(|d| panic!("warm: diverged at {}: {}", d.landmark, d.detail));
+        (s.current_thread(), s.dbg_regs(), s.dbg_internal_state(), s.snapshot().1)
+    };
+    let cold = retrace_core::seek(&trace, last, 0).unwrap();
+    assert_eq!(warm.0, cold.current_thread(), "thread: checkpointed vs cold");
+    assert_eq!(warm.1, cold.dbg_regs(), "registers: checkpointed vs cold");
+    assert_eq!(warm.2, cold.dbg_internal_state(), "box state: checkpointed vs cold");
+    assert!(cold.diff_memory(&warm.3).is_none(), "memory: checkpointed vs cold");
 }
