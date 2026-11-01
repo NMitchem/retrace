@@ -258,7 +258,7 @@ mask_err() {
 
 # M51 (deferred #8): is file $1 a prefix of file $2?
 is_prefix() {
-    n=$(wc -c < "$1")
+    n=$(wc -c < "$1" | tr -d ' ')
     head -c "$n" "$2" | cmp -s - "$1"
 }
 
