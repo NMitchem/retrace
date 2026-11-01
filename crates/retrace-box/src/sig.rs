@@ -46,14 +46,18 @@ impl Default for SigAction {
 pub struct SigTable {
     /// Indexed by signal number; `[0]` is unused so indexing mirrors signal numbering (1..=31).
     disp: [SigAction; NSIG],
-    /// M55 §3f: the pid a kernel-raised signal's `si_pid` carries, when replay must take it from the
-    /// recording (the recorder's own pid is not the replayer's). `None` on record: `deliver_signal_to` uses
-    /// the process's own id, which is the guest's (`getpid` is not intercepted).
+    /// M55 §3f, Ruling T4-a: the pid a kernel-raised signal's `si_pid` carries, when replay must take it from
+    /// the recording. A HOST value applied verbatim: the recorder's own pid (the guest's `getpid` is
+    /// forwarded) is not the replayer's, so it cannot be recomputed, as M23's `ServiceGetSpecialPort` reply
+    /// cannot. Every other byte of the frame is still compared. `None` on record, and between deliveries on
+    /// replay: `mirror_delivery` sets it for one `deliver_signal_to` and clears it. `frame_pid` then falls
+    /// back to the process's own id.
     pid_override: Option<u32>,
 }
 
 impl SigTable {
     pub fn set_pid_override(&mut self, pid: Option<u32>) { self.pid_override = pid; }
+    pub fn pid_override(&self) -> Option<u32> { self.pid_override }
     pub fn frame_pid(&self) -> u32 { self.pid_override.unwrap_or_else(std::process::id) }
 }
 
@@ -354,6 +358,18 @@ pub fn build_frame(inp: &FrameInput) -> (Vec<u8>, EntryRegs) {
 
 #[cfg(test)]
 mod tests {
+    /// Ruling T4-a: the pid override is scoped. Unset it is the process's own id; set it wins; cleared it is the
+    /// process's own id again, so a later delivery that is not a recorded kernel-raised one is unaffected.
+    #[test]
+    fn the_pid_override_is_scoped_and_clears() {
+        let mut t = SigTable::default();
+        assert_eq!((t.pid_override(), t.frame_pid()), (None, std::process::id()));
+        t.set_pid_override(Some(4242));
+        assert_eq!(t.frame_pid(), 4242);
+        t.set_pid_override(None);
+        assert_eq!((t.pid_override(), t.frame_pid()), (None, std::process::id()));
+    }
+
     use super::*;
 
     #[test]

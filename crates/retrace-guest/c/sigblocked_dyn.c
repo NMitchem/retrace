@@ -98,7 +98,7 @@ static void *killer(void *a) {
     return NULL;
 }
 
-static int pipefds[2], pipe_unmask;
+static int pipefds[2], pipe_unmask, pipe_dfl;
 static volatile int pran, pon_main, pcode, ppid;
 static void ph(int s, siginfo_t *si, void *uc) {
     (void)s; (void)uc;
@@ -110,8 +110,8 @@ static void *pipe_writer(void *a) {
     usleep(20000);
     errno = 0;
     ssize_t r = write(pipefds[1], "x", 1);
-    printf("worker: write r=%zd errno=%d ran=%d\n", r, errno, pran);
-    fflush(stdout);
+    /* pipedfl: the signal ends the process on main's thread, so a line printed here would race it natively. */
+    if (!pipe_dfl) { printf("worker: write r=%zd errno=%d ran=%d\n", r, errno, pran); fflush(stdout); }
     usleep(20000);
     return NULL;
 }
@@ -173,7 +173,8 @@ int main(int argc, char **argv) {
         printf("%s: n=%d errno=%d then=%d handled=%d on_main=%d\n", mode, n, e, n2, handled, on_main);
         frame();
     } else if (!strncmp(mode, "pipe", 4)) {
-        if (strcmp(mode, "pipedfl")) {
+        pipe_dfl = !strcmp(mode, "pipedfl");
+        if (!pipe_dfl) {
             struct sigaction ps;
             memset(&ps, 0, sizeof ps);
             ps.sa_sigaction = ph;

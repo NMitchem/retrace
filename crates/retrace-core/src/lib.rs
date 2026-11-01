@@ -2517,11 +2517,19 @@ impl ReplaySession {
             return Err(Divergence { landmark: self.idx, pc, detail: format!(
                 "signal delivery target not deliverable on replay: {d}") });
         }
-        // M55 §3f: a kernel-raised signal's `si_pid` is the recorder's pid, which a replay cannot recompute:
-        // take it from the recorded frame (siginfo's bytes 12..16) and let the compare cover everything else.
-        let rpid = rwrites.first().and_then(|r| r.bytes.get(12..16)).map(|b| u32::from_le_bytes(b.try_into().unwrap()));
+        // M55 §3f, Ruling T4-a: the one value replay takes from the recording verbatim. A kernel-raised
+        // signal's `si_pid` is the recorder's own host pid (the guest's `getpid` is forwarded), which a replay
+        // process cannot recompute (as M23's `ServiceGetSpecialPort` reply). It is scoped: only a recorded
+        // frame whose `si_code` (siginfo bytes 8..12) is 0 supplies it, only its four `si_pid` bytes (12..16)
+        // are taken, it is cleared as soon as `deliver_signal_to` returns, and every other byte of the frame is
+        // still compared below.
+        let rpid = rwrites.first().and_then(|r| {
+            let code = u32::from_le_bytes(r.bytes.get(8..12)?.try_into().unwrap());
+            (code == 0).then(|| u32::from_le_bytes(r.bytes.get(12..16).unwrap().try_into().unwrap()))
+        });
         self.b.sigtable_mut().set_pid_override(rpid);
         let (mine, _resume_pc) = self.b.deliver_signal_to(tid, sig, si_code, si_addr, esr, far);
+        self.b.sigtable_mut().set_pid_override(None);
         if sig != rsig || mine != rwrites {
             // Name the first differing byte: a frame mismatch is usually one field, and the
             // offset identifies which one far faster than two 976-byte dumps do.
