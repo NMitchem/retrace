@@ -89,7 +89,7 @@ pub fn record(guest: &str) -> (RunOut, std::path::PathBuf) {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
     let trace = std::env::temp_dir().join(format!("retrace-util-{}-{n}.bin", std::process::id()));
-    let out = run(&["record", guest, "-o", trace.to_str().unwrap()]);
+    let out = run(&["record", "-o", trace.to_str().unwrap(), guest]);
     (out, trace)
 }
 
@@ -151,6 +151,16 @@ pub struct Bounded { pub code: Option<i32>, pub stdout: Vec<u8>, pub stderr: Str
 /// program: `bin()` for the CLI, or a guest run natively. The environment is cleared first, as
 /// `run_env` clears it, so `env` is all the child gets (M51 C6).
 pub fn run_bounded(prog: &str, args: &[&str], env: &[(&str, &str)], secs: u64) -> Bounded {
+    run_bounded_at(None, prog, args, env, secs)
+}
+
+/// M56: `run_bounded` of the signed CLI with `dir` as its working directory, for a relative program
+/// path and the default trace name.
+pub fn run_in(dir: &std::path::Path, args: &[&str], env: &[(&str, &str)], secs: u64) -> Bounded {
+    run_bounded_at(Some(dir), bin(), args, env, secs)
+}
+
+fn run_bounded_at(dir: Option<&std::path::Path>, prog: &str, args: &[&str], env: &[(&str, &str)], secs: u64) -> Bounded {
     use std::os::unix::process::ExitStatusExt;
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -161,6 +171,7 @@ pub fn run_bounded(prog: &str, args: &[&str], env: &[(&str, &str)], secs: u64) -
         .stdout(std::fs::File::create(&out_p).expect("create stdout file"))
         .stderr(std::fs::File::create(&err_p).expect("create stderr file"));
     for (k, v) in env { c.env(k, v); }
+    if let Some(d) = dir { c.current_dir(d); }
     let mut child = c.spawn().unwrap_or_else(|e| panic!("spawn {prog}: {e}"));
     let mut code = None;
     for _ in 0..secs * 20 {
@@ -184,12 +195,12 @@ pub fn run_bounded(prog: &str, args: &[&str], env: &[(&str, &str)], secs: u64) -
     Bounded { code, stdout, stderr }
 }
 
-// Record a dynamically-linked guest through real dyld via the CLI's `record-dyn` path.
+// Record a dynamically-linked guest through real dyld via the CLI's `record` path.
 pub fn record_dynamic(guest: &str) -> (RunOut, std::path::PathBuf) {
     static NEXT: AtomicU64 = AtomicU64::new(1_000_000);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
     let trace = std::env::temp_dir().join(format!("retrace-dyn-{}-{n}.bin", std::process::id()));
-    let out = run(&["record-dyn", guest, "-o", trace.to_str().unwrap()]);
+    let out = run(&["record", "-o", trace.to_str().unwrap(), guest]);
     (out, trace)
 }
 
@@ -200,7 +211,7 @@ pub fn record_dynamic_env(guest: &str, env: &[(&str, &str)]) -> (RunOut, std::pa
     static NEXT: AtomicU64 = AtomicU64::new(2_000_000);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
     let trace = std::env::temp_dir().join(format!("retrace-dynenv-{}-{n}.bin", std::process::id()));
-    let out = run_env(&["record-dyn", guest, "-o", trace.to_str().unwrap()], env);
+    let out = run_env(&["record", "-o", trace.to_str().unwrap(), guest], env);
     (out, trace)
 }
 
@@ -210,8 +221,8 @@ pub fn record_dynamic_args(guest: &str, args: &[&str]) -> (RunOut, std::path::Pa
     static NEXT: AtomicU64 = AtomicU64::new(2_000_000);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
     let trace = std::env::temp_dir().join(format!("retrace-argv-{}-{n}.bin", std::process::id()));
-    let mut argv = vec!["record-dyn", guest, "-o", trace.to_str().unwrap()];
-    if !args.is_empty() { argv.push("--"); argv.extend_from_slice(args); }
+    let mut argv = vec!["record", "-o", trace.to_str().unwrap(), guest];
+    argv.extend_from_slice(args);
     (run(&argv), trace)
 }
 
@@ -221,8 +232,8 @@ pub fn record_dynamic_args_env(guest: &str, args: &[&str], env: &[(&str, &str)])
     static NEXT: AtomicU64 = AtomicU64::new(3_000_000);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
     let trace = std::env::temp_dir().join(format!("retrace-argvenv-{}-{n}.bin", std::process::id()));
-    let mut argv = vec!["record-dyn", guest, "-o", trace.to_str().unwrap()];
-    if !args.is_empty() { argv.push("--"); argv.extend_from_slice(args); }
+    let mut argv = vec!["record", "-o", trace.to_str().unwrap(), guest];
+    argv.extend_from_slice(args);
     (run_env(&argv, env), trace)
 }
 

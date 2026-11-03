@@ -341,10 +341,10 @@ while IFS= read -r g <&3; do
         [ -e "$TMP/.timedout" ] && nrc=timeout
     fi
     if [ "$nargs" -eq 0 ]; then
-        run_timeout clean_run recorder "$BIN" record-dyn "$g" -o "$TMP/t.bin" >"$TMP/rec.out" 2>"$TMP/rec.err" </dev/null; rc=$?
+        run_timeout clean_run recorder "$BIN" record -o "$TMP/t.bin" "$g" >"$TMP/rec.out" 2>"$TMP/rec.err" </dev/null; rc=$?
     else
-        # M49: the same shape, with the row's arguments after `--`, the CLI's guest-argv separator.
-        run_timeout clean_run recorder "$BIN" record-dyn "$g" -o "$TMP/t.bin" -- "$@" >"$TMP/rec.out" 2>"$TMP/rec.err" </dev/null; rc=$?
+        # M49: the same shape, with the row's arguments after the program.
+        run_timeout clean_run recorder "$BIN" record -o "$TMP/t.bin" "$g" "$@" >"$TMP/rec.out" 2>"$TMP/rec.err" </dev/null; rc=$?
     fi
     recpid=$(grep -a '^recpid=' "$TMP/rec.err" | head -1 | cut -d= -f2)
     native=""

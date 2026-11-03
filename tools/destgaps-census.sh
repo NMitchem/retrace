@@ -51,10 +51,10 @@ LINE_CAP=400000
 one() {
     label=$1; mode=$2; path=$3; shift 3
     rm -f "$TMP/t.bin" "$TMP/trace"
-    ( exec env RETRACE_TRACE=1 "$BIN" "$mode" "$path" -o "$TMP/t.bin" "$@" 2>&1 >/dev/null </dev/null ) \
+    ( exec env RETRACE_TRACE=1 "$BIN" "$mode" -o "$TMP/t.bin" "$path" "$@" 2>&1 >/dev/null </dev/null ) \
         | head -n "$LINE_CAP" > "$TMP/trace" &
     ppid=$!
-    ( sleep "$TIMEOUT_SECS"; pkill -9 -f "^$BIN $mode $path" 2>/dev/null ) &
+    ( sleep "$TIMEOUT_SECS"; pkill -9 -f "^$BIN $mode -o $TMP/t.bin $path" 2>/dev/null ) &
     wpid=$!
     wait "$ppid" 2>/dev/null
     _tmo_status=$?
@@ -77,7 +77,7 @@ for g in "$GUESTS"/*; do
     [ -f "$g" ] && [ -x "$g" ] || continue
     file "$g" | grep -q 'Mach-O' || continue
     if otool -l "$g" 2>/dev/null | grep -q LC_LOAD_DYLINKER; then
-        one "guest:$(basename "$g")" record-dyn "$g"
+        one "guest:$(basename "$g")" record "$g"
     else
         one "guest:$(basename "$g")" record "$g"
     fi
@@ -86,8 +86,8 @@ done
 # ---- jq (rungs 2-3), with the gate's own argv -----------------------------------
 JQ=/opt/homebrew/bin/jq
 if [ -x "$JQ" ]; then
-    one "jq:--version" record-dyn "$JQ" -- --version
-    one "jq:file" record-dyn "$JQ" -- .name "$ROOT/crates/retrace/tests/fixtures/rung3.json"
+    one "jq:--version" record "$JQ" --version
+    one "jq:file" record "$JQ" .name "$ROOT/crates/retrace/tests/fixtures/rung3.json"
 else
     echo "SKIP jq (not present)"
 fi
@@ -95,15 +95,15 @@ fi
 # ---- CPython (rung 7): the interpreter and the launcher shim ---------------------
 PY=/opt/homebrew/Frameworks/Python.framework/Versions/3.14/Resources/Python.app/Contents/MacOS/Python
 PYL=/opt/homebrew/Frameworks/Python.framework/Versions/3.14/bin/python3.14
-[ -x "$PY" ]  && one "cpython:interp"   record-dyn "$PY"  -- -c 'print(1)' || echo "SKIP cpython interp"
-[ -x "$PYL" ] && one "cpython:launcher" record-dyn "$PYL" -- -c 'print(1)' || echo "SKIP cpython launcher"
+[ -x "$PY" ]  && one "cpython:interp"   record "$PY"  -c 'print(1)' || echo "SKIP cpython interp"
+[ -x "$PYL" ] && one "cpython:launcher" record "$PYL" -c 'print(1)' || echo "SKIP cpython launcher"
 fi
 
 # ---- the Apple sweep corpus, bare argv, stdin from /dev/null ---------------------
 while IFS= read -r g <&3; do
     case "$g" in ''|\#*) continue ;; esac
     [ -x "$g" ] || { echo "SKIP $g (not present)"; continue; }
-    one "apple:$g" record-dyn "$g"
+    one "apple:$g" record "$g"
 done 3< "$SWEEP_LIST"
 
 echo "DONE matched_total=$(wc -l < "$OUT" | tr -d ' ') -> $OUT"

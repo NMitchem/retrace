@@ -91,7 +91,7 @@ def main():
             continue
         trace = os.path.join(work, "t.bin")
         native = [exe, *args]
-        record = [rt, "record-dyn", exe, "-o", trace, "--", *args]
+        record = [rt, "record", "-o", trace, exe, *args]
         replay = [rt, "replay", trace]
         for argv in (native, record, replay):  # untimed warm-up
             run(argv, work)

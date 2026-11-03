@@ -17,8 +17,8 @@ fn record_stalled(name: &str) -> (Option<i32>, String, PathBuf) { record_stalled
 
 fn record_stalled_with(name: &str, guest_args: &[&str]) -> (Option<i32>, String, PathBuf) {
     let trace = std::env::temp_dir().join(format!("retrace-stall-{}-{name}.bin", std::process::id()));
-    let mut args = vec!["record-dyn", retrace_guest::STALL_DYN, "-o", trace.to_str().unwrap()];
-    if !guest_args.is_empty() { args.push("--"); args.extend(guest_args); }
+    let mut args = vec!["record", "-o", trace.to_str().unwrap(), retrace_guest::STALL_DYN];
+    if !guest_args.is_empty() { args.extend(guest_args); }
     let r = util::run_bounded(util::bin(), &args, &[], BOUND);
     (r.code, r.stderr, trace)
 }

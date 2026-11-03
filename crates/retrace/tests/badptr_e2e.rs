@@ -17,7 +17,7 @@ fn scratch(name: &str) -> PathBuf {
 fn agree(mode: &str, t: &Path) -> (String, Vec<Event>) {
     let native = util::run_bounded(P, &[mode], &[], BOUND);
     assert_eq!(native.code, Some(0), "{mode}: native. stderr:\n{}", native.stderr);
-    let rec = util::run_bounded(util::bin(), &["record-dyn", P, "-o", t.to_str().unwrap(), "--", mode], &[], BOUND);
+    let rec = util::run_bounded(util::bin(), &["record", "-o", t.to_str().unwrap(), P, mode], &[], BOUND);
     assert!(!rec.stderr.contains("retrace: "), "{mode}: no line of retrace's own. stderr:\n{}", rec.stderr);
     assert_eq!((rec.code, rec.stdout.as_slice()), (Some(0), native.stdout.as_slice()), "{mode}: record against native");
     for i in 1..=2 {
@@ -148,7 +148,7 @@ fn a_recording_that_forwarded_a_pointer_replay_refuses_is_a_divergence() {
 #[test]
 fn a_handler_that_smashes_its_mcontext_pointer_is_a_wall_not_a_bug() {
     let t = scratch("badmctx.bin");
-    let rec = util::run_bounded(util::bin(), &["record-dyn", P, "-o", t.to_str().unwrap(), "--", "badmctx"], &[], BOUND);
+    let rec = util::run_bounded(util::bin(), &["record", "-o", t.to_str().unwrap(), P, "badmctx"], &[], BOUND);
     assert_eq!(rec.code, Some(4), "a wall. stderr:\n{}", rec.stderr);
     assert!(rec.stderr.contains("retrace: unsupported:") && rec.stderr.contains("mcontext at 0x10"),
         "the wall names the frame's mcontext. stderr:\n{}", rec.stderr);

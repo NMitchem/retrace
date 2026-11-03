@@ -248,6 +248,7 @@ pub const USRSTACK: &str = concat!(env!("OUT_DIR"), "/usrstack");
 pub const FIXEDINNER: &str = concat!(env!("OUT_DIR"), "/fixedinner");
 pub const WILDFIXED: &str = concat!(env!("OUT_DIR"), "/wildfixed");
 pub const ARGV_ECHO: &str = concat!(env!("OUT_DIR"), "/argv_echo");
+pub const APPLE_DYN: &str = concat!(env!("OUT_DIR"), "/apple_dyn");
 pub const STDIO_DYN: &str = concat!(env!("OUT_DIR"), "/stdio_dyn");
 pub const CLOSEFD_DYN: &str = concat!(env!("OUT_DIR"), "/closefd_dyn");
 /// M10: opens, dups, closes and re-opens, printing each descriptor it is given — so the e2e can

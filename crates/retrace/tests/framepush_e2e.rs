@@ -21,7 +21,7 @@ fn cell(thread: &str, fault: &str, how: &str) -> (i32, Event) {
     let ncode = native.code.unwrap_or_else(|| panic!("{what}: native hung (a cell t0 M2 ruled out of the matrix)"));
     let t = scratch(&format!("{thread}-{fault}-{how}.bin"));
     let tp = t.to_str().unwrap();
-    let rec = util::run_bounded(util::bin(), &["record-dyn", P, "-o", tp, "--", thread, fault, how], &[], BOUND);
+    let rec = util::run_bounded(util::bin(), &["record", "-o", tp, P, thread, fault, how], &[], BOUND);
     assert_eq!((rec.code, String::from_utf8_lossy(&rec.stdout)), (Some(ncode), String::from_utf8_lossy(&native.stdout)),
         "{what}: record against native. stderr:\n{}", rec.stderr);
     for i in 1..=2 {
@@ -97,7 +97,7 @@ fn an_alternate_stack_unmapped_after_sigaltstack_kills_with_sigill() {
 fn an_unpushable_frame_is_recorded_as_sigill_with_the_faults_own_syndrome() {
     let t = scratch("pinned.bin");
     let tp = t.to_str().unwrap();
-    let rec = util::run_bounded(util::bin(), &["record-dyn", P, "-o", tp, "--", "child", "null", "ha-none"], &[], BOUND);
+    let rec = util::run_bounded(util::bin(), &["record", "-o", tp, P, "child", "null", "ha-none"], &[], BOUND);
     let (events, _) = Reader::open_checked(&t).unwrap();
     match &events[events.len() - 2] {
         Event::Crash { esr, far, sig, thread, .. } => {

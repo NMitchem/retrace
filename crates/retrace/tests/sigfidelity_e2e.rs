@@ -17,8 +17,8 @@ fn agree(prog: &str, args: &[&str], t: &Path) -> (i32, Vec<Event>) {
     let what = format!("{} {args:?}", Path::new(prog).file_name().unwrap().to_string_lossy());
     let native = util::run_bounded(prog, args, &[], BOUND);
     let ncode = native.code.unwrap_or_else(|| panic!("{what}: native hung"));
-    let mut argv = vec!["record-dyn", prog, "-o", t.to_str().unwrap()];
-    if !args.is_empty() { argv.push("--"); argv.extend_from_slice(args); }
+    let mut argv = vec!["record", "-o", t.to_str().unwrap(), prog];
+    if !args.is_empty() { argv.extend_from_slice(args); }
     let rec = util::run_bounded(util::bin(), &argv, &[], BOUND);
     assert!(!rec.stderr.contains("retrace: unsupported:"), "{what}: no wall. stderr:\n{}", rec.stderr);
     assert_eq!((rec.code, String::from_utf8_lossy(&rec.stdout)), (Some(ncode), String::from_utf8_lossy(&native.stdout)),
@@ -100,7 +100,7 @@ fn abort_with_payload_ends_the_program_with_sigabrt() {
     let native = util::run_bounded(retrace_guest::FID_MISSING, &[], &[], BOUND);
     assert!(native.stderr.contains("Library not loaded: @rpath/libfidgone.dylib"), "native dyld: {}", native.stderr);
     let t = scratch("missing.bin");
-    let rec = util::run_bounded(util::bin(), &["record-dyn", retrace_guest::FID_MISSING, "-o", t.to_str().unwrap()], &[], BOUND);
+    let rec = util::run_bounded(util::bin(), &["record", "-o", t.to_str().unwrap(), retrace_guest::FID_MISSING], &[], BOUND);
     assert!(rec.stderr.contains("Library not loaded: @rpath/libfidgone.dylib"), "dyld's own line, on stderr: {}", rec.stderr);
     let _ = std::fs::remove_file(&t);
 }
@@ -110,7 +110,7 @@ fn abort_with_payload_ends_the_program_with_sigabrt() {
 #[test]
 fn a_tampered_answer_to_pthread_kill_with_signal_0_is_a_divergence() {
     let t = scratch("tamper.bin");
-    let rec = util::run_bounded(util::bin(), &["record-dyn", retrace_guest::FID_SIGNALS, "-o", t.to_str().unwrap(), "--", "pkill0self"], &[], BOUND);
+    let rec = util::run_bounded(util::bin(), &["record", "-o", t.to_str().unwrap(), retrace_guest::FID_SIGNALS, "pkill0self"], &[], BOUND);
     assert_eq!(rec.code, Some(0), "{}", rec.stderr);
     let mut events = Reader::open(&t).unwrap();
     let i = events.iter().position(|e| matches!(e, Event::Syscall { num: 328, args, .. } if args[1] == 0))

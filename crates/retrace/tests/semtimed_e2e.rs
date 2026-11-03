@@ -29,7 +29,7 @@ fn record(mode: &str, bound: u64) -> (Option<i32>, String, String, PathBuf) {
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
     let trace = std::env::temp_dir().join(format!("retrace-semtimed-{}-{n}.bin", std::process::id()));
     let r = util::run_bounded(util::bin(),
-        &["record-dyn", retrace_guest::SEMTIMED_DYN, "-o", trace.to_str().unwrap(), "--", mode], &[], bound);
+        &["record", "-o", trace.to_str().unwrap(), retrace_guest::SEMTIMED_DYN, mode], &[], bound);
     (r.code, String::from_utf8(r.stdout).unwrap(), r.stderr, trace)
 }
 

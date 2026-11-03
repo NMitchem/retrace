@@ -7,8 +7,21 @@ mod gdbserver;
 
 /// Where the bug banner sends a report (M50 §3b).
 const ISSUES_URL: &str = "https://github.com/NMitchem/retrace/issues";
-const USAGE: &str = "usage: retrace <record <guest> -o <trace> | record-dyn <exe> -o <trace> [-- <guest args...>] \
-                     | replay <trace> | debug <trace> --script '...' | gdbserver <trace> [--port <n>] [--exe <path>]>";
+const USAGE: &str = "usage: retrace <record [-o <trace>] <program> [<args>...] | replay <trace> \
+                     | lldb <trace> [--exe <path>] [-- <lldb args>...] | debug <trace> --script '...' \
+                     | gdbserver <trace> [--port <n>] [--exe <path>]>";
+const RECORD_USAGE: &str = "usage: retrace record [-o <trace>] <program> [<args>...]";
+const HELP: &str = "usage: retrace <command>
+
+  record [-o <trace>] <program> [<args>...]   record a program (static or dynamic); -o defaults to <program>.retrace
+  replay <trace>                              replay a recording, bit for bit
+  lldb <trace> [--exe <path>] [-- <lldb args>...]   debug a recording in lldb, with reverse commands
+  debug <trace> --script '<cmds>'             run debugger commands over a recording
+  gdbserver <trace> [--port <n>] [--exe <path>]   serve a recording to a gdb-remote client
+
+  retrace --version    print the version
+
+Programs retrace cannot run yet are listed in docs/walls.md.";
 
 /// One of retrace's own lines on its stderr. A reader that went away is not retrace's failure, so a
 /// failed write is dropped rather than panicking, as `eprintln!` would (Review Focus 1).
@@ -145,8 +158,10 @@ fn run(a: &[String]) -> i32 {
         panic!("RETRACE_DEBUG_PANIC is set: a deliberate internal error, the bug-banner control (M50 §3f)");
     }
     match a.get(1).map(String::as_str) {
-        Some("record") => record(a, false),
-        Some("record-dyn") => record(a, true),
+        Some("record") => record(a),
+        Some("record-dyn") => bad_input("record-dyn is now record: retrace record [-o <trace>] <program> [<args>...]"),
+        Some("--version" | "-V") => { println!("retrace {}", env!("CARGO_PKG_VERSION")); 0 }
+        Some("--help" | "-h" | "help") => { println!("{HELP}"); 0 }
         Some("replay") => replay(a),
         Some("debug") => debug_cmd(a),
         Some("gdbserver") => gdbserver_cmd(a),
@@ -168,21 +183,42 @@ fn no_hypervisor(why: &str) -> i32 {
         using retrace.entitlements from the root of the retrace repository"))
 }
 
-/// The value after `flag` among retrace's own arguments, which end at `--`; None when the flag is
-/// absent or has no value. A guest argument after `--` is never read as retrace's.
-fn flag_value<'a>(a: &'a [String], flag: &str) -> Option<&'a str> {
-    let own = &a[..a.iter().position(|s| s == "--").unwrap_or(a.len())];
-    own.iter().position(|s| s == flag).and_then(|i| own.get(i + 1)).map(String::as_str)
+/// What `retrace record` was given (M56 section 3b): options come before the program, and
+/// everything after the program is the program's.
+#[derive(Debug, PartialEq)]
+struct RecordArgs { out: Option<String>, program: String, args: Vec<String> }
+
+/// `a` is the whole argv. `Err` is the usage line.
+fn parse_record_args(a: &[String]) -> Result<RecordArgs, String> {
+    let mut i = 2;
+    let mut out = None;
+    loop {
+        match a.get(i).map(String::as_str) {
+            Some("-o") => match a.get(i + 1) {
+                Some(t) => { out = Some(t.clone()); i += 2; }
+                None => return Err(RECORD_USAGE.into()),
+            },
+            Some("--") => { i += 1; break; }
+            _ => break,
+        }
+    }
+    match a.get(i) {
+        Some(p) => Ok(RecordArgs { out, program: p.clone(), args: a[i + 1..].to_vec() }),
+        None => Err(RECORD_USAGE.into()),
+    }
 }
 
-/// `record <guest> -o <trace>`, and `record-dyn <exe> -o <trace> [-- <guest args...>]`, which loads
-/// the exe and its dylinker (/usr/lib/dyld, arm64e slice) and records it running through REAL dyld.
-fn record(a: &[String], dynamic: bool) -> i32 {
-    let usage = if dynamic { "usage: retrace record-dyn <exe> -o <trace> [-- <guest args...>]" }
-                else { "usage: retrace record <guest> -o <trace>" };
-    let (Some(guest), Some(out)) = (a.get(2).filter(|g| !g.starts_with('-')), flag_value(a, "-o")) else {
-        return bad_input(usage);
-    };
+/// The default trace name: the program's basename plus `.retrace`, in the working directory.
+fn default_trace_name(program: &str) -> String {
+    let base = Path::new(program).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| program.into());
+    format!("{base}.retrace")
+}
+
+/// `record [-o <trace>] <program> [<args>...]`. LC_LOAD_DYLINKER present records through the named
+/// dylinker (real dyld); absent, the freestanding static path.
+fn record(a: &[String]) -> i32 {
+    let r = match parse_record_args(a) { Ok(r) => r, Err(u) => return bad_input(&u) };
+    let guest = &r.program;
     let bytes = match std::fs::read(guest) {
         Ok(b) => b,
         Err(e) => return bad_input(&format!("cannot read {guest}: {e}")),
@@ -191,12 +227,17 @@ fn record(a: &[String], dynamic: bool) -> i32 {
         Ok(l) => l,
         Err(why) => return bad_input(&format!("{guest} {why}")),
     };
-    // Guest argv: argv[0] is the exe path (what the kernel passes and what dyld's
-    // `executable_path=` is derived from); everything after `--` is the guest's own.
+    let dynamic = exe.dylinker.is_some();
+    if !dynamic && !r.args.is_empty() {
+        return bad_input(&format!("a static program takes no arguments ({guest}); {RECORD_USAGE}"));
+    }
+    let named = r.out.is_some();
+    let out = r.out.clone().unwrap_or_else(|| default_trace_name(guest));
+    // Guest argv: argv[0] is the path as typed (what dyld's `executable_path=` is derived from).
     let mut argv = vec![guest.clone()];
-    if let Some(i) = a.iter().position(|s| s == "--") { argv.extend_from_slice(&a[i + 1..]); }
+    argv.extend(r.args.iter().cloned());
     let envp = if dynamic { program_env() } else { Vec::new() };
-    // M51 §3f (R3): refused before the VM exists, so nothing is written.
+    // M51 section 3f (R3): refused before the VM exists, so nothing is written.
     let size = retrace_core::start_args_bytes(&argv, &envp);
     if size > retrace_core::START_ARGS_LIMIT {
         return bad_input(&format!("the arguments and environment take {} KiB, more than retrace's limit of {} KiB - run it \
@@ -207,12 +248,16 @@ fn record(a: &[String], dynamic: bool) -> i32 {
         let dyld_path = exe.dylinker.clone().unwrap_or_else(|| retrace_guest::DYLD_PATH.to_string());
         let dyld_bytes = std::fs::read(&dyld_path).unwrap_or_else(|e| panic!("read dyld {dyld_path}: {e}"));
         let dyld = retrace_guest::parse_macho(retrace_guest::slice_arm64e(&dyld_bytes));
-        retrace_core::record_dynamic_opts(&exe, &dyld, &argv, Path::new(out), live(envp))
+        retrace_core::record_dynamic_opts(&exe, &dyld, &argv, Path::new(&out), live(envp))
     } else {
-        retrace_core::record_opts(&exe, Path::new(out), live(envp))
+        retrace_core::record_opts(&exe, Path::new(&out), live(envp))
     };
     match summary {
-        Ok(s) => finish(s.fall_throughs, &s.outcome),
+        Ok(s) => {
+            let code = finish(s.fall_throughs, &s.outcome);
+            if !named { say(&format!("retrace: saved the recording to {out}")); }
+            code
+        }
         Err(e) => bad_input(&format!("cannot write the trace {out}: {e}")),
     }
 }
@@ -295,5 +340,43 @@ mod live_output_tests {
         let full = std::io::Error::from_raw_os_error(28); // ENOSPC
         let line = write_failure_line(&full).expect("a full disk is reported");
         assert!(line.starts_with("retrace: cannot write the program's output: "), "{line}");
+    }
+}
+
+#[cfg(test)]
+mod record_args_tests {
+    use super::*;
+
+    fn v(a: &[&str]) -> Vec<String> { a.iter().map(|s| s.to_string()).collect() }
+
+    #[test]
+    fn a_bare_program() {
+        let r = parse_record_args(&v(&["retrace", "record", "./p"])).unwrap();
+        assert_eq!(r, RecordArgs { out: None, program: "./p".into(), args: vec![] });
+    }
+
+    #[test]
+    fn options_after_the_program_are_the_programs() {
+        let r = parse_record_args(&v(&["retrace", "record", "-o", "t", "./p", "-o", "x", "--help"])).unwrap();
+        assert_eq!(r, RecordArgs { out: Some("t".into()), program: "./p".into(), args: v(&["-o", "x", "--help"]) });
+    }
+
+    #[test]
+    fn dashdash_ends_retraces_options() {
+        let r = parse_record_args(&v(&["retrace", "record", "--", "-p"])).unwrap();
+        assert_eq!(r.program, "-p");
+    }
+
+    #[test]
+    fn missing_operands_are_errors() {
+        for a in [&["retrace", "record"][..], &["retrace", "record", "-o"], &["retrace", "record", "-o", "t"]] {
+            assert!(parse_record_args(&v(a)).is_err(), "{a:?}");
+        }
+    }
+
+    #[test]
+    fn default_names() {
+        assert_eq!(default_trace_name("./sub/crashy"), "crashy.retrace");
+        assert_eq!(default_trace_name("/bin/ls"), "ls.retrace");
     }
 }

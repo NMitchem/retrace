@@ -19,7 +19,7 @@ fn scratch(name: &str) -> PathBuf {
 }
 
 fn record(mode: &str, extra: &[&str], t: &Path) -> util::Bounded {
-    let mut argv = vec!["record-dyn", P, "-o", t.to_str().unwrap(), "--", mode];
+    let mut argv = vec!["record", "-o", t.to_str().unwrap(), P, mode];
     argv.extend_from_slice(extra);
     util::run_bounded(util::bin(), &argv, &[], BOUND)
 }

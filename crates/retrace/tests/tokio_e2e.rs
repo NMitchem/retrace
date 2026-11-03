@@ -75,8 +75,8 @@ fn trace_path() -> PathBuf {
 
 fn record(exe: &str, args: &[&str]) -> (util::Bounded, PathBuf) {
     let trace = trace_path();
-    let mut a = vec!["record-dyn", exe, "-o", trace.to_str().unwrap()];
-    if !args.is_empty() { a.push("--"); a.extend_from_slice(args); }
+    let mut a = vec!["record", "-o", trace.to_str().unwrap(), exe];
+    if !args.is_empty() { a.extend_from_slice(args); }
     (util::run_bounded(util::bin(), &a, &[], BOUND), trace)
 }
 

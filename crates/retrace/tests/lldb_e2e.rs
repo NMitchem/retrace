@@ -640,8 +640,8 @@ fn exec_trace() -> (PathBuf, PathBuf) {
     let target = dir.join("exec_tgt");
     std::fs::copy(retrace_guest::EXEC_TARGET_DYN, &target).unwrap();
     let trace = dir.join("t.bin");
-    let r = util::run_bounded(util::bin(), &["record-dyn", retrace_guest::EXECSELF_DYN, "-o", trace.to_str().unwrap(),
-                                             "--", "copy", target.to_str().unwrap()], &[], 300);
+    let r = util::run_bounded(util::bin(), &["record", "-o", trace.to_str().unwrap(), retrace_guest::EXECSELF_DYN,
+                                             "copy", target.to_str().unwrap()], &[], 300);
     assert_eq!(r.code, Some(0), "record the exec: {}", r.stderr);
     (trace, target)
 }
