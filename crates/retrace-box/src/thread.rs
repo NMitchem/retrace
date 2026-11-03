@@ -204,6 +204,9 @@ pub struct Thread {
     /// `uu_oldmask`: the handler runs under the argument mask, and returns to the mask the call
     /// found). Consumed by `Box_::deliver_signal_to`.
     pub frame_mask: Option<u32>,
+    /// M55 §3f: bit `(sig - 1)` of the pending signals the kernel raised (SIGPIPE after an `EPIPE`), whose
+    /// frame carries `si_code` 0 rather than `SI_USER` when they are materialised.
+    pub kernel_origin: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -230,6 +233,7 @@ impl ThreadTable {
                 redirected: false,
                 sprr: 0,
                 frame_mask: None,
+                kernel_origin: 0,
             }],
             current: 0,
             next_id: MAIN_THREAD_ID + 1,
@@ -267,7 +271,7 @@ impl ThreadTable {
         self.next_id += 1;
         self.threads = vec![Thread {
             id, ctx, state: ThreadState::Runnable, stack: (0, 0), mask, pending,
-            altstack: None, redirected: false, sprr: 0, frame_mask: None,
+            altstack: None, redirected: false, sprr: 0, frame_mask: None, kernel_origin: 0,
         }];
         self.current = 0;
         id
@@ -358,6 +362,20 @@ impl ThreadTable {
         self.threads[tid].mask & Self::sig_bit(sig) != 0
     }
 
+    /// M55 §3f: pend `sig` as one the kernel raised (its frame is `si_code` 0).
+    pub fn pend_kernel(&mut self, tid: usize, sig: u64) {
+        self.pend(tid, sig);
+        self.threads[tid].kernel_origin |= Self::sig_bit(sig);
+    }
+
+    /// Was `sig` pended on `tid` by the kernel? Clears the mark: asked once, at the delivery.
+    pub fn take_kernel_origin(&mut self, tid: usize, sig: u64) -> bool {
+        let bit = Self::sig_bit(sig);
+        let was = self.threads[tid].kernel_origin & bit != 0;
+        self.threads[tid].kernel_origin &= !bit;
+        was
+    }
+
     pub fn pend(&mut self, tid: usize, sig: u64) {
         self.threads[tid].pending |= Self::sig_bit(sig);
     }
@@ -444,6 +462,7 @@ impl ThreadTable {
             redirected: false,
             sprr: 0,
             frame_mask: None,
+            kernel_origin: 0,
         });
         self.threads.len() - 1
     }
@@ -585,7 +604,11 @@ impl ThreadTable {
         // not make its timeout a wall: `sleep(2)` with SIGALRM blocked returns 0 and the handler
         // runs at the unmask (M16's masked pend). A signal that is deliverable cannot be pending
         // here, because it would have ended the sleep (`interrupt`).
-        let pending = if matches!(self.threads[tid].state, ThreadState::Blocked(BlockReason::Sleep { .. })) {
+        // M55 §3h: the same holds for a semaphore or `kevent` waiter, because a signal that is
+        // deliverable interrupts it at the raise; only a masked one can be pending here, and it rides
+        // through the wake until the unmask (M16).
+        let pending = if matches!(self.threads[tid].state,
+            ThreadState::Blocked(BlockReason::Sleep { .. } | BlockReason::Sem { .. } | BlockReason::Kevent { .. })) {
             self.threads[tid].pending & !self.threads[tid].mask
         } else {
             self.threads[tid].pending
@@ -593,8 +616,9 @@ impl ThreadTable {
         if pending != 0 {
             retrace_arch::refuse!(Threads, "M48: a signal is pending on thread {tid} (set {pending:#x}; bit n is signal n+1, \
                  masked or not), and this wake would write its reply over the blocked context. \
-                 Measure the kernel's EINTR answer for a thread blocked in kevent or psynch_cvwait, \
-                 as blockedctx.rs does for __ulock_wait, before modelling it.");
+                 What still reaches this is a masked or unmasked signal on a condition-variable, mutex or poll waiter's \
+                 wake (a kevent, semaphore or sleep waiter is interrupted at the raise, M55). Measure the kernel's \
+                 EINTR answer for that wait, as blockedctx.rs does for __ulock_wait, before modelling it.");
         }
         assert!(matches!(self.threads[tid].state,
                 ThreadState::Blocked(BlockReason::Kevent { .. } | BlockReason::Cv { .. } | BlockReason::Sleep { .. }
@@ -611,9 +635,9 @@ impl ThreadTable {
     /// thread keeps K8's posture (the signal pends and the wake refuses).
     pub fn interrupt(&mut self, tid: usize) {
         match self.threads[tid].state {
-            ThreadState::Blocked(BlockReason::Sleep { .. }) => {}
+            ThreadState::Blocked(BlockReason::Sleep { .. } | BlockReason::Sem { .. } | BlockReason::Kevent { .. }) => {}
             ThreadState::Blocked(BlockReason::SigSuspend { saved_mask }) => self.threads[tid].frame_mask = Some(saved_mask),
-            s => panic!("M53: interrupt of thread {tid}, which is {s:?}, not asleep or in sigsuspend"),
+            s => panic!("M53: interrupt of thread {tid}, which is {s:?}, not asleep, in sigsuspend, a semaphore wait or kevent"),
         }
         self.threads[tid].state = ThreadState::Runnable;
     }

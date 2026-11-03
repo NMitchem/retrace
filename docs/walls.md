@@ -59,8 +59,25 @@ work:
   `stat64_extended` `*xsecurity_size` past its buffer's backing (`syscall 341 was given a length of …`).
   Natively the call may succeed, because the kernel writes only what it needs, but retrace cannot size the
   memory it must watch. Pass the buffer's real size;
-- `chroot`, which is privileged and stays out of scope for good, and `socketpair`, which is why tokio's
-  runtime stops (`socketpair (syscall 135)`).
+- `chroot`, which is privileged and stays out of scope for good.
+
+Since M55 `socketpair` of a Unix-domain stream pair runs, which is what tokio's runtime needs, and the pair
+is a guest object like a pipe: `poll`, `select` and the kqueue filters (with `EV_CLEAR` and `EV_RECEIPT`) see
+it. What still stops here, each line starting `M55:` and naming the call and its descriptor:
+
+- a `socketpair` of another type or domain (`M55: socketpair of SOCK_DGRAM: only a stream pair is modelled`,
+  or `M55: socketpair of domain … succeeded on the host and is not modelled`). Natively a datagram pair works;
+  retrace has no model of datagram boundaries;
+- on a guest socket end, `shutdown`, `sendmsg` (any: its msghdr iovec is not translated; with control data an `SCM_RIGHTS` descriptor would also carry a
+  host number), `sendmsg_x`, and `setsockopt` of `SO_SNDBUF`, `SO_RCVBUF`, `SO_SNDLOWAT` or `SO_RCVLOWAT`,
+  because the model's buffer constants would go stale (`… on guest socket fd N is not modelled`);
+- `fcntl(F_SETFL)` on a guest pipe or socket end with a status flag beyond `O_NONBLOCK`, `O_APPEND` and
+  `O_ASYNC` (`M55: fcntl(F_SETFL, 0x…) on guest fd N: a status flag … is not modelled`);
+- `bind`, `listen` and `accept`, which have no row (`bind (syscall 104)`). `socket` and `connect` are forwarded, but a
+  descriptor they make is not a guest end, so waiting on it stops under [Threads](#threads). tokio's TCP and Unix
+  listener tests stop at `bind`.
+
+The successors are network sockets and datagram pairs.
 
 ## Mach messages
 
@@ -115,7 +132,14 @@ Line Tools (`DEVELOPER_DIR=/Library/Developer/CommandLineTools`).
 
 The program used a signal in a way retrace does not model yet. These reach it today:
 
-- a signal raised while blocked, whose default action ends the process when it is unblocked;
+- a signal raised while blocked, whose default action ends the process when it is unblocked (a signal that is
+  not blocked, with such an action, ends the process at the raise since M55, whatever its target is doing);
+- a handled signal sent to a thread blocked in a condition variable (`psynch_cvwait`), a mutex
+  (`psynch_mutexwait`), `poll`, `select` or `pselect`, or a parked workqueue thread (`M55: a handled signal
+  (SIGUSR1) to thread N, blocked in psynch_cvwait: delivery there is not modelled`). Natively the signal is
+  delivered at once and the wait returns early; the kernel's return for a condition variable or mutex carries
+  an effect on its sequence word that retrace does not reproduce. A multi-thread tokio program that
+  signals itself while `main` waits in `block_on` reaches this (`tk_kill_mt`): a process-directed signal goes to main first;
 - a hardware fault on a thread that has its signal blocked, which the program did not survive natively either;
 - `kill` with a signal other than 0 to another process;
 - `terminate_with_payload`, which ends a process by its pid;
@@ -146,25 +170,37 @@ here: a contended `os_unfair_lock` or any `__ulock_wait2` (544), the mach semaph
 by thread id.
 
 Since M53 a duplicated kqueue is one kqueue, and `poll`, `select` and `pselect` over a program's own pipes are
-modelled. What stops here: `poll`, `select` or `pselect` on a descriptor that is not a guest pipe end (a file,
-a terminal, a socket), `pselect` with a signal mask, a write end in a `select` read set or a read end in a write
+modelled, and since M55 over its own socket pairs too. What stops here: `poll`, `select` or `pselect` on a
+descriptor that is not a guest pipe or socket end (a file, a terminal), `pselect` with a signal mask, a write end in a `select` read set or a read end in a write
 set, a `poll` over 4096 entries, closing a descriptor a blocked `poll` or `select` watches, closing the kqueue
 descriptor a `kevent` waiter blocks on, and an `EVFILT_USER` add that carries both `EV_DISABLE` and
-`NOTE_TRIGGER`. Each line starts `M53:` or names the call and its descriptor. A program that reaches `socketpair`
-(tokio's runtime) stops under [Syscalls](#syscalls).
+`NOTE_TRIGGER`. Each line starts `M53:` or names the call and its descriptor. A program that reaches `bind`
+or a socket other than a stream pair stops under [Syscalls](#syscalls).
 
-A signal that arrives while a thread waits in `poll`, a timed condition-variable wait, a timed `kevent`, a
-semaphore or a mutex stops the recording here too. A signal that ends a `sleep` or a `sigsuspend` does not: it
-runs its handler and the call returns `EINTR`. A signal that is pending at any other wake
+Since M55 a read or write that would wait for another thread stops here, where before it hung the recorder.
+A blocking `read` on an empty guest pipe or socket end whose other side is still open, and a blocking write
+larger than the free room (65536 bytes for a pipe from empty, 8192 per direction for a socket), end with
+`M55: read on guest pipe fd N would wait for another thread to write` (or `write of N bytes on guest socket fd
+M would wait for another thread to read`, `… blocking I/O between threads is not modelled`). Natively the
+call blocks until another thread feeds or drains the end and then completes. Setting `O_NONBLOCK` first (tokio
+and mio do) avoids it. Two more walls land here: a blocking `recv` with `MSG_WAITALL` for more bytes than are held, on a
+guest socket end whose peer is open (`… with MSG_WAITALL would wait for N more bytes …`), and a guest end whose byte count
+the model lost, for example after a read that returned more than it counted (`M55: socket N: the byte count is unknown`). The successor is a block-and-retry model, which would make the blocked thread
+runnable when the call can complete.
+
+A handled signal that arrives while a thread waits in `poll`, a condition variable or a mutex stops the
+recording here too (see [Signals](#signals)). A signal that ends a `sleep`, a `sigsuspend`, a semaphore wait
+(`x0` 14, called again) or a `kevent` (`EINTR`) does not, since M55: it runs its handler and the call returns
+as natively. A signal that is pending at any other wake
 is listed under [Signals](#signals).
 
 One case is special: every thread is blocked and nothing is left to wake any of them. Natively that
 program would hang forever, so the line says so. Since M53 it also names a thread blocked in `sigsuspend`
 (`thread N waits in sigsuspend for a signal nothing can send`), which is what a `pause()` with no timer and no
 sender is. If the same program does not hang outside
-retrace, that is a bug in retrace; please report it. One exception is a known limit, not a bug: a thread
-blocked in `poll`, `kevent` or a wait while it holds a signal it cannot take (K8), for example `alarm(n)`
-followed by an infinite `poll`, also ends here. Natively that call returns `EINTR`.
+retrace, that is a bug in retrace; please report it. Before M55 a thread blocked in `poll` or a wait with a signal it
+could not take also ended here; since M55 a handled signal to such a thread is refused at the raise instead (see
+[Signals](#signals)).
 
 A program that spins forever waiting for another thread, without blocking, is not a wall: it hangs
 under retrace, where natively the other thread would run on another core. retrace cannot tell a spin from slow work by anything in the

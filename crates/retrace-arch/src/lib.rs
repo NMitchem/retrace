@@ -75,6 +75,8 @@ pub const SYS_IOCTL: u64 = 54;
 pub const SYS_DUP2: u64 = 90;
 pub const SYS_FCNTL: u64 = 92;
 pub const SYS_SOCKET: u64 = 97;
+/// `socketpair(int domain, int type, int protocol, int sv[2])` (M55).
+pub const SYS_SOCKETPAIR: u64 = 135;
 pub const SYS_CONNECT: u64 = 98;
 /// M44: `connect`'s `_nocancel` twin (SDK `SYS_connect_nocancel 409`). No corpus guest reaches it;
 /// the twin rule tables it (`tests/nocancel.rs`).
@@ -335,6 +337,13 @@ pub enum Ret {
     /// and its own stale `x1` — `/bin/csh`/`/bin/tcsh` used both ends one landmark before their
     /// `fork` wall and got EBADF twice (M37 evidence, audit 3).
     FdPair,
+    /// Two new descriptors written through the pointer argument at this index, as `int[2]` in guest
+    /// memory, with `x0` 0 — `socketpair` (bsd/kern/uipc_syscalls.c `socketpair`, `copyout` of `sv`; M55).
+    /// `allocates_fd` and `returns_fd_pair` are false for it. The forward writes two HOST descriptors
+    /// through the pointer; `forward_and_diff` binds both to guest slots (`bind_returned_pair`, `sv[0]`
+    /// first), rewrites the 8 bytes with the guest numbers and records that rewrite as the call's write,
+    /// so replay applies it and compares its own two `alloc()`s with it. `returns_fd_pair_out` is the view.
+    FdPairOut(usize),
 }
 
 /// One syscall's argument kinds, in register order, plus its return kind.
@@ -1004,6 +1013,11 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
         // and `retval[1]`). M38 models the pair: both descriptors are bound (`bind_returned_pair`,
         // read end first) and `x1` is captured as the event's `ret1`; `Ret::FdPair`'s doc has it.
         42 => row!(Ret::FdPair, []),
+        // socketpair(int domain, int type, int protocol, int sv[2]) → two NEW descriptors, written through
+        // `sv` (M55; bsd/kern/uipc_syscalls.c). The `Ptr` lets `prepare_forward_pointers` answer EFAULT for an
+        // unwritable `sv` before any forward, as natively (no descriptor is consumed, t0 p0). The 8 bytes
+        // are the kernel's own bound. `Ret::FdPairOut`'s doc has the rest.
+        135 => row!(Ret::FdPairOut(3), [Scalar, Scalar, Scalar, Ptr]),
         // kqueue(void) → a NEW descriptor (bsd/kern/kern_event.c `kqueue`). Bound like open's
         // (EXPECTED_DIFFS; exercised by /bin/wait4path). 374 is emulated only for the workqueue
         // kqueue (M45), never on a descriptor; 363 has a row since M48 and is emulated on this
@@ -1438,6 +1452,8 @@ pub fn ptr_use(num: u64, i: usize) -> Option<PtrUse> {
         | (58, 1) | (SYS_SHARED_REGION_CHECK_NP, 0) | (483, 1) | (427, 0)
         // task_read_for_pid `t` (4 bytes out, bsd/kern/kern_proc.c); posix_spawn `pid` (refused, M38).
         | (539, 2) | (244, 0)
+        // M55: socketpair `sv` (two ints out, bsd/kern/uipc_syscalls.c).
+        | (SYS_SOCKETPAIR, 3)
         // The mach traps: vm_allocate and vm_map `address`, port_construct and host_create_mach_voucher
         // `name` and `voucher`, mach_timebase_info `info`.
         | (MACH_VM_ALLOCATE_TRAP, 1) | (MACH_VM_MAP_TRAP, 1) | (MACH_PORT_CONSTRUCT_TRAP, 3)
@@ -1498,6 +1514,12 @@ pub fn allocates_fd(num: u64) -> bool { arg_kinds(num).is_some_and(Shape::alloca
 /// is bound by `Box_::bind_returned_pair`, never by `bind_returned_fd`, and `x1` is written on
 /// both sides only for a row this answers true for (M38).
 pub fn returns_fd_pair(num: u64) -> bool { arg_kinds(num).is_some_and(|s| s.ret == Ret::FdPair) }
+/// Does `num` write two new descriptors through a pointer argument (`socketpair`)? The index of that
+/// argument. View over `arg_kinds`. M55: bound by `Box_::bind_returned_pair`, rewritten in guest memory,
+/// and recorded as the call's own write.
+pub fn returns_fd_pair_out(num: u64) -> Option<usize> {
+    match arg_kinds(num)?.ret { Ret::FdPairOut(i) => Some(i), _ => None }
+}
 /// The destination buffer `num` fills, as `(argument index, where its length lives)`. View.
 pub fn dest_buffer(num: u64) -> Option<(usize, DestLen)> { arg_kinds(num)?.dest_buffer() }
 /// Refused-by-value family: a destination behind a nested guest pointer. View.
@@ -1661,6 +1683,8 @@ pub const ITIMER_VIRTUAL: u64 = 1;
 pub const ITIMER_PROF: u64 = 2;
 /// `SIGALRM`, the signal `ITIMER_REAL` raises.
 pub const SIGALRM: u64 = 14;
+/// `SIGPIPE`, raised by a write that returns `EPIPE` (M55).
+pub const SIGPIPE: u64 = 13;
 pub const SYS_SIGRETURN: u64 = 184;
 pub const SYS_PTHREAD_KILL: u64 = 328;
 pub const SYS_PTHREAD_SIGMASK: u64 = 329;
@@ -1783,6 +1807,8 @@ pub const SWITCH_OPTION_WAIT: u64 = 2;
 /// `kern_return_t` values the semaphore family answers (`mach/kern_return.h`).
 pub const KERN_INVALID_NAME: u64 = 15;
 pub const KERN_INVALID_VALUE: u64 = 18;
+/// M55 §3h (t0 `p0/semsig`): what a handled signal ends a semaphore wait with.
+pub const KERN_ABORTED: u64 = 14;
 pub const KERN_TERMINATED: u64 = 37;
 pub const KERN_OPERATION_TIMED_OUT: u64 = 49;
 

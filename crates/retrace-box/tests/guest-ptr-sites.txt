@@ -83,3 +83,5 @@ crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies
 crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies a recorded Region list (or the empty list); the regions were checked or recomputed on record
 crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies a recorded Region list (or the empty list); the regions were checked or recomputed on record
 crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies a recorded Region list (or the empty list); the regions were checked or recomputed on record
+crates/retrace-box/src/lib.rs	forward_and_diff	read_guest	internal: socketpair's sv: the host kernel has just written it (the forward succeeded), so the pointer is proven; prepare_forward_pointers answered EFAULT first
+crates/retrace-box/src/lib.rs	forward_and_diff	write_guest	internal: socketpair's sv: the same proven pointer, rewritten with the guest numbers

@@ -40,3 +40,5 @@ crates/retrace-box/src/thread.rs	unpark	Threads	M46: unpark of parked workqueue 
 crates/retrace-box/src/thread.rs	wake	Threads	M48: a signal is pending on thread
 crates/retrace-core/src/lib.rs	take_pending_delivery	Signals	signal
 crates/retrace-box/src/lib.rs	forward_and_diff	Syscalls	syscall
+crates/retrace-box/src/lib.rs	forward_and_diff	Syscalls	M55: socketpair of domain
+crates/retrace-box/src/lib.rs	fire_itimer	Signals	M55:

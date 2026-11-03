@@ -363,6 +363,104 @@ fn wall_or_bug(m: String) -> String {
     if Unsupported::from_marked(&m).is_some() { m } else { panic!("{m}") }
 }
 
+/// One raise to record, for `record_raise` (M55 §3f): `kill`, `__pthread_kill` and SIGPIPE share the handling
+/// that follows `classify_raise`.
+struct RecordRaise {
+    num: u64,
+    args: [u64; 8],
+    /// The raising thread: the writer for SIGPIPE.
+    thread: u32,
+    sig: u64,
+    target: usize,
+    kind: retrace_box::RaiseKind,
+    /// The delivered frame's `si_code`: `SI_USER` for a `kill`, 0 for the kernel's SIGPIPE.
+    si_code: u64,
+    /// The raising call's own return, which a handler's frame on the raising thread must show.
+    ret: u64,
+    err: bool,
+    /// Whether this raise appends the call's `Syscall` landmark (`kill`, `__pthread_kill`) or the call's
+    /// generic arm already did (SIGPIPE, after the write's).
+    landmark: bool,
+    /// The kernel raised it: a pended one is delivered with `si_code` 0.
+    kernel: bool,
+}
+
+/// The post-classification handling of a raise, on record (M55 §3f): pend, ignore, terminate, deliver or
+/// interrupt, or refuse. `Some(outcome)` ends the recording (a terminal `Event::Signal` and the final
+/// snapshot). Replay's mirror is `ReplaySession::mirror_raise`.
+fn record_raise(w: &mut Writer, b: &mut Box_, count: &mut usize, r: &RecordRaise) -> Result<Option<Outcome>, String> {
+    use retrace_box::RaiseKind as K;
+    let RecordRaise { num, args, thread, sig, target, kind, si_code, ret, err, landmark, kernel } = *r;
+    let landmark_event = |w: &mut Writer, count: &mut usize, what: &str| -> Result<(), String> {
+        if landmark {
+            w.append(&Event::Syscall { num, args, ret: 0, ret1: 0, err: false, writes: vec![], thread })
+                .map_err(|e| format!("append {what}: {e}"))?;
+            *count += 1;
+        }
+        Ok(())
+    };
+    match kind {
+        // M55 §3h: before the append and before anything changes, so a replay never meets a landmark for it.
+        K::Refuse => Err(wall(WallCategory::Signals, format!("M55: {}", b.refuse_raise_text(target, sig)))),
+        K::Pend => {
+            // M16: pended on the TARGET and materialised at its next unmask or wake, a syscall landmark.
+            landmark_event(w, count, "pended raise")?;
+            if kernel { b.threads_mut().pend_kernel(target, sig); } else { b.threads_mut().pend(target, sig); }
+            if landmark { b.set_x0_err_and_return(0, false); }
+            Ok(None)
+        }
+        // Ignored, or defaulting to ignore: one landmark, nothing delivered.
+        K::Ignore => {
+            landmark_event(w, count, "ignored raise")?;
+            if landmark { b.set_x0_err_and_return(0, false); }
+            Ok(None)
+        }
+        // M12: the ordinary Syscall event first, so the oracle still checks (num, args); the delivery is a
+        // second landmark. esr/far are 0: no hardware fault happened.
+        K::Deliver | K::Interrupt => {
+            let retrace_box::Disposition::Handler(handler) = b.sigtable().action(sig).disp else {
+                unreachable!("classify_raise returned Deliver or Interrupt for a signal with no handler") };
+            landmark_event(w, count, "caught raise")?;
+            // The raising call's return, in the context the frame is built from: PSTATE comes from SPSR_EL1,
+            // which `set_x0_err_and_return` never writes (spikes/sigraisex0.c). A kill succeeded (0); a
+            // SIGPIPE's write returned EPIPE.
+            b.complete_syscall_before_delivery(ret, err);
+            // M53 §3f (C2): a sleeper, `sigsuspend`er, semaphore or `kevent` waiter is ended first.
+            if kind == K::Interrupt { b.interrupt_for_signal(target); }
+            let (writes, resume_pc) = b.deliver_signal_to(target, sig, si_code, 0, 0, 0);
+            // M16: `thread` here is the TARGET, not the caller.
+            w.append(&Event::SignalDelivery { sig, si_code, si_addr: 0, handler, resume_pc, writes, thread: target as u32 })
+                .map_err(|e| format!("append signal delivery: {e}"))?;
+            *count += 1;
+            Ok(None)
+        }
+        // TERMINAL: the event, then the final full-memory snapshot. `thread` is the RAISING thread
+        // (`Event::Signal`'s format doc), not `target`.
+        K::Terminate => {
+            let pc = b.position();
+            let final_snap = b.snapshot();
+            w.append(&Event::Signal { sig, pc, thread }).map_err(|e| format!("append signal: {e}"))?;
+            w.append(&final_snap).map_err(|e| format!("append final snapshot: {e}"))?;
+            *count += 2;
+            Ok(Some(Outcome::Signal { sig }))
+        }
+    }
+}
+
+/// M55 §3f: the SIGPIPE a write's `EPIPE` raises, on record. Called after the write's own landmark is
+/// appended and its return applied, by the generic arm and the iovec arm. The target is
+/// `process_signal_target` (SIGPIPE is process-directed, measured), and `Some` ends the recording.
+#[allow(clippy::too_many_arguments)]
+fn record_sigpipe(w: &mut Writer, b: &mut Box_, count: &mut usize, thread: u32, num: u64, args: [u64; 8], ret: u64, err: bool)
+    -> Result<Option<Outcome>, String> {
+    if !b.sigpipe_due(num, args, ret, err) { return Ok(None); }
+    let sig = retrace_arch::SIGPIPE;
+    let target = b.process_signal_target(sig);
+    let kind = b.classify_raise(target, sig);
+    record_raise(w, b, count, &RecordRaise { num, args, thread, sig, target, kind, si_code: 0, ret, err,
+                                              landmark: false, kernel: true })
+}
+
 fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>) -> Result<RecordSummary, String> {
     let mut w = Writer::create(trace_path).map_err(|e| format!("create trace: {e}"))?;
     let mut count = 0usize;
@@ -1100,13 +1198,13 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                 if !deliverable.is_empty() {
                     return Err(wall(WallCategory::Signals, format!(
                     "semaphore signal woke thread(s) {deliverable:?} carrying a pending deliverable \
-                     signal. M18 Stage 2b deliberately does NOT materialise at this wake: unlike \
-                     __ulock_wake, the saved context of a semaphore-parked thread is unmeasured, so \
-                     the completed-syscall correction M17 applies there would be a guess here — and \
-                     waking the thread without materialising strands the signal where \
-                     assert_no_stranded_signals cannot see it. Measure the parked thread's saved \
-                     x0/SPSR (the blockedctx.rs shape) and mirror the SYS_ULOCK_WAKE arm on BOTH \
-                     sides before allowing this.")));
+                     signal. Since M55 a handled signal interrupts a semaphore wait at the raise and a \
+                     masked one does not count as deliverable, so only a signal unmasked while the \
+                     thread was parked reaches this wake. M18 Stage 2b deliberately does NOT \
+                     materialise there: the saved context of a semaphore-parked thread at a wake is \
+                     unmeasured, so the completed-syscall correction M17 applies would be a guess — \
+                     and waking the thread without materialising strands the signal where \
+                     assert_no_stranded_signals cannot see it.")));
                 }
                 w.append(&Event::Syscall { num, args, ret: rc, ret1: 0, err: false, writes: vec![], thread })
                     .map_err(|e| format!("append sem_signal: {e}"))?; count += 1;
@@ -1376,80 +1474,11 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                 // state, then its disposition — a `Box_` method precisely so replay's mirror and the
                 // timer consult the identical predicate rather than a second copy of it.
                 let kind = b.classify_raise(target, sig);
-                if kind == retrace_box::RaiseKind::Pend {
-                    // M16 replaces M11's assert: M11 modelled no pending set (measured: no gate
-                    // guest raised a blocked signal; abort() unblocks SIGABRT before raising), so
-                    // it could only refuse this case, not handle it. The signal goes PENDING on the
-                    // TARGET thread and is materialised at the next unmask — a syscall landmark,
-                    // which is what keeps delivery visible to both dispatch loops. Note
-                    // sigpending's always-empty answer stops being true now that a pending set
-                    // exists.
-                    w.append(&Event::Syscall { num, args, ret: 0, ret1: 0, err: false, writes: vec![], thread })
-                        .map_err(|e| format!("append pended raise: {e}"))?; count += 1;
-                    b.threads_mut().pend(target, sig);
-                    b.set_x0_err_and_return(0, false);
-                } else {
-                    match kind {
-                        // M12: the self-raise counterpart of the fault path. The ordinary Syscall
-                        // event is appended FIRST, so the divergence oracle still checks (num, args)
-                        // and the kill safety boundary above still runs; the delivery is a second
-                        // landmark. esr/far are 0: no hardware fault happened, and inventing a
-                        // syndrome would be the lie M11 refused when it kept Event::Signal out of
-                        // Event::Crash.
-                        retrace_box::RaiseKind::Deliver | retrace_box::RaiseKind::Interrupt => {
-                            let retrace_box::Disposition::Handler(handler) = b.sigtable().action(sig).disp else {
-                                unreachable!("classify_raise returned Deliver or Interrupt for a signal with no handler") };
-                            w.append(&Event::Syscall { num, args, ret: 0, ret1: 0, err: false, writes: vec![], thread })
-                                .map_err(|e| format!("append caught raise: {e}"))?; count += 1;
-                            // The raise SUCCEEDS, and the CALLER's frame must say so — regardless of
-                            // whether the caller is also the receiver. This delivery happens at a
-                            // syscall boundary, so the context the kernel snapshots on the CALLER is
-                            // the POST-return one: x0 = 0 and PSTATE.C clear, not the pid the guest
-                            // passed and whatever flags it happened to carry. Measured in
-                            // spikes/sigraisex0.c; see complete_syscall_before_delivery, which exists
-                            // because the frame's PSTATE comes from SPSR_EL1 rather than from the
-                            // reg::CPSR that set_x0_err_and_return writes. It always operates on the
-                            // live vCPU (the caller), never on `target`'s saved context, so it needs
-                            // no split for a cross-thread delivery.
-                            b.complete_syscall_before_delivery(0, false);
-                            // M53 §3f (C2): a sleeper or a `sigsuspend`er is ended first, with EINTR.
-                            if kind == retrace_box::RaiseKind::Interrupt { b.interrupt_for_signal(target); }
-                            let (writes, resume_pc) =
-                                b.deliver_signal_to(target, sig, retrace_arch::SI_USER, 0, 0, 0);
-                            // M16: `thread` here is the TARGET, not the caller — the receiving
-                            // thread the trace-format doc comment on Event::SignalDelivery promises.
-                            w.append(&Event::SignalDelivery { sig, si_code: retrace_arch::SI_USER,
-                                                              si_addr: 0, handler, resume_pc, writes,
-                                                              thread: target as u32 })
-                                .map_err(|e| format!("append signal delivery: {e}"))?; count += 1;
-                        }
-                        // Ignored, or defaulting to ignore: one landmark, nothing delivered.
-                        retrace_box::RaiseKind::Ignore => {
-                            w.append(&Event::Syscall { num, args, ret: 0, ret1: 0, err: false, writes: vec![], thread })
-                                .map_err(|e| format!("append ignored raise: {e}"))?; count += 1;
-                            b.set_x0_err_and_return(0, false);
-                        }
-                        retrace_box::RaiseKind::Pend => unreachable!("handled above"),
-                        // TERMINAL. Same shape as the Exit and Crash arms above: the event, then
-                        // the final full-memory snapshot, then break. `thread` is the CALLER
-                        // here, not `target` (in scope above, for __pthread_kill): Event::Signal's
-                        // format doc (retrace-trace) permanently defines `thread` as the RAISING
-                        // thread, so that it names the same event as `pc`, the raise site. M53 §3f:
-                        // the timer's SIGALRM with no handler reaches this arm as a `kill` the box
-                        // hands back from `run()` (`timer_terminal_stop`), the caller being whichever
-                        // thread was current when it fired.
-                        retrace_box::RaiseKind::Terminate => {
-                            let pc = b.position();
-                            let final_snap = b.snapshot();
-                            w.append(&Event::Signal { sig, pc, thread })
-                                .map_err(|e| format!("append signal: {e}"))?; count += 1;
-                            w.append(&final_snap)
-                                .map_err(|e| format!("append final snapshot: {e}"))?; count += 1;
-                            outcome = Outcome::Signal { sig };
-                            break;
-                        }
-                    }
-                }
+                // M55 §3h: a handler for a thread blocked where its interruption is not modelled ends the
+                // recording at this raise's wall. The rest, per kind, is `record_raise`, which SIGPIPE shares.
+                let raise = RecordRaise { num, args, thread, sig, target, kind, si_code: retrace_arch::SI_USER,
+                                          ret: 0, err: false, landmark: true, kernel: false };
+                if let Some(o) = record_raise(&mut w, &mut b, &mut count, &raise)? { outcome = o; break; }
             }
 
             // Unmodelled, and loud about it. Each of these would otherwise reach forward_and_diff
@@ -1628,12 +1657,14 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
             // changed bytes. This arm sits before the generic arm, whose assert makes that a checked fact.
             // Replay's mirror calls the same Box_::iovec_prepare with the same arguments.
             Stop::Syscall { num, args } if retrace_arch::is_iovec(num) => {
+                b.would_block(num, args)?;
                 let (ret, err, writes, console_write) = b.guest_iovec(num, args).map_err(wall_or_bug)?;
                 if let Some((stream, bytes)) = console_write { console.write(stream, &bytes); }
                 w.append(&Event::Syscall { num, args, ret, ret1: 0, err, writes, thread })
                     .map_err(|e| format!("append iovec: {e}"))?; count += 1;
                 b.set_x0_err_and_return(ret, err);
                 b.note_fd_effects(num, args, ret, 0, err).map_err(wall_or_bug)?;
+                if let Some(o) = record_sigpipe(&mut w, &mut b, &mut count, thread, num, args, ret, err)? { outcome = o; break; }
             }
             // M48 §3e: every SDK psynch number is EMULATED, never forwarded (see Box_::guest_psynch).
             // Forwarded, a psynch call acts on the HOST's psynch state keyed by retrace's own
@@ -2047,6 +2078,12 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                 // the recording here as a wall. It comes after the "never forwarded" asserts above,
                 // which guard arms that must exist, and before the M27 assert below, which is now a
                 // backstop, like `forwarded_shape`'s panic inside `forward_and_diff`.
+                // M55 §3b, §3c: a datagram pair, and a call on a guest socket end the model cannot answer
+                // (`shutdown` has no row), end the recording at a wall before anything is forwarded. Record-only,
+                // and ahead of the generic refusal so the wall names the socket call.
+                if let Some(m) = b.socket_refusal(num, args) { return Err(m); }
+                // M55 §3g: a blocking call that would wait for another thread is a wall, before any forward.
+                b.would_block(num, args)?;
                 if let Some(u) = retrace_arch::refusal_before_forward(num) { return Err(u.marked()); }
                 // M52 §3c (T2-pidinfo): a thread looked up by id names an id the host never issued.
                 if let Some(u) = retrace_arch::proc_info_refusal(num, &args) { return Err(u.marked()); }
@@ -2086,6 +2123,8 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                 // after its return is set, as replay's generic mirror does. A refusal stops the
                 // recorder after this landmark: the forward has already happened.
                 b.note_fd_effects(num, args, ret, ret1, err).map_err(wall_or_bug)?;
+                // M55 §3f: an EPIPE on a guest end raises SIGPIPE, after the write's own landmark.
+                if let Some(o) = record_sigpipe(&mut w, &mut b, &mut count, thread, num, args, ret, err)? { outcome = o; break; }
             }
             // A stage-2 abort. `Box_::resolve_stage2` (M49 F1) is the one copy of the chain: the
             // cache pager and the reservation committer, regenerated identically here and on replay
@@ -2375,6 +2414,55 @@ impl ReplaySession {
         }
     }
 
+    /// M55 §3f: the post-classification handling of a raise, on replay: the mirror of `record_raise`, shared by
+    /// the `kill` and `__pthread_kill` mirror and SIGPIPE's. `Some` is a result to return; `None` means the
+    /// raise left nothing more to consume (pended or ignored) and the caller finishes the call's landmark.
+    ///
+    /// `call` is `Some((num, args))` for a `kill`: its `Syscall` landmark is still ahead, so a delivery
+    /// checks it (this is that arm's `verify_thread` site) and a terminal replaces it. It is `None` for
+    /// SIGPIPE, whose write landmark the generic tail has applied: a terminal or a delivery then consumes it
+    /// first. `ret`/`err` are the raising call's return, which a handler's frame on its thread shows.
+    #[allow(clippy::too_many_arguments)]
+    fn mirror_raise(&mut self, call: Option<(u64, [u64; 8])>, target: usize, sig: u64, kind: retrace_box::RaiseKind,
+                    si_code: u64, kernel: bool, pc: u64, ret: u64, err: bool) -> Result<Option<Advance>, Divergence> {
+        use retrace_box::RaiseKind as K;
+        match kind {
+            // F-2: a marked wall, so `end_or_diverge` reads it as the incomplete recording's end.
+            K::Refuse => Err(Divergence { landmark: self.idx, pc, detail: retrace_arch::wall(
+                retrace_arch::WallCategory::Signals, format!("M55: {}", self.b.refuse_raise_text(target, sig))) }),
+            K::Pend => {
+                if kernel { self.b.threads_mut().pend_kernel(target, sig); } else { self.b.threads_mut().pend(target, sig); }
+                Ok(None)
+            }
+            K::Ignore => Ok(None),
+            K::Terminate => {
+                if call.is_none() { self.idx += 1; }
+                self.signal_terminal(sig, pc).map(Some)
+            }
+            K::Deliver | K::Interrupt => {
+                // M12: record appended TWO events at this one stop, the Syscall then the delivery, so both are
+                // consumed here.
+                if let Some((num, args)) = call {
+                    match self.events.get(self.idx) {
+                        Some(Event::Syscall { num: rn, args: ra, thread: rthread, .. }) if *rn == num && *ra == args => {
+                            // This arm consumes a recorded Event::Syscall landmark and RETURNS before the
+                            // generic dispatch, so it needs its own thread-oracle call (`verify_thread`'s doc).
+                            self.verify_thread(*rthread, pc)?;
+                        }
+                        other => return Err(Divergence { landmark: self.idx, pc, detail:
+                            format!("expected the recorded caught raise, got {other:?} (live: num={num}, args={args:?})") }),
+                    }
+                }
+                self.idx += 1;
+                // Record completes the raising call BEFORE building the frame (spikes/sigraisex0.c).
+                self.b.complete_syscall_before_delivery(ret, err);
+                // M53 §3f (C2): the same interruption record makes, ahead of the same frame.
+                if kind == K::Interrupt { self.b.interrupt_for_signal(target); }
+                self.mirror_delivery(target, sig, si_code, 0, 0, 0, pc).map(Some)
+            }
+        }
+    }
+
     /// M12: recompute a signal delivery and byte-compare the frame against the recorded landmark.
     /// That comparison **is** the divergence check (symmetry rule 1) — an asymmetry between
     /// record's delivery arms and these mirrors surfaces here as a named divergence instead of as
@@ -2428,7 +2516,21 @@ impl ReplaySession {
             return Err(Divergence { landmark: self.idx, pc, detail: format!(
                 "signal delivery target not deliverable on replay: {d}") });
         }
+        // M55 §3f, Ruling T4-a: the one value replay takes from the recording verbatim. A kernel-raised
+        // signal's `si_pid` is the recorder's own host pid (the guest's `getpid` is forwarded), which a replay
+        // process cannot recompute (as M23's `ServiceGetSpecialPort` reply). It is scoped: only a recorded
+        // frame whose `si_code` (siginfo bytes 8..12) is 0 supplies it, only its four `si_pid` bytes (12..16)
+        // are taken, it is cleared as soon as `deliver_signal_to` returns, and every other byte of the frame is
+        // still compared below.
+        let rpid = rwrites.first().and_then(|r| {
+            let code = u32::from_le_bytes(r.bytes.get(8..12)?.try_into().unwrap());
+            // F-4: only a recorded SIGPIPE delivery supplies it.
+            if code != 0 || sig != retrace_arch::SIGPIPE { return None; }
+            Some(u32::from_le_bytes(r.bytes.get(12..16)?.try_into().unwrap()))
+        });
+        self.b.sigtable_mut().set_pid_override(rpid);
         let (mine, _resume_pc) = self.b.deliver_signal_to(tid, sig, si_code, si_addr, esr, far);
+        self.b.sigtable_mut().set_pid_override(None);
         if sig != rsig || mine != rwrites {
             // Name the first differing byte: a frame mismatch is usually one field, and the
             // offset identifies which one far faster than two 976-byte dumps do.
@@ -2640,54 +2742,13 @@ impl ReplaySession {
                         };
                         let sig = args[1];
                         let kind = self.b.classify_raise(target, sig);
-                        // M16 Task 8: record tests the TARGET's mask FIRST and only then consults
-                        // the disposition, so this side must too. Until this task replay had no
-                        // pended concept at all and decided terminal-vs-caught straight off the
-                        // disposition, so a guest raising a BLOCKED signal whose disposition is
-                        // Dfl+Terminate made record pend it and carry on while replay took the
-                        // terminal path and hunted an Event::Signal that was never recorded. That
-                        // surfaced as a divergence rather than as corruption — loud, which is why
-                        // it was not a Task 7 defect — but it was still the two dispatch loops
-                        // disagreeing about control flow, and the order below closes it.
-                        if kind == retrace_box::RaiseKind::Pend {
-                            // A pended raise produces ONE landmark — the ordinary Syscall — and no
-                            // delivery, so it falls through to the generic dispatch below, which
-                            // already verifies (num, args), checks the thread tag, and applies the
-                            // recorded return (record's `set_x0_err_and_return(0, false)` is that
-                            // arm's `apply_and_return` with ret=0, err=false, writes=[]). Only the
-                            // mask side-effect belongs here.
-                            self.b.threads_mut().pend(target, sig);
-                        } else if kind == retrace_box::RaiseKind::Terminate {
-                            return self.signal_terminal(sig, pc);
-                        // M12: the CAUGHT counterpart of the terminal arm above. Record appended
-                        // TWO events at this one stop — the ordinary Syscall, then the delivery —
-                        // so both are consumed here. Letting the generic arm below take the first
-                        // would apply_and_return past the svc, and the delivery landmark would then
-                        // be met by the next unrelated stop ("expected recorded Exit, got
-                        // SignalDelivery", which is what this looked like before the mirror existed).
-                        } else if matches!(kind, retrace_box::RaiseKind::Deliver | retrace_box::RaiseKind::Interrupt) {
-                            match self.events.get(self.idx) {
-                                Some(Event::Syscall { num: rn, args: ra, thread: rthread, .. })
-                                    if *rn == num && *ra == args => {
-                                    // M15 Task 4, fix round 1: this arm consumes a recorded
-                                    // Event::Syscall landmark and RETURNS before ever reaching the
-                                    // generic dispatch below, so it needs its own call to the thread
-                                    // oracle — see `verify_thread`'s doc.
-                                    self.verify_thread(*rthread, pc)?;
-                                }
-                                other => return Err(Divergence { landmark: self.idx, pc, detail:
-                                    format!("expected the recorded caught raise, got {other:?} \
-                                             (live: num={num}, args={args:?})") }),
-                            }
-                            self.idx += 1;
-                            // Record completes the syscall BEFORE building the frame, so the frame
-                            // carries the raise's success (x0 = 0, PSTATE.C clear) rather than the
-                            // pid argument and a stale carry — measured in spikes/sigraisex0.c.
-                            // Omit this and every caught self-raise diverges on those two fields.
-                            self.b.complete_syscall_before_delivery(0, false);
-                            // M53 §3f (C2): the same interruption record makes, ahead of the same frame.
-                            if kind == retrace_box::RaiseKind::Interrupt { self.b.interrupt_for_signal(target); }
-                            return self.mirror_delivery(target, sig, retrace_arch::SI_USER, 0, 0, 0, pc);
+                        // M16 Task 8: record tests the TARGET's mask FIRST and only then consults the disposition
+                        // (`classify_raise` does both). The handling after it is `mirror_raise`, which SIGPIPE's
+                        // mirror shares; a pended or ignored raise falls through to the generic dispatch below,
+                        // which verifies (num, args), checks the thread tag and applies the recorded return.
+                        if let Some(adv) = self.mirror_raise(Some((num, args)), target, sig, kind,
+                                                             retrace_arch::SI_USER, false, pc, 0, false)? {
+                            return Ok(adv);
                         }
                     }
                     // M51 §3g (R10, C5): the mirror of record's abort_with_payload arm. Its terminal
@@ -3453,6 +3514,12 @@ impl ReplaySession {
                             // generic tail, which applies the recorded writes and return and moves a pipe's
                             // count. A refusal is a divergence naming the call, never a panic.
                             if retrace_arch::is_iovec(num) {
+                                // M55 §3g: record's pre-forward wall check; no recording holds a call it refused.
+                                if let Err(m) = self.b.would_block(num, args) {
+                                    return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "{} would block on replay, though the recording accepted it \
+                                         — replay diverged before this landmark: {m}", retrace_arch::syscall_display(num)) });
+                                }
                                 match self.b.iovec_prepare(num, args) {
                                     Err(m) => return Err(Divergence { landmark: self.idx, pc, detail: format!(
                                         "{} refused on replay, though the recording accepted it \
@@ -4010,6 +4077,12 @@ impl ReplaySession {
                             // in `iovec_prepare` (an invalid count answers EINVAL before the array is read), so
                             // a check here would refuse, or commit pages, where record did neither.
                             if !retrace_arch::is_iovec(num) {
+                                // M55 §3g: record's pre-forward wall check, at the point it made it.
+                                if let Err(m) = self.b.would_block(num, args) {
+                                    return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "syscall {num} would block on replay, though the recording accepted it \
+                                         — replay diverged before this landmark: {m}") });
+                                }
                                 // Final review part 2, I1: a failed exec is this landmark; record made the
                                 // exec pointer step (argv/envp pages too) for every 59/244, so replay does.
                                 let prepared = if num == retrace_arch::SYS_EXECVE || num == retrace_arch::SYS_POSIX_SPAWN {
@@ -4105,6 +4178,30 @@ impl ReplaySession {
                                          ({g_r}, {g_w})") });
                                 }
                             }
+                            // M55: socketpair. Two `alloc()`s, `sv[0]` first: the same two calls
+                            // `bind_returned_pair` made on record, compared with the 8 bytes record rewrote
+                            // at `sv` and recorded as the call's write. A mismatch is a divergence that
+                            // names both pairs. Then `apply_and_return` applies those bytes, and
+                            // `note_fd_effects` reads them back to build the socket model, as record does.
+                            if !*err {
+                                if let Some(si) = retrace_arch::returns_fd_pair_out(num) {
+                                    let g0 = self.b.fds_mut().alloc();
+                                    let g1 = self.b.fds_mut().alloc();
+                                    let want: Vec<u8> = [g0 as u32, g1 as u32].iter().flat_map(|v| v.to_le_bytes()).collect();
+                                    let recorded = writes.iter().find(|r| r.ipa == args[si]).map(|r| r.bytes.clone());
+                                    if recorded.as_deref() != Some(want.as_slice()) {
+                                        let show = |b: &[u8]| match b.len() {
+                                            8 => format!("({}, {})", u32::from_le_bytes(b[..4].try_into().unwrap()),
+                                                         u32::from_le_bytes(b[4..].try_into().unwrap())),
+                                            _ => format!("{b:02x?}"),
+                                        };
+                                        return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                            "fd divergence: recording says socketpair wrote the pair {}, but the guest's own \
+                                             open/close sequence yields ({g0}, {g1})",
+                                            recorded.as_deref().map_or("(no write at sv)".to_string(), show)) });
+                                    }
+                                }
+                            }
                             if !*err && (num == retrace_arch::SYS_CLOSE
                                       || num == retrace_arch::SYS_CLOSE_NOCANCEL) {
                                 // Mirror record's slot retirement so the two tables stay in step —
@@ -4147,6 +4244,16 @@ impl ReplaySession {
                                     return Err(Divergence { landmark: self.idx, pc, detail: if retrace_arch::Unsupported::from_marked(&m).is_some() { m } else { format!(
                                         "syscall {num} refused on replay, though the recording accepted it \
                                          — replay diverged before this landmark: {m}") } });
+                                }
+                            }
+                            // M55 §3f: the mirror of record's `record_sigpipe`: the same `sigpipe_due` on the
+                            // recorded values, the same target and classification, after the write's landmark.
+                            if self.b.sigpipe_due(num, args, *ret, *err) {
+                                let sig = retrace_arch::SIGPIPE;
+                                let target = self.b.process_signal_target(sig);
+                                let kind = self.b.classify_raise(target, sig);
+                                if let Some(adv) = self.mirror_raise(None, target, sig, kind, 0, true, pc, *ret, *err)? {
+                                    return Ok(adv);
                                 }
                             }
                             return self.finish_event();

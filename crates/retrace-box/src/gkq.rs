@@ -3,14 +3,15 @@
 //! `Box_` owns one (`Box_::gkq`) and carries it through every rebuild path in `BoxState`, because
 //! a mid-run capture cannot re-derive it.
 //!
-//! Natively, a change the kernel rejects becomes an `EV_ERROR` event. The model never makes one: it
-//! refuses every such change by value, naming its index and fields (R5, K4). So no change produces
-//! an output, and a call scans exactly when it has an event list (F7).
+//! Natively, a change the kernel rejects becomes an `EV_ERROR` event, and a change carrying `EV_RECEIPT` an
+//! event of its own. Since M55 the model makes both (`apply`, T0-receipt): a call whose changes produced
+//! any returns them without scanning, and one with none scans exactly when it has an event list (F7).
+//! A shape the model does not know is still refused by value, naming its index and fields (R5).
 
 use std::collections::BTreeMap;
 
 use retrace_arch::{Kevent, EVFILT_READ, EVFILT_USER, EVFILT_WRITE, EV_ADD, EV_CLEAR, EV_DELETE,
-                   EV_ENABLE, EV_EOF, EV_ONESHOT, EV_SYSFLAGS, NOTE_FFAND, NOTE_FFCOPY,
+                   EV_ENABLE, EV_EOF, EV_ERROR, EV_ONESHOT, EV_RECEIPT, EV_SYSFLAGS, NOTE_FFAND, NOTE_FFCOPY,
                    NOTE_FFCTRLMASK, NOTE_FFLAGSMASK, NOTE_FFOR, NOTE_TRIGGER};
 
 /// `EV_DISABLE` (SDK `sys/event.h`). Task 2's constants stop short of it.
@@ -24,10 +25,47 @@ pub const PIPE_SIZE: u64 = 16384;
 pub const PIPE_SIZE_GROWN: u64 = 65536;
 /// `PIPE_BUF` (SDK `sys/syslimits.h`): a write end is ready while this much room is left (F9).
 pub const PIPE_BUF: u64 = 512;
+/// A Unix stream socket pair's buffer, each direction (M55, `p0/sockprobe.txt`): `SO_SNDBUF` and `SO_RCVBUF`
+/// are 8192 and `EVFILT_WRITE`'s `data` on an empty pair.
+pub const SOCK_CAPACITY: u64 = 8192;
+/// `SO_SNDLOWAT` (M55): a write end is ready while at least this much room is free.
+pub const SOCK_LOWAT: u64 = 2048;
 /// The bits of a knote's creating flags a delivery hands back (t0 M3, `read on the write end,
 /// reader closed`, whose knote was added `EV_ADD|EV_ENABLE`). Every measured delivery returns the
 /// add's flags verbatim (`detect`: `0x21`).
 pub const ADD_FLAGS_RETURNED: u16 = !EV_SYSFLAGS;
+
+/// The most a blocking write to an empty guest pipe completes at once (T0-blockwrite: 65536 from the first
+/// write, measured; a socket direction is `SOCK_CAPACITY`). It is NOT `PIPE_SIZE`, which answers a different
+/// question: the `data` of `EVFILT_WRITE` on an empty pipe (16384). The two disagree on purpose.
+pub const PIPE_WRITE_CAPACITY: u64 = 65536;
+
+/// What a guest pipe or socket end is to a blocking call (M55 3g, 3f).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IoEnd {
+    pub socket: bool,
+    /// A read call can use this end / a write call can use it. A socket end is both.
+    pub readable: bool,
+    pub writable: bool,
+    /// Bytes this end has to read. `None` once the model lost the count.
+    pub unread: Option<u64>,
+    /// Bytes already held in the buffer a write on this end fills.
+    pub held: Option<u64>,
+    /// What a blocking write can complete: `capacity - held`.
+    pub capacity: u64,
+    pub other_open: bool,
+    pub nonblock: bool,
+    pub nosigpipe: bool,
+}
+
+/// The refusal for a guest end whose byte count the model lost (the pipe and socket spellings).
+pub fn lost_count(fd: u64, socket: bool) -> String {
+    if socket { sock_lost(fd) } else {
+        retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
+            "M48: pipe {fd}: the byte count is unknown: a read returned more bytes than the model \
+             counted, so a write reached the pipe by a path note_fd_effects does not see"))
+    }
+}
 
 /// What a guest descriptor is to the model.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,9 +76,37 @@ pub enum FdKind {
     PipeRead(u64),
     /// The write end of guest pipe `id`.
     PipeWrite(u64),
+    /// End `id` of a guest Unix stream socket pair (M55). An end is an open file shared by its dups.
+    Sock(u64),
     /// Anything else: a file, a socket, a tty, or a descriptor the guest inherited (its 0, 1, 2).
     Other,
 }
+
+/// What happened to a pipe or socket end that wakes the `EV_CLEAR` knotes watching it (M55 §3d). A
+/// level-triggered knote needs none: `refresh` re-evaluates it after every call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Activation {
+    /// The peer of the acting socket end wrote: its read knotes.
+    PeerWrote,
+    /// The peer of the acting socket end read, freeing space: its write knotes.
+    PeerRead,
+    /// The end of the named descriptor lost its peer's last descriptor: both its filters, `EV_EOF`.
+    PeerClosed,
+    /// A read or write of a pipe: every knote on either end.
+    PipeIo,
+}
+
+/// What `apply` made of a call's changes (T0-receipt).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Applied {
+    /// The receipts and error events, in change order, at most the event list's room.
+    pub events: Vec<Kevent>,
+    /// `Some(errno)` when a failing change found no room left for its event: the call returns -1 with it.
+    pub errno: Option<u64>,
+}
+
+/// One change's fate in `apply_one`.
+enum Step { Done, Errno(u64) }
 
 /// One knote, keyed in its kqueue by `(ident, filter)`, the kernel's key.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -53,7 +119,9 @@ pub struct Knote {
     pub sdata: i64,
     pub udata: u64,
     pub enabled: bool,
-    /// `Some(n)` while active: `n` is its place in the activation order, which is delivery order.
+    /// `Some(n)` while active: `n` is its place in the activation order, which is delivery order. For an
+    /// `EV_CLEAR` pipe or socket knote it is the queue slot (M55): set by `activate` when the filter holds,
+    /// or at the add, and cleared by delivery, never by re-evaluation (`refresh` skips it).
     pub active: Option<u64>,
     /// For `EVFILT_READ`/`EVFILT_WRITE`: what the descriptor was at `EV_ADD`.
     pub watch: Option<FdKind>,
@@ -98,6 +166,8 @@ impl PollWait {
 /// other end is gone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PipeState {
+    /// M55: a socket end, which is both readable and writable and answers `poll` and `select` by its own rules.
+    pub socket: bool,
     pub write_end: bool,
     pub readable: bool,
     pub writable: bool,
@@ -121,6 +191,10 @@ struct Pipe {
     /// Open guest descriptors on each end. A `dup` adds one, and the end closes at zero.
     readers: u32,
     writers: u32,
+    /// M55 §3f, §3g: `O_NONBLOCK` and the no-SIGPIPE bit of each end's open file, `[read, write]`. A dup
+    /// shares the open file, so they live here and not per descriptor.
+    nonblock: [bool; 2],
+    nosigpipe: [bool; 2],
 }
 
 /// The guest's pipes, by descriptor (R4). The counts move only by the calls' own returns:
@@ -183,6 +257,99 @@ impl Pipes {
     }
 }
 
+/// What a socket end is to the model (M55 3c).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SockState {
+    /// Bytes the peer wrote that this end has not read. `None` once a read returned more than the count.
+    pub unread: Option<u64>,
+    /// The same for the peer's end: what this end's writes have left it to read.
+    pub peer_unread: Option<u64>,
+    pub peer_open: bool,
+    pub nonblock: bool,
+    pub nosigpipe: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SockEnd {
+    peer: u64,
+    unread: Option<u64>,
+    /// Open guest descriptors on this end. A `dup` adds one, and the end is closed at zero.
+    open: u32,
+    nonblock: bool,
+    nosigpipe: bool,
+}
+
+/// The guest's socket pairs (M55 3c). Like `Pipes`, the counts move only by the calls' own returns:
+/// forwarded on record, recorded on replay (`Box_::note_fd_effects`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Socks {
+    /// Guest fd -> end id.
+    fds: BTreeMap<u64, u64>,
+    ends: BTreeMap<u64, SockEnd>,
+    next: u64,
+}
+
+impl Socks {
+    fn kind_of(&self, fd: u64) -> Option<FdKind> { self.fds.get(&fd).map(|&e| FdKind::Sock(e)) }
+
+    fn bind(&mut self, fd: u64, end: u64) {
+        self.fds.insert(fd, end);
+        self.ends.get_mut(&end).expect("a bound descriptor's end exists").open += 1;
+    }
+
+    /// Forget `fd`. Returns whether it was a socket end. A pair with no descriptor left on either end goes.
+    fn unbind(&mut self, fd: u64) -> bool {
+        let Some(end) = self.fds.remove(&fd) else { return false };
+        let e = self.ends.get_mut(&end).expect("a bound descriptor's end exists");
+        e.open -= 1;
+        let peer = e.peer;
+        if e.open == 0 && self.ends[&peer].open == 0 { self.ends.remove(&end); self.ends.remove(&peer); }
+        true
+    }
+
+    fn state(&self, end: u64) -> SockState {
+        let e = self.ends[&end];
+        let p = self.ends[&e.peer];
+        SockState { unread: e.unread, peer_unread: p.unread, peer_open: p.open > 0, nonblock: e.nonblock, nosigpipe: e.nosigpipe }
+    }
+
+    /// Is `filter` on descriptor `fd`, an end of the pair, ready, and with what `EV_EOF` bit and `data`
+    /// (spec 2b, measured): read from one unread byte or a closed peer, `data` the unread count; write
+    /// while `SOCK_CAPACITY - peer_unread >= SOCK_LOWAT` with `data` that free space, or a closed peer
+    /// (`EV_EOF`, `data` 8192).
+    pub fn ready(&self, fd: u64, end: u64, filter: i16) -> Result<Option<(u16, i64)>, String> {
+        let st = self.state(end);
+        match filter {
+            EVFILT_READ => {
+                let unread = st.unread.ok_or_else(|| sock_lost(fd))?;
+                Ok((unread >= 1 || !st.peer_open).then_some((if st.peer_open { 0 } else { EV_EOF }, unread as i64)))
+            }
+            EVFILT_WRITE => {
+                if !st.peer_open { return Ok(Some((EV_EOF, SOCK_CAPACITY as i64))); }
+                let free = SOCK_CAPACITY.checked_sub(st.peer_unread.ok_or_else(|| sock_lost(fd))?).ok_or_else(|| sock_lost(fd))?;
+                Ok((free >= SOCK_LOWAT).then_some((0, free as i64)))
+            }
+            f => unreachable!("M55: apply admits no filter {f} on a socket"),
+        }
+    }
+}
+
+/// The refusal for a socket whose byte count the model lost.
+fn sock_lost(fd: u64) -> String {
+    retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
+        "M55: socket {fd}: the byte count is unknown: a read returned more bytes than the model \
+         counted, so a write reached the socket by a path note_fd_effects does not see"))
+}
+
+/// Is `filter` on descriptor `fd`, which `watch` describes, ready? One answer over the pipe and socket
+/// models; a descriptor that is neither is never ready (K3, libuv's probe).
+fn ready_of(pipes: &Pipes, socks: &Socks, fd: u64, watch: FdKind, filter: i16) -> Result<Option<(u16, i64)>, String> {
+    match watch {
+        FdKind::Sock(end) => socks.ready(fd, end, filter),
+        w => pipes.ready(fd, w, filter),
+    }
+}
+
 /// Every guest kqueue, by id, the descriptors on each, and the guest's pipes. The kernel's kqueue is
 /// per open file, so a `dup` of its descriptor shares the one table (M53 t3, t0 §M4).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -192,6 +359,8 @@ pub struct GuestKqueues {
     fd_kq: BTreeMap<u64, u64>,
     next_id: u64,
     pipes: Pipes,
+    /// The guest's socket pairs (M55).
+    socks: Socks,
     /// Threads blocked in `poll` or `select`, by thread (M53 §3e).
     poll_waiters: BTreeMap<usize, PollWait>,
     /// The activation counter, one for every kqueue, so the order is total.
@@ -209,7 +378,9 @@ impl GuestKqueues {
     }
 
     pub fn kind_of(&self, fd: u64) -> FdKind {
-        if self.is_kqueue(fd) { FdKind::Kqueue } else { self.pipes.kind_of(fd).unwrap_or(FdKind::Other) }
+        if self.is_kqueue(fd) { FdKind::Kqueue } else {
+            self.pipes.kind_of(fd).or_else(|| self.socks.kind_of(fd)).unwrap_or(FdKind::Other)
+        }
     }
 
     /// A forwarded `kqueue()` returned guest fd `fd`: an empty table for it (M48 §3c).
@@ -237,10 +408,66 @@ impl GuestKqueues {
         }
         let id = self.pipes.next;
         self.pipes.next += 1;
-        self.pipes.pipes.insert(id, Pipe { count: Some(0), size: PIPE_SIZE, readers: 0, writers: 0 });
+        self.pipes.pipes.insert(id, Pipe { count: Some(0), size: PIPE_SIZE, readers: 0, writers: 0, nonblock: [false; 2], nosigpipe: [false; 2] });
         self.pipes.bind(r, id, false);
         self.pipes.bind(w, id, true);
         Ok(())
+    }
+
+    /// A forwarded `socketpair(AF_UNIX, SOCK_STREAM, 0)` wrote the guest pair `(g0, g1)` (M55 `Ret::FdPairOut`):
+    /// two connected ends, nothing unread, blocking, and `SO_NOSIGPIPE` off.
+    pub fn socket_pair(&mut self, g0: u64, g1: u64) -> Result<(), String> {
+        for fd in [g0, g1] {
+            let k = self.kind_of(fd);
+            if k != FdKind::Other {
+                return Err(format!("M55: socketpair: socketpair() returned fd {fd}, which the model still \
+                                    holds as {k:?}: a close it never saw"));
+            }
+        }
+        let (a, b) = (self.socks.next, self.socks.next + 1);
+        self.socks.next += 2;
+        for (id, peer) in [(a, b), (b, a)] {
+            self.socks.ends.insert(id, SockEnd { peer, unread: Some(0), open: 0, nonblock: false, nosigpipe: false });
+        }
+        self.socks.bind(g0, a);
+        self.socks.bind(g1, b);
+        Ok(())
+    }
+
+    /// What socket end `fd` is, or `None` for any other descriptor (M55).
+    pub fn sock_state(&self, fd: u64) -> Option<SockState> {
+        self.socks.fds.get(&fd).map(|&e| self.socks.state(e))
+    }
+
+    /// `O_NONBLOCK` is a bit of the open file, shared by every dup of the end (M55 3g).
+    pub fn set_nonblock(&mut self, fd: u64, on: bool) {
+        if let Some(&e) = self.socks.fds.get(&fd) { self.socks.ends.get_mut(&e).expect("a bound end exists").nonblock = on; }
+        if let Some(&(id, w)) = self.pipes.ends.get(&fd) {
+            self.pipes.pipes.get_mut(&id).expect("a bound end's pipe exists").nonblock[w as usize] = on;
+        }
+    }
+
+    /// The no-SIGPIPE bit of the end's open file: `SO_NOSIGPIPE` on a socket end, `F_SETNOSIGPIPE` on a pipe
+    /// end (M55 3f, T0-nosigpipe).
+    pub fn set_nosigpipe(&mut self, fd: u64, on: bool) {
+        if let Some(&e) = self.socks.fds.get(&fd) { self.socks.ends.get_mut(&e).expect("a bound end exists").nosigpipe = on; }
+        if let Some(&(id, w)) = self.pipes.ends.get(&fd) {
+            self.pipes.pipes.get_mut(&id).expect("a bound end's pipe exists").nosigpipe[w as usize] = on;
+        }
+    }
+
+    /// What guest pipe or socket end `fd` is to a blocking call (M55 3g), or `None` for any other descriptor.
+    pub fn io_end(&self, fd: u64) -> Option<IoEnd> {
+        if let Some(&e) = self.socks.fds.get(&fd) {
+            let st = self.socks.state(e);
+            return Some(IoEnd { socket: true, writable: true, readable: true, unread: st.unread, held: st.peer_unread,
+                                capacity: SOCK_CAPACITY, other_open: st.peer_open, nonblock: st.nonblock, nosigpipe: st.nosigpipe });
+        }
+        let &(id, w) = self.pipes.ends.get(&fd)?;
+        let p = self.pipes.pipes[&id];
+        Some(IoEnd { socket: false, writable: w, readable: !w, unread: p.count, held: p.count, capacity: PIPE_WRITE_CAPACITY,
+                     other_open: if w { p.readers > 0 } else { p.writers > 0 },
+                     nonblock: p.nonblock[w as usize], nosigpipe: p.nosigpipe[w as usize] })
     }
 
     /// M54 t3 (spec 2b, measured): exec closes every kqueue descriptor, and the threads that waited on
@@ -280,7 +507,21 @@ impl GuestKqueues {
         for k in self.kqs.values_mut() {
             k.knotes.retain(|&(ident, filter), _| !(ident == fd && matches!(filter, EVFILT_READ | EVFILT_WRITE)));
         }
-        if self.pipes.unbind(fd) { self.refresh()?; }
+        let sock = self.socks.fds.get(&fd).map(|&e| (e, self.socks.ends[&e].peer));
+        let pipe = self.pipes.ends.get(&fd).copied();
+        if self.pipes.unbind(fd) | self.socks.unbind(fd) {
+            // M55: the last descriptor of an end gone, its peer's `EV_CLEAR` knotes are told (§3d).
+            if let Some((_, peer)) = sock.filter(|(e, _)| self.socks.ends.get(e).is_none_or(|x| x.open == 0)) {
+                self.activate_where(|w, _| w == FdKind::Sock(peer))?;
+            }
+            if let Some((id, write)) = pipe {
+                if self.pipes.pipes.get(&id).is_some_and(|p| if write { p.writers == 0 } else { p.readers == 0 }) {
+                    let other = if write { FdKind::PipeRead(id) } else { FdKind::PipeWrite(id) };
+                    self.activate_where(|w, _| w == other)?;
+                }
+            }
+            self.refresh()?;
+        }
         Ok(())
     }
 
@@ -293,24 +534,81 @@ impl GuestKqueues {
         self.close(new)?;
         if let Some(id) = id { self.fd_kq.insert(new, id); }
         if let Some(&(id, write)) = self.pipes.ends.get(&old) { self.pipes.bind(new, id, write); }
+        if let Some(&end) = self.socks.fds.get(&old) { self.socks.bind(new, end); }
         Ok(())
     }
 
-    /// A read from `fd` returned `n` bytes. Only a pipe's read end counts.
+    /// A read from `fd` returned `n` bytes. A pipe's read end counts, and a socket end's own unread bytes.
     pub fn note_read(&mut self, fd: u64, n: u64) -> Result<(), String> {
+        if let Some(&end) = self.socks.fds.get(&fd) {
+            let e = self.socks.ends.get_mut(&end).expect("a bound descriptor's end exists");
+            e.unread = e.unread.and_then(|c| c.checked_sub(n));
+            if n > 0 { self.activate(fd, Activation::PeerRead)?; }
+            return self.refresh();
+        }
         let Some(&(id, false)) = self.pipes.ends.get(&fd) else { return Ok(()) };
         let p = self.pipes.pipes.get_mut(&id).expect("a bound end's pipe exists");
         p.count = p.count.and_then(|c| c.checked_sub(n));
+        if n > 0 { self.activate(fd, Activation::PipeIo)?; }
         self.refresh()
     }
 
-    /// A write to `fd` returned `n` bytes. Only a pipe's write end counts.
+    /// A write to `fd` returned `n` bytes. A pipe's write end counts, and a socket end's write adds to its
+    /// peer's unread bytes.
     pub fn note_write(&mut self, fd: u64, n: u64) -> Result<(), String> {
+        if let Some(&end) = self.socks.fds.get(&fd) {
+            let peer = self.socks.ends[&end].peer;
+            let p = self.socks.ends.get_mut(&peer).expect("a connected end's peer exists");
+            p.unread = p.unread.map(|c| c + n);
+            if n > 0 { self.activate(fd, Activation::PeerWrote)?; }
+            return self.refresh();
+        }
         let Some(&(id, true)) = self.pipes.ends.get(&fd) else { return Ok(()) };
         let p = self.pipes.pipes.get_mut(&id).expect("a bound end's pipe exists");
         p.count = p.count.map(|c| c + n);
         if p.count.is_some_and(|c| c > PIPE_SIZE) { p.size = PIPE_SIZE_GROWN; }
+        if n > 0 { self.activate(fd, Activation::PipeIo)?; }
         self.refresh()
+    }
+
+    /// Queue the `EV_CLEAR` knotes `which` names whose filter holds now (M55 §3d, measured in
+    /// `p0/sockprobe.txt`, `sockprobe2.txt`). `fd` is the descriptor the call acted on for `PeerWrote`,
+    /// `PeerRead` and `PipeIo`, and for `PeerClosed` a descriptor of the end being told (its peer's last
+    /// descriptor just went; `close` makes that activation itself). A knote already queued keeps its
+    /// place, so an activation is one queue entry. Called by `note_read` and `note_write` after the
+    /// counts move, and by `close`, which `Box_::note_fd_effects` reaches on record and replay alike.
+    pub fn activate(&mut self, fd: u64, which: Activation) -> Result<(), String> {
+        let want = match (self.kind_of(fd), which) {
+            (FdKind::Sock(e), Activation::PeerWrote) => (FdKind::Sock(self.socks.ends[&e].peer), Some(EVFILT_READ)),
+            (FdKind::Sock(e), Activation::PeerRead) => (FdKind::Sock(self.socks.ends[&e].peer), Some(EVFILT_WRITE)),
+            (k @ FdKind::Sock(_), Activation::PeerClosed) => (k, None),
+            (FdKind::PipeRead(id) | FdKind::PipeWrite(id), Activation::PipeIo) => return self
+                .activate_where(|w, _| matches!(w, FdKind::PipeRead(i) | FdKind::PipeWrite(i) if i == id)),
+            (k @ (FdKind::PipeRead(_) | FdKind::PipeWrite(_)), Activation::PeerClosed) => (k, None),
+            _ => return Ok(()),
+        };
+        self.activate_where(|w, f| w == want.0 && want.1.is_none_or(|x| x == f))
+    }
+
+    /// Queue every `EV_CLEAR` fd knote `hit` selects, in each kqueue's order: write filters before read
+    /// filters, then by ident (the measured order: a socket's close and a pipe's I/O both delivered write
+    /// first, `sockprobe.txt`). One whose filter does not hold is left alone.
+    fn activate_where(&mut self, hit: impl Fn(FdKind, i16) -> bool) -> Result<(), String> {
+        let Self { kqs, pipes, socks, seq, .. } = self;
+        for k in kqs.values_mut() {
+            let mut keys: Vec<(i16, u64)> = k.knotes.iter()
+                .filter(|(&(_, f), n)| n.flags & EV_CLEAR != 0 && n.watch.is_some_and(|w| hit(w, f)))
+                .map(|(&(i, f), _)| (f, i)).collect();
+            keys.sort_unstable();
+            for (f, i) in keys {
+                let n = k.knotes.get_mut(&(i, f)).expect("collected from this table just above");
+                if n.active.is_none() && ready_of(pipes, socks, i, n.watch.expect("selected for its watch"), f)?.is_some() {
+                    *seq += 1;
+                    n.active = Some(*seq);
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn pipe_count(&self, fd: u64) -> Option<u64> {
@@ -320,11 +618,13 @@ impl GuestKqueues {
     /// Re-evaluate every pipe knote: one that became ready joins the activation order at its tail,
     /// and one that stopped being ready leaves it (level-triggered).
     fn refresh(&mut self) -> Result<(), String> {
-        let Self { kqs, pipes, seq, .. } = self;
+        let Self { kqs, pipes, socks, seq, .. } = self;
         for k in kqs.values_mut() {
             for (&(ident, filter), n) in k.knotes.iter_mut() {
                 let Some(watch) = n.watch else { continue };
-                match pipes.ready(ident, watch, filter)? {
+                // M55: an `EV_CLEAR` knote is queued by `activate` and cleared by delivery, never re-evaluated.
+                if n.flags & EV_CLEAR != 0 { continue; }
+                match ready_of(pipes, socks, ident, watch, filter)? {
                     Some(_) if n.active.is_none() => { *seq += 1; n.active = Some(*seq); }
                     Some(_) => {}
                     None => n.active = None,
@@ -334,29 +634,51 @@ impl GuestKqueues {
         Ok(())
     }
 
-    /// Apply `changes` to kqueue `kq`, in list order (`kern_event.c:kevent_register`, F8). All or
-    /// nothing: they go to a copy that replaces the table only if every change is admitted.
-    pub fn apply(&mut self, kq: u64, changes: &[Kevent]) -> Result<(), String> {
+    /// `apply_room` for a caller with no event list to size: every change finds room for its event.
+    pub fn apply(&mut self, kq: u64, changes: &[Kevent]) -> Result<Applied, String> {
+        self.apply_room(kq, changes, &[], usize::MAX)
+    }
+
+    /// Apply `changes` to kqueue `kq`, in list order and one at a time (`kern_event.c:kevent_register`, F8;
+    /// T0-receipt). `open[i]` says whether change `i`'s descriptor is open in the guest (a missing entry
+    /// is open) and `room` is the event list's length:
+    /// - a change that succeeds with `EV_RECEIPT` stores its receipt if there is room, and drops it if not;
+    /// - a change that fails with an errno stores an `EV_ERROR` event if there is room, and the call goes
+    ///   on; with none it ends the call with that errno, the earlier changes applied and the later ones not.
+    ///
+    /// A refusal (`Err`) is a wall: it applies nothing, as the recording ends there.
+    pub fn apply_room(&mut self, kq: u64, changes: &[Kevent], open: &[bool], room: usize) -> Result<Applied, String> {
         let id = *self.fd_kq.get(&kq)
             .ok_or_else(|| format!("M48: kevent on fd {kq}, which is not a guest kqueue"))?;
         let mut k = self.kqs[&id].clone();
         let mut seq = self.seq;
+        let mut out = Applied::default();
         for (i, c) in changes.iter().enumerate() {
-            self.apply_one(&mut k, &mut seq, i, c)?;
+            let flags = c.flags & !EV_SYSFLAGS;
+            let ev = |errno: u64| Kevent { ident: c.ident, filter: c.filter, flags: flags | EV_ERROR, fflags: 0,
+                                           data: errno as i64, udata: c.udata };
+            match self.apply_one(&mut k, &mut seq, i, c, open.get(i).copied().unwrap_or(true))? {
+                Step::Done if flags & EV_RECEIPT != 0 => if out.events.len() < room { out.events.push(ev(0)); },
+                Step::Done => {}
+                Step::Errno(e) if out.events.len() < room => out.events.push(ev(e)),
+                Step::Errno(e) => { out.errno = Some(e); break; }
+            }
         }
         self.kqs.insert(id, k);
         self.seq = seq;
-        Ok(())
+        Ok(out)
     }
 
-    fn apply_one(&self, k: &mut Kqueue, seq: &mut u64, i: usize, c: &Kevent) -> Result<(), String> {
+    fn apply_one(&self, k: &mut Kqueue, seq: &mut u64, i: usize, c: &Kevent, open: bool) -> Result<Step, String> {
         // F8: input flags lose EV_SYSFLAGS at copyin.
         let flags = c.flags & !EV_SYSFLAGS;
         let at = format!("M48: kevent change {i}: (ident {:#x}, filter {}, flags {flags:#x}, fflags {:#x}, data {:#x})",
                          c.ident, c.filter, c.fflags, c.data);
-        const MODELLED: u16 = EV_ADD | EV_DELETE | EV_ENABLE | EV_DISABLE | EV_CLEAR | EV_ONESHOT;
+        const ENOENT: u64 = 2;
+        const EBADF: u64 = 9;
+        const MODELLED: u16 = EV_ADD | EV_DELETE | EV_ENABLE | EV_DISABLE | EV_CLEAR | EV_ONESHOT | EV_RECEIPT;
         if flags & !MODELLED != 0 {
-            return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("{at}: flags {:#x} are not modelled (EV_RECEIPT, EV_DISPATCH, \
+            return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("{at}: flags {:#x} are not modelled (EV_DISPATCH, \
                                 EV_UDATA_SPECIFIC and the rest are unmeasured)", flags & !MODELLED)));
         }
         if flags & (EV_ADD | EV_DELETE) == EV_ADD | EV_DELETE || flags & (EV_ENABLE | EV_DISABLE) == EV_ENABLE | EV_DISABLE {
@@ -368,30 +690,23 @@ impl GuestKqueues {
         }
         let key = (c.ident, c.filter);
         if flags & EV_DELETE != 0 {
-            return match k.knotes.remove(&key) {
-                Some(_) => Ok(()),
-                None => Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("{at}: EV_DELETE of a knote that is not registered: the kernel \
-                                     answers an ENOENT EV_ERROR event, which is not modelled"))),
-            };
+            // An unregistered knote is ENOENT, even for a descriptor that is not open (T0-receipt).
+            return Ok(match k.knotes.remove(&key) { Some(_) => Step::Done, None => Step::Errno(ENOENT) });
         }
         let fd_filter = c.filter != EVFILT_USER;
         if fd_filter && (c.fflags != 0 || c.data != 0) {
             return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("{at}: a pipe filter with fflags or data (NOTE_LOWAT and the rest) is not modelled")));
         }
         let Some(n) = k.knotes.get_mut(&key) else {
-            if flags & EV_ADD == 0 {
-                return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("{at}: the knote is not registered and the change has no EV_ADD: \
-                                    the kernel answers an ENOENT EV_ERROR event, which is not modelled")));
-            }
+            if flags & EV_ADD == 0 { return Ok(Step::Errno(ENOENT)); }
+            if fd_filter && !open { return Ok(Step::Errno(EBADF)); }
             let mut n = Knote { flags, sfflags: 0, sdata: c.data, udata: c.udata,
                                 enabled: flags & EV_DISABLE == 0, active: None, watch: None };
             if fd_filter {
-                if flags & (EV_CLEAR | EV_ONESHOT) != 0 {
-                    return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("{at}: EV_CLEAR or EV_ONESHOT on a pipe filter is not modelled")));
-                }
                 let watch = self.kind_of(c.ident);
                 match (watch, c.filter) {
                     (FdKind::PipeRead(_), EVFILT_READ) | (FdKind::PipeWrite(_), EVFILT_READ | EVFILT_WRITE) => {}
+                    (FdKind::Sock(_), EVFILT_READ | EVFILT_WRITE) => {}
                     (FdKind::Other, EVFILT_READ) if flags == EV_ADD | EV_ENABLE => {}
                     (FdKind::Other, f) => return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
                         "M48: kevent on fd {}: change {i}'s filter {f} with flags {flags:#x} asks about a \
@@ -400,7 +715,14 @@ impl GuestKqueues {
                          EVFILT_READ, EV_ADD|EV_ENABLE is answered, never ready (K3)", c.ident))),
                     (w, f) => return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("{at}: filter {f} on {w:?} is not modelled"))),
                 }
-                n.active = match self.pipes.ready(c.ident, watch, c.filter)? {
+                // T0-clear-oneshot: `EV_CLEAR` alone is modelled on every pipe and socket filter, and the pair
+                // only on a socket's read filter (as a one-shot); `EV_ONESHOT` alone stays unmeasured.
+                let pair_ok = flags & EV_CLEAR != 0 && c.filter == EVFILT_READ && matches!(watch, FdKind::Sock(_));
+                if flags & EV_ONESHOT != 0 && !pair_ok {
+                    return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("{at}: EV_ONESHOT on a pipe or socket filter is not modelled \
+                                        (only EV_CLEAR|EV_ONESHOT on a socket's read filter, T0-clear-oneshot)")));
+                }
+                n.active = match ready_of(&self.pipes, &self.socks, c.ident, watch, c.filter)? {
                     Some(_) => { *seq += 1; Some(*seq) }
                     None => None,
                 };
@@ -423,7 +745,7 @@ impl GuestKqueues {
                 }
             }
             k.knotes.insert(key, n);
-            return Ok(());
+            return Ok(Step::Done);
         };
         // A touch (K9).
         let kind = flags & (EV_CLEAR | EV_ONESHOT);
@@ -449,7 +771,7 @@ impl GuestKqueues {
                 n.active = Some(*seq);
             }
         }
-        Ok(())
+        Ok(Step::Done)
     }
 
     /// Does `kq` hold an event a scan would deliver?
@@ -461,24 +783,26 @@ impl GuestKqueues {
     /// (`kern_event.c:kqueue_process`, F8): `EV_ONESHOT` drops a knote, `EV_CLEAR` deactivates it,
     /// and any other is re-activated at the tail. A pipe knote's `data` and `EV_EOF` are read now.
     pub fn take_events(&mut self, kq: u64, max: usize) -> Result<Vec<Kevent>, String> {
-        let Self { kqs, fd_kq, pipes, seq, .. } = self;
+        let Self { kqs, fd_kq, pipes, socks, seq, .. } = self;
         let id = fd_kq.get(&kq).expect("take_events on a guest kqueue");
         let k = kqs.get_mut(id).expect("a mapped kqueue id is live");
         let mut due: Vec<((u64, i16), u64)> = k.knotes.iter()
             .filter_map(|(&key, n)| n.active.filter(|_| n.enabled).map(|s| (key, s)))
             .collect();
         due.sort_by_key(|&(_, s)| s);
-        due.truncate(max);
-        let mut out = Vec::with_capacity(due.len());
+        let mut out = Vec::with_capacity(due.len().min(max));
         for (key, _) in due {
+            if out.len() == max { break; }
             let n = k.knotes.get_mut(&key).expect("collected from this table just above");
             let (eof, data, fflags) = match n.watch {
                 None => (0, n.sdata, n.sfflags),
-                Some(w) => {
-                    let (eof, data) = pipes.ready(key.0, w, key.1)?
-                        .expect("an active pipe knote is ready: refresh keeps the two in step");
-                    (eof, data, 0)
-                }
+                // A queued `EV_CLEAR` knote whose filter stopped holding before the scan is dropped
+                // unreported (`filt_proc` re-evaluates); a level one is kept in step by `refresh`.
+                Some(w) => match ready_of(pipes, socks, key.0, w, key.1)? {
+                    Some((eof, data)) => (eof, data, 0),
+                    None if n.flags & EV_CLEAR != 0 => { n.active = None; continue; }
+                    None => unreachable!("refresh keeps a level knote's activation in step with its filter"),
+                },
             };
             out.push(Kevent { ident: key.0, filter: key.1, flags: (n.flags & ADD_FLAGS_RETURNED) | eof,
                               fflags, data, udata: n.udata });
@@ -505,15 +829,24 @@ impl GuestKqueues {
                 let p = self.pipes.pipes[&id];
                 let count = p.count.ok_or_else(lost)?;
                 let closed = p.writers == 0;
-                Ok(PipeState { write_end: false, readable: count >= 1 || closed, writable: false, other_closed: closed })
+                Ok(PipeState { socket: false, write_end: false, readable: count >= 1 || closed, writable: false, other_closed: closed })
             }
             FdKind::PipeWrite(id) => {
                 let p = self.pipes.pipes[&id];
                 let count = p.count.ok_or_else(lost)?;
                 let room = p.size.checked_sub(count).ok_or_else(lost)?;
-                Ok(PipeState { write_end: true, readable: false,
+                Ok(PipeState { socket: false, write_end: true, readable: false,
                                writable: p.readers > 0 && room >= PIPE_BUF,
                                other_closed: p.readers == 0 })
+            }
+            // M55: `readable` is `unread >= 1` alone and `writable` the peer-open free-space rule; a closed
+            // peer is `other_closed`, which `poll_ready` and `select` each turn into their own answer.
+            FdKind::Sock(end) => {
+                let st = self.socks.state(end);
+                let unread = st.unread.ok_or_else(|| sock_lost(fd))?;
+                let free = SOCK_CAPACITY.checked_sub(st.peer_unread.ok_or_else(|| sock_lost(fd))?).ok_or_else(|| sock_lost(fd))?;
+                Ok(PipeState { socket: true, write_end: false, readable: unread >= 1,
+                               writable: st.peer_open && free >= SOCK_LOWAT, other_closed: !st.peer_open })
             }
             FdKind::Kqueue => Err("a kqueue, not a guest pipe".to_string()),
             FdKind::Other => Err("not a guest pipe end".to_string()),
@@ -531,7 +864,10 @@ impl GuestKqueues {
         let st = self.pipe_state(fd)?;
         let mut r = 0;
         for bit in [POLLIN, POLLPRI, POLLRDNORM, POLLRDBAND] {
-            if events & bit != 0 && (st.readable || st.other_closed) { r |= bit; }
+            // T0-poll: an open socket end never answers POLLPRI or POLLRDBAND, a closed peer answers every
+            // requested read-ish bit.
+            let by_data = st.readable && !(st.socket && matches!(bit, POLLPRI | POLLRDBAND));
+            if events & bit != 0 && (by_data || st.other_closed) { r |= bit; }
         }
         if st.writable {
             if events & (POLLOUT | POLLWRNORM) != 0 { r |= POLLOUT; }
@@ -582,7 +918,7 @@ impl GuestKqueues {
 mod tests {
     use super::*;
     use retrace_arch::Unmark;
-    use retrace_arch::{EVFILT_TIMER, EV_RECEIPT};
+    use retrace_arch::EVFILT_TIMER;
 
     const KQ: u64 = 3;
     const ID: u64 = 0x1e7e_7711;
@@ -595,6 +931,61 @@ mod tests {
         let mut g = GuestKqueues::default();
         g.create(KQ).unwrap();
         g
+    }
+
+    /// M55 spec 2b: read is ready from one unread byte (`data` the count); write is ready while at least
+    /// 2048 bytes are free (`data` the free space): 1024 free is not ready, 3072 is.
+    #[test]
+    fn a_socket_end_is_readable_from_one_byte_and_writable_while_2048_are_free() {
+        let mut g = kq();
+        g.socket_pair(10, 11).unwrap();
+        let end = g.socks.fds[&10];
+        assert_eq!(g.socks.ready(10, end, EVFILT_READ).unwrap(), None);
+        assert_eq!(g.socks.ready(10, end, EVFILT_WRITE).unwrap(), Some((0, 8192)));
+        g.note_write(11, 1).unwrap();
+        assert_eq!(g.socks.ready(10, end, EVFILT_READ).unwrap(), Some((0, 1)));
+        g.note_read(10, 1).unwrap();
+        g.note_write(10, 7168).unwrap(); // 1024 free in 10's direction
+        assert_eq!(g.socks.ready(10, end, EVFILT_WRITE).unwrap(), None);
+        g.note_read(11, 2048).unwrap(); // 3072 free
+        assert_eq!(g.socks.ready(10, end, EVFILT_WRITE).unwrap(), Some((0, 3072)));
+        g.note_read(11, 8000).unwrap(); // more than counted: lost
+        let e = g.socks.ready(11, g.socks.fds[&11], EVFILT_READ).unwrap_err().unmark();
+        assert!(e.starts_with("M55: socket 11: the byte count is unknown"), "{e}");
+    }
+
+    /// M55 spec 2b: the peer's last close fires both filters with `EV_EOF`: read's `data` is the unread
+    /// count, write's is 8192; and a registered knote is re-queued by the close.
+    #[test]
+    fn a_socket_peer_close_sets_eof_on_both_filters() {
+        let mut g = kq();
+        g.socket_pair(10, 11).unwrap();
+        g.apply(KQ, &[ch(10, EVFILT_READ, EV_ADD, 0, 0, 0)]).unwrap();
+        g.apply(KQ, &[ch(10, EVFILT_WRITE, EV_ADD, 0, 0, 0)]).unwrap();
+        g.note_write(11, 2).unwrap();
+        g.close(11).unwrap();
+        let end = g.socks.fds[&10];
+        assert_eq!(g.socks.ready(10, end, EVFILT_READ).unwrap(), Some((EV_EOF, 2)));
+        assert_eq!(g.socks.ready(10, end, EVFILT_WRITE).unwrap(), Some((EV_EOF, 8192)));
+        let ev = g.take_events(KQ, 4).unwrap();
+        assert_eq!(ev.len(), 2);
+        assert!(ev.iter().all(|e| e.flags & EV_EOF != 0), "{ev:?}");
+        assert!(!g.sock_state(10).unwrap().peer_open);
+    }
+
+    /// A dup shares the open file: closing one of the peer's descriptors changes nothing; the last close does.
+    #[test]
+    fn a_dup_of_a_socket_end_keeps_the_peer_open_until_the_last_close() {
+        let mut g = kq();
+        g.socket_pair(10, 11).unwrap();
+        g.dup(11, 12).unwrap();
+        assert_eq!(g.kind_of(12), g.kind_of(11));
+        g.close(11).unwrap();
+        assert!(g.sock_state(10).unwrap().peer_open, "a dup of the peer remains");
+        g.close(12).unwrap();
+        assert!(!g.sock_state(10).unwrap().peer_open, "the last close ends it");
+        g.close(10).unwrap();
+        assert!(g.sock_state(10).is_none() && g.socks.ends.is_empty(), "a pair with no descriptor goes");
     }
 
     /// `kern_event.c:knote_fdclose`: a close drops the descriptor's READ and WRITE knotes in every
@@ -619,18 +1010,98 @@ mod tests {
         assert!(!g.is_kqueue(KQ) && g.knote(KQ, ID, EVFILT_USER).is_none(), "a kqueue's close drops its table");
     }
 
-    /// K4: the kernel answers these with an ENOENT `EV_ERROR` event, which the model never makes.
-    /// A refused call applies nothing, even its admitted earlier changes.
+    /// K4, M55 (T0-receipt): the kernel answers a change to an unregistered knote with an ENOENT `EV_ERROR`
+    /// event, which the model now makes: the change is not applied, the earlier ones are, and the call goes on
+    /// while the event list has room. Its event echoes the change's flags with `EV_ERROR` set.
     #[test]
-    fn a_change_to_an_unregistered_knote_is_refused_and_applies_nothing() {
+    fn a_change_to_an_unregistered_knote_is_an_enoent_error_event_and_the_call_goes_on() {
         let mut g = kq();
-        let e = g.apply(KQ, &[user(0, NOTE_TRIGGER)]).unwrap_err().unmark();
-        assert!(e.starts_with("M48: kevent change 0: ") && e.contains("not registered and the change has no EV_ADD"), "{e}");
-        let e = g.apply(KQ, &[user(EV_DELETE, 0)]).unwrap_err().unmark();
-        assert!(e.contains("EV_DELETE of a knote that is not registered"), "{e}");
-        let e = g.apply(KQ, &[user(EV_ADD, 0), ch(9, EVFILT_USER, 0, NOTE_TRIGGER, 0, 0)]).unwrap_err().unmark();
-        assert!(e.starts_with("M48: kevent change 1: "), "{e}");
-        assert!(g.knote(KQ, ID, EVFILT_USER).is_none(), "the refused call's first change was not applied");
+        let a = g.apply(KQ, &[user(0, NOTE_TRIGGER)]).unwrap();
+        assert_eq!((a.errno, a.events), (None, vec![ch(ID, EVFILT_USER, EV_ERROR, 0, 2, 0)]));
+        let a = g.apply(KQ, &[user(EV_DELETE, 0)]).unwrap();
+        assert_eq!(a.events, vec![ch(ID, EVFILT_USER, EV_DELETE | EV_ERROR, 0, 2, 0)]);
+        let a = g.apply(KQ, &[user(EV_ADD, 0), ch(9, EVFILT_USER, 0, NOTE_TRIGGER, 0, 0), user(EV_DELETE | EV_RECEIPT, 0)]).unwrap();
+        assert_eq!(a.events, vec![ch(9, EVFILT_USER, EV_ERROR, 0, 2, 0), ch(ID, EVFILT_USER, EV_DELETE | EV_RECEIPT | EV_ERROR, 0, 0, 0)],
+            "the error, then the delete's receipt");
+        assert!(g.knote(KQ, ID, EVFILT_USER).is_none(), "the add applied, then the delete removed it");
+    }
+
+    /// T0-receipt: a receipt with no room is dropped, a failing change with no room ends the call with its
+    /// errno after the earlier changes applied, and `open` false on an add is `EBADF`.
+    #[test]
+    fn a_failing_change_with_no_room_ends_the_call_with_its_errno() {
+        let mut g = kq();
+        g.pipe(5, 6).unwrap();
+        let add = |fd| ch(fd, EVFILT_READ, EV_ADD | EV_RECEIPT, 0, 0, fd);
+        let a = g.apply_room(KQ, &[add(5), add(6), add(9), add(5)], &[true, true, false, true], 1).unwrap();
+        assert_eq!((a.errno, a.events.len()), (Some(9), 1), "receipt 1 stored, receipt 2 dropped, the EBADF has no room");
+        assert!(g.knote(KQ, 5, EVFILT_READ).is_some() && g.knote(KQ, 6, EVFILT_READ).is_some(), "earlier changes applied");
+        let a = g.apply_room(KQ, &[add(9)], &[false], 0).unwrap();
+        assert_eq!(a.errno, Some(9), "nevents 0: no room at all");
+        let a = g.apply_room(KQ, &[add(9), add(6)], &[false, true], 3).unwrap();
+        assert_eq!((a.errno, a.events.len()), (None, 2), "with room the error is an event and the call goes on");
+        assert_eq!(a.events[0], ch(9, EVFILT_READ, EV_ADD | EV_RECEIPT | EV_ERROR, 0, 9, 9));
+    }
+
+    /// M55 3d: an `EV_CLEAR` knote is queued by an activation whose filter holds, once however many
+    /// activations come before a scan, and a re-evaluation never queues it. A queue slot whose filter stopped
+    /// holding before the scan is dropped unreported.
+    #[test]
+    fn an_edge_triggered_knote_is_queued_once_per_activation() {
+        let mut g = kq();
+        g.socket_pair(7, 8).unwrap();
+        g.apply(KQ, &[ch(7, EVFILT_READ, EV_ADD | EV_CLEAR, 0, 0, 0)]).unwrap();
+        assert!(!g.has_events(KQ), "an empty end is not readable at the add");
+        g.note_write(8, 2).unwrap();
+        g.note_write(8, 1).unwrap();
+        assert_eq!(g.take_events(KQ, 16).unwrap(), vec![ch(7, EVFILT_READ, EV_ADD | EV_CLEAR, 0, 3, 0)],
+            "two writes before a scan are one event, with the count at the scan");
+        assert!(g.take_events(KQ, 16).unwrap().is_empty(), "delivery cleared it; still readable, but no re-queue");
+        g.note_read(7, 1).unwrap();
+        assert!(g.take_events(KQ, 16).unwrap().is_empty(), "the end's own read activates nothing");
+        g.note_write(8, 1).unwrap();
+        g.note_read(7, 3).unwrap();
+        assert!(g.has_events(KQ), "queued by the write");
+        assert!(g.take_events(KQ, 16).unwrap().is_empty(), "drained before the scan: dropped unreported");
+        assert!(!g.has_events(KQ));
+        // The peer's last close queues it with EV_EOF, even with nothing unread.
+        g.close(8).unwrap();
+        assert_eq!(g.take_events(KQ, 16).unwrap(), vec![ch(7, EVFILT_READ, EV_ADD | EV_CLEAR | EV_EOF, 0, 0, 0)]);
+    }
+
+    /// M55 2c: any read or write of a pipe queues both ends' `EV_CLEAR` knotes whose filter holds, write
+    /// filter first (`p0/sockprobe.txt`), and the last writer's close queues the read knote with `EV_EOF`.
+    #[test]
+    fn an_edge_triggered_pipe_knote_is_queued_by_any_io_and_the_last_close() {
+        let mut g = kq();
+        g.pipe(5, 6).unwrap();
+        g.apply(KQ, &[ch(5, EVFILT_READ, EV_ADD | EV_CLEAR, 0, 0, 0), ch(6, EVFILT_WRITE, EV_ADD | EV_CLEAR, 0, 0, 0)]).unwrap();
+        let cap = PIPE_SIZE as i64;
+        assert_eq!(g.take_events(KQ, 16).unwrap(), vec![ch(6, EVFILT_WRITE, EV_ADD | EV_CLEAR, 0, cap, 0)], "queued at the add");
+        g.note_write(6, 2).unwrap();
+        assert_eq!(g.take_events(KQ, 16).unwrap(),
+            vec![ch(6, EVFILT_WRITE, EV_ADD | EV_CLEAR, 0, cap - 2, 0), ch(5, EVFILT_READ, EV_ADD | EV_CLEAR, 0, 2, 0)]);
+        g.close(6).unwrap();
+        assert_eq!(g.take_events(KQ, 16).unwrap(), vec![ch(5, EVFILT_READ, EV_ADD | EV_CLEAR | EV_EOF, 0, 2, 0)]);
+    }
+
+    /// T0-clear-oneshot: the pair is allowed on a socket's read filter alone, and is a one-shot.
+    #[test]
+    fn ev_clear_with_ev_oneshot_is_a_one_shot_on_a_socket_read_filter_only() {
+        let mut g = kq();
+        g.socket_pair(7, 8).unwrap();
+        g.pipe(5, 6).unwrap();
+        let both = EV_ADD | EV_CLEAR | EV_ONESHOT;
+        for c in [ch(5, EVFILT_READ, both, 0, 0, 0), ch(7, EVFILT_WRITE, both, 0, 0, 0), ch(7, EVFILT_READ, EV_ADD | EV_ONESHOT, 0, 0, 0)] {
+            let e = g.apply(KQ, &[c]).unwrap_err().unmark();
+            assert!(e.contains("EV_ONESHOT on a pipe or socket filter is not modelled"), "{e}");
+        }
+        g.apply(KQ, &[ch(7, EVFILT_READ, both, 0, 0, 0)]).unwrap();
+        g.note_write(8, 1).unwrap();
+        assert_eq!(g.take_events(KQ, 4).unwrap(), vec![ch(7, EVFILT_READ, both, 0, 1, 0)]);
+        assert!(g.knote(KQ, 7, EVFILT_READ).is_none(), "delivery dropped it");
+        g.note_write(8, 1).unwrap();
+        assert!(g.take_events(KQ, 4).unwrap().is_empty());
     }
 
     /// F8: a trigger activates; two before a scan are one event; `EV_CLEAR` deactivates at delivery.
@@ -752,14 +1223,14 @@ mod tests {
     }
 
     /// R5 and K3: every unmodelled filter, flag, descriptor or kqueue `dup` is refused by value,
-    /// naming it. libuv's `uv__stream_try_select` probe on a descriptor that is not a guest pipe is
+    /// naming it. (M55: `EV_RECEIPT` is modelled now, so `EV_DISPATCH` is the refused flag.) libuv's `uv__stream_try_select` probe on a descriptor that is not a guest pipe is
     /// the one external shape admitted, and it is never ready.
     #[test]
     fn an_unmodelled_filter_flag_or_descriptor_is_refused_by_value() {
         let mut g = kq();
         for (c, why) in [
             (ch(1, EVFILT_TIMER, EV_ADD, 0, 0, 0), "filter -7 is not modelled"),
-            (ch(1, EVFILT_USER, EV_ADD | EV_RECEIPT, 0, 0, 0), "flags 0x40 are not modelled"),
+            (ch(1, EVFILT_USER, EV_ADD | retrace_arch::EV_DISPATCH, 0, 0, 0), "flags 0x80 are not modelled"),
             (ch(1, EVFILT_USER, EV_ADD, NOTE_FFCOPY, 0, 0), "an EV_ADD whose fflags carry a NOTE_FF* operation"),
             (ch(1, EVFILT_USER, EV_ADD | EV_DISABLE, NOTE_TRIGGER, 0, 0), "both EV_DISABLE and NOTE_TRIGGER"),
             (ch(1, EVFILT_READ, EV_ADD, 0, 0, 0), "not a guest pipe end"),

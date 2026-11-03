@@ -70,6 +70,9 @@ fn each_trap_with_a_handler_delivers_what_native_delivers() {
     for &(mode, _, code) in CLASSES {
         let native = util::run_bounded(P, &[mode, "h"], &[], BOUND);
         assert_eq!(native.code, Some(42), "{mode} h: native: {}", String::from_utf8_lossy(&native.stdout));
+        // F-4 (I4): a hardware trap's frame has si_pid 0. Before the fix a `brk` (SIGTRAP, si_code 0) carried
+        // the recorder's pid, in record and replay alike, so only native's line could tell.
+        assert!(String::from_utf8_lossy(&native.stdout).contains("si_pid=0 "), "{mode} h: native's si_pid is 0");
         let t = scratch(&format!("{mode}-h.bin"));
         let rec = record(mode, &["h"], &t);
         assert_eq!((rec.code, String::from_utf8_lossy(&rec.stdout)), (Some(42), String::from_utf8_lossy(&native.stdout)),

@@ -314,10 +314,23 @@ fn a_program_that_pauses_for_a_signal_stops_at_one_clean_line() {
     assert!(line.contains("; thread 0 waits in sigsuspend for a signal nothing can send - see "), "{line}");
 }
 
-/// `socketpair` has no row. (M52 §3e made `sched_yield` a modelled call, so this row replaced its wall, C7.)
+/// A stream `socketpair` is modelled since M55; a datagram pair is the wall (M55 §3b). The row was
+/// `socketpair (syscall 135)` before M55 t1, which made the stream pair a modelled call.
 #[test]
 fn a_socketpair_stops_at_one_clean_line() {
-    assert_guest_wall(retrace_guest::CF_WALLS, &["socketpair"], "cf: socketpair\n", "socketpair (syscall 135)", "syscalls");
+    assert_guest_wall(retrace_guest::CF_WALLS, &["socketpair"], "cf: socketpair\n",
+        "M55: socketpair of SOCK_DGRAM: only a stream pair is modelled", "syscalls");
+}
+
+/// M55 t4 (spec §3g): a blocking read on an empty guest pipe that another thread would fill hung the
+/// recorder before M55. It is a wall now, in `threads`, naming the call and the descriptor (the guest's
+/// number for the read end, 4 under retrace). The output before it is printed, and replay ends at the
+/// incomplete-recording line.
+#[test]
+fn a_blocking_read_between_threads_stops_at_one_clean_line() {
+    let line = assert_guest_wall(retrace_guest::BLOCKIO_DYN, &["pipe"], "start\n",
+        "M55: read on guest pipe fd 4 would wait for another thread to write", "threads");
+    assert!(line.contains("blocking I/O between threads is not modelled"), "{line}");
 }
 
 /// M53 t4 (C1): `poll` on a regular file is outside the pipe model and refused by value, naming the

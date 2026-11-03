@@ -314,6 +314,22 @@ pub const POLLSEL_DYN: &str = concat!(env!("OUT_DIR"), "/pollsel_dyn");
 /// `get`, `alarm`, `ignored`, `nohandler`, `target`, `suspend`, `pending`, `sleeper`, `masked`, `einval`,
 /// `long`, `virtual` (see the source's header).
 pub const ALARM_DYN: &str = concat!(env!("OUT_DIR"), "/alarm_dyn");
+/// M55 t3: a signal to a thread blocked in a semaphore wait, `kevent`, a condition variable or a join, by
+/// mode — `sem`, `semthread`, `semtimed`, `kevent`, `keventthread`, `cv`, `term`, `maskedsem`,
+/// `maskedkevent` (see the source's header).
+pub const SIGBLOCKED_DYN: &str = concat!(env!("OUT_DIR"), "/sigblocked_dyn");
+/// M55 t1: a Unix stream socket pair by mode — `pair`, `flow`, `big`, `eof`, `level`, `poll`, `select`,
+/// `dup2console`, `execeof`, `shapes`, `dgram`, `refusals <which>`, `worker` (see the source's header).
+pub const SOCKPAIR_DYN: &str = concat!(env!("OUT_DIR"), "/sockpair_dyn");
+/// M55 t4: a blocking read or write on a guest pipe or socket that would wait for another thread, by mode:
+/// `pipe`, `sock`, `pipewrite`, `sockwrite`, `nonblock`, `dontwait`, `fitswrite` (see the source's header).
+pub const BLOCKIO_DYN: &str = concat!(env!("OUT_DIR"), "/blockio_dyn");
+/// M55 t4: a write to a pipe with no reader, SIGPIPE at its default: ends with 141.
+pub const FC_SIGPIPE: &str = concat!(env!("OUT_DIR"), "/fc_sigpipe");
+/// M55 t4: std's `UnixStream::pair()`, nonblocking, a round trip, one end dropped.
+pub const FC_RS_SOCKPAIR: &str = concat!(env!("OUT_DIR"), "/fc_rs_sockpair");
+/// M55 t1 tier-1 `fc_sockpair`: a nonblocking pair, one message each way, a kqueue level wait, EOF.
+pub const FC_SOCKPAIR: &str = concat!(env!("OUT_DIR"), "/fc_sockpair");
 /// M52 §3i: main spins on a flag a created thread would set; natively it exits 0 at once, under
 /// retrace's cooperative scheduler it never finishes (see the source's header).
 pub const STALL_DYN: &str = concat!(env!("OUT_DIR"), "/stall_dyn");
@@ -768,6 +784,13 @@ mod tests {
     fn kq_dyn_guest_parses() {
         // M48: proves the build.rs wiring and the path constant; behaviour is kq_e2e's.
         let l = parse_macho(&std::fs::read(KQ_DYN).unwrap());
+        assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
+    }
+
+    #[test]
+    fn sigblocked_dyn_guest_parses() {
+        // M55 t3: proves the build.rs wiring and the path constant; behaviour is sigblocked_e2e's.
+        let l = parse_macho(&std::fs::read(SIGBLOCKED_DYN).unwrap());
         assert!(l.segments.iter().any(|s| l.entry >= s.vaddr && l.entry < s.vaddr + s.memsz as u64));
     }
 

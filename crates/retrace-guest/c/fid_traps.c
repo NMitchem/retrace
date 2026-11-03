@@ -25,7 +25,8 @@ static void handler(int sig, siginfo_t *si, void *uc_) {
     ucontext_t *uc = uc_;
     uint64_t pc = uc->uc_mcontext->__ss.__pc;
     char b[160];
-    int n = snprintf(b, sizeof b, "HANDLER sig=%d si_code=%d si_addr=%s far=%s esr=%#llx\n", sig, si->si_code,
+    int n = snprintf(b, sizeof b, "HANDLER sig=%d si_code=%d si_pid=%s si_addr=%s far=%s esr=%#llx\n", sig, si->si_code,
+                     si->si_pid == 0 ? "0" : "set",
                      rel((uint64_t)si->si_addr, pc), rel(uc->uc_mcontext->__es.__far, pc),
                      (unsigned long long)uc->uc_mcontext->__es.__esr);
     write(1, b, n);

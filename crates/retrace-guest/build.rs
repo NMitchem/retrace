@@ -530,6 +530,35 @@ fn main() {
         .status().expect("clang alarm_dyn");
     assert!(status.success(), "alarm_dyn guest build failed");
 
+    // sigblocked_dyn: the M55 t3 fixture — a handled or terminating signal to a thread blocked in a
+    // semaphore wait, kevent, a condition variable or a join. Same recipe as alarm_dyn.
+    let src = format!("{}/c/sigblocked_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/sigblocked_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang sigblocked_dyn");
+    assert!(status.success(), "sigblocked_dyn guest build failed");
+
+    // sockpair_dyn: the M55 t1 fixture — a Unix stream socket pair by mode. Same recipe as alarm_dyn.
+    let src = format!("{}/c/sockpair_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/sockpair_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang sockpair_dyn");
+    assert!(status.success(), "sockpair_dyn guest build failed");
+
+    // blockio_dyn: the M55 t4 fixture, a blocking read or write on a guest pipe or socket that would wait
+    // for another thread. Same recipe as alarm_dyn.
+    let src = format!("{}/c/blockio_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/blockio_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang blockio_dyn");
+    assert!(status.success(), "blockio_dyn guest build failed");
+
     // stall_dyn: the M52 §3i fixture — main spins on a flag a created thread would set. Same recipe
     // as hello_dyn; pthreads are in libSystem.
     let src = format!("{}/c/stall_dyn.c", env!("CARGO_MANIFEST_DIR"));
@@ -1161,7 +1190,7 @@ fn main() {
     let dir = env!("CARGO_MANIFEST_DIR");
     for name in ["fc_null_load", "fc_null_store", "fc_null_call", "fc_munmapped", "fc_low_store",
                  "fc_stack_overflow", "fc_uaf", "fc_assert", "fc_sleep", "fc_usleep", "fc_nanosleep",
-                 "fc_mutex", "fc_fileio", "fc_env", "fc_c_trap", "fc_signal", "fc_posix", "fc_spawn_child"] {
+                 "fc_mutex", "fc_fileio", "fc_env", "fc_c_trap", "fc_signal", "fc_posix", "fc_spawn_child", "fc_sockpair", "fc_sigpipe"] {
         let src = format!("{dir}/c/{name}.c");
         let bin = format!("{out}/{name}");
         println!("cargo:rerun-if-changed={src}");
@@ -1186,7 +1215,7 @@ fn main() {
     let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
     for (name, harness) in [("fc_rs_null", false), ("fc_rs_sleep", false),
                             ("fc_rs_tests", true), ("fc_rs_tests_fail", true), ("fc_rs_threads", true),
-                            ("fc_rs_fs", false), ("fc_rs_exec", false)] {
+                            ("fc_rs_fs", false), ("fc_rs_exec", false), ("fc_rs_sockpair", false)] {
         let src = format!("{dir}/rs/{name}.rs");
         let bin = format!("{out}/{name}");
         println!("cargo:rerun-if-changed={src}");

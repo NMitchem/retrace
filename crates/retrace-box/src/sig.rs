@@ -46,13 +46,26 @@ impl Default for SigAction {
 pub struct SigTable {
     /// Indexed by signal number; `[0]` is unused so indexing mirrors signal numbering (1..=31).
     disp: [SigAction; NSIG],
+    /// M55 §3f, Ruling T4-a: the pid a kernel-raised signal's `si_pid` carries, when replay must take it from
+    /// the recording. A HOST value applied verbatim: the recorder's own pid (the guest's `getpid` is
+    /// forwarded) is not the replayer's, so it cannot be recomputed, as M23's `ServiceGetSpecialPort` reply
+    /// cannot. Every other byte of the frame is still compared. `None` on record, and between deliveries on
+    /// replay: `mirror_delivery` sets it for one `deliver_signal_to` and clears it. `frame_pid` then falls
+    /// back to the process's own id.
+    pid_override: Option<u32>,
+}
+
+impl SigTable {
+    pub fn set_pid_override(&mut self, pid: Option<u32>) { self.pid_override = pid; }
+    pub fn pid_override(&self) -> Option<u32> { self.pid_override }
+    pub fn frame_pid(&self) -> u32 { self.pid_override.unwrap_or_else(std::process::id) }
 }
 
 impl Default for SigTable {
     /// All-default — which is genuinely correct for a fresh process, so there is no seeding step
     /// that could be got wrong.
     fn default() -> Self {
-        SigTable { disp: [SigAction::default(); NSIG] }
+        SigTable { disp: [SigAction::default(); NSIG], pid_override: None }
     }
 }
 
@@ -230,6 +243,8 @@ pub struct NeonState {
 pub struct FrameInput {
     pub sig: u64,
     pub si_code: u64,
+    /// `si_pid`, set for a kernel-raised signal (`si_code` 0) and 0 otherwise.
+    pub si_pid: u32,
     pub si_addr: u64,
     pub esr: u64,
     pub far: u64,
@@ -289,6 +304,7 @@ pub fn build_frame(inp: &FrameInput) -> (Vec<u8>, EntryRegs) {
     let si = FRAME_SIGINFO_OFF;
     f[si..si + 4].copy_from_slice(&(inp.sig as u32).to_le_bytes()); // si_signo
     f[si + 8..si + 12].copy_from_slice(&(inp.si_code as u32).to_le_bytes()); // si_code
+    f[si + 12..si + 16].copy_from_slice(&inp.si_pid.to_le_bytes()); // si_pid
     f[si + 24..si + 32].copy_from_slice(&inp.si_addr.to_le_bytes()); // si_addr
 
     // --- ucontext_t at +104. uc_mcontext is a POINTER; the mcontext is the block at +160. ---
@@ -342,6 +358,18 @@ pub fn build_frame(inp: &FrameInput) -> (Vec<u8>, EntryRegs) {
 
 #[cfg(test)]
 mod tests {
+    /// Ruling T4-a: the pid override is scoped. Unset it is the process's own id; set it wins; cleared it is the
+    /// process's own id again, so a later delivery that is not a recorded kernel-raised one is unaffected.
+    #[test]
+    fn the_pid_override_is_scoped_and_clears() {
+        let mut t = SigTable::default();
+        assert_eq!((t.pid_override(), t.frame_pid()), (None, std::process::id()));
+        t.set_pid_override(Some(4242));
+        assert_eq!(t.frame_pid(), 4242);
+        t.set_pid_override(None);
+        assert_eq!((t.pid_override(), t.frame_pid()), (None, std::process::id()));
+    }
+
     use super::*;
 
     #[test]
@@ -485,6 +513,7 @@ mod tests {
         FrameInput {
             sig: 11,
             si_code: 1,
+            si_pid: 0,
             si_addr: 0xdead_0000,
             esr: 0x9200_0046,
             far: 0xdead_0000,

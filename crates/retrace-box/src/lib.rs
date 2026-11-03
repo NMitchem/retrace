@@ -787,6 +787,15 @@ const PTHREAD_TID_OFF: u64 = 0xd8;
 /// reads. M53 §3c translates the iovec calls (`Box_::guest_iovec`), so `writev`'s return moves a
 /// pipe's count as `write`'s does and `readv`'s as `read`'s.
 const SYS_KQUEUE: u64 = 362;
+const EPIPE: u64 = 32;
+const F_SETFL: u64 = 4;
+const F_SETNOSIGPIPE: u64 = 73;
+const O_NONBLOCK: u32 = 0x4;
+const O_APPEND: u32 = 0x8;
+const O_ASYNC: u32 = 0x40;
+const FIONBIO: u32 = 0x8004_667e;
+const SO_NOSIGPIPE: u64 = 0x1022;
+const MSG_DONTWAIT: u64 = 0x80;
 const SYS_WRITEV: u64 = 121;
 const SYS_WRITEV_NOCANCEL: u64 = 412;
 const SYS_READV: u64 = 120;
@@ -928,8 +937,13 @@ pub enum RaiseKind {
     Terminate,
     /// A runnable thread runs its handler.
     Deliver,
-    /// A sleeping or `sigsuspend`ing thread is ended with `EINTR`, then runs its handler.
+    /// A thread blocked in a sleep, `sigsuspend`, semaphore wait or `kevent` is ended with that call's
+    /// measured return (`Box_::interrupt_for_signal`), then runs its handler.
     Interrupt,
+    /// M55 §3h: a handler for a thread blocked where its interruption is not modelled (`Cv`, `Mutex`,
+    /// `Poll`, `Parked`). Refused at the raise by value (`Box_::refuse_raise_text`), before anything
+    /// changes.
+    Refuse,
 }
 
 /// M51 §3d (T3-b): what a hardware fault's signal does to the thread that took it, as
@@ -5260,6 +5274,30 @@ impl Box_ {
             // the ordinary path — before M38 both leaked in the recorder and the write end never
             // reached the guest at all (`Ret::FdPair`'s doc).
             self.bind_returned_pair(ret as i32, ret1 as i32)
+        } else if let Some(si) = retrace_arch::returns_fd_pair_out(num).filter(|_| !err) {
+            // M55: socketpair. The forward wrote two HOST descriptors through `sv`. Read them, bind both to
+            // guest slots (`sv[0]` first, as `pipe`'s read end is), write the GUEST numbers back and make
+            // that the call's recorded write, so the trace holds guest numbers only and replay compares
+            // its own two `alloc()`s with it. Only AF_UNIX/SOCK_STREAM/0 is modelled; any other shape that
+            // succeeded on the host is closed before the guest sees it and refused (`Syscalls` wall).
+            let sv = gargs[si];
+            let raw = self.read_guest(sv, 8);
+            let h0 = i32::from_le_bytes(raw[..4].try_into().unwrap());
+            let h1 = i32::from_le_bytes(raw[4..].try_into().unwrap());
+            if (gargs[0], gargs[1], gargs[2]) != (1, 1, 0) {
+                // SAFETY: closing the two descriptors the forward just opened for the guest.
+                unsafe { libc::close(h0); libc::close(h1); }
+                retrace_arch::refuse!(Syscalls, "M55: socketpair of domain {} type {} protocol {} succeeded on the host and is not modelled. \
+                                                 syscall 135 args=[{}]", gargs[0], gargs[1], gargs[2], Self::fmt_args(gargs));
+            }
+            let (g0, g1) = self.bind_returned_pair(h0, h1);
+            let mut out = Vec::with_capacity(8);
+            out.extend_from_slice(&(g0 as u32).to_le_bytes());
+            out.extend_from_slice(&(g1 as u32).to_le_bytes());
+            self.write_guest(sv, &out);
+            writes.retain(|r| !(r.ipa < sv + 8 && sv < r.ipa + r.bytes.len() as u64));
+            writes.push(Region { ipa: sv, bytes: out });
+            (ret, 0)
         } else { (ret, 0) };
         // A successful close retires the guest's slot, so a later use of that number is EBADF
         // instead of reaching whatever retrace has open there. An IDENTITY console slot never
@@ -5700,8 +5738,13 @@ impl Box_ {
         // M53 §3f: a `sigsuspend`'s frame records the mask the call FOUND (xnu's `uu_oldmask`), not the
         // argument mask the handler is about to run under.
         let frame_mask = self.threads.take_frame_mask(tid);
+        // M55 §3f: a kernel-raised signal (SIGPIPE after an EPIPE) has `si_code` 0 and carries the pid; a
+        // pended one is told apart by its thread's origin bit, which this consumes.
+        let si_code = if si_code == retrace_arch::SI_USER && self.threads.take_kernel_origin(tid, sig) { 0 } else { si_code };
+        // F-4: only the kernel's SIGPIPE carries the pid; a `brk` is (SIGTRAP, si_code 0) and its si_pid is 0 as native.
+        let si_pid = if si_code == 0 && sig == retrace_arch::SIGPIPE { self.sigtable.frame_pid() } else { 0 };
         let inp = FrameInput {
-            sig, si_code, si_addr, esr, far, ts, ns,
+            sig, si_code, si_pid, si_addr, esr, far, ts, ns,
             mask: frame_mask.unwrap_or_else(|| self.threads.mask_of(tid)),   // the PRE-signal mask: what sigreturn restores
             act, frame_base, on_alt,
         };
@@ -6436,8 +6479,10 @@ impl Box_ {
     /// 1. The timeout is copied in before the kqueue is looked up (K5).
     /// 2. The kqueue, the counts and the lists are checked. Every change is read before any event
     ///    is written (Review Focus 1: libuv's runtime detection passes one buffer as both lists).
-    /// 3. The changes are applied, all or nothing (`GuestKqueues::apply`). A waiter whose kqueue
-    ///    now holds an event is woken, with its reply written at the wake (`deliver_wake`).
+    /// 3. The changes are applied in order (`GuestKqueues::apply_room`). A waiter whose kqueue
+    ///    now holds an event is woken, with its reply written at the wake (`deliver_wake`). Since M55 a
+    ///    receipt or error event ends the call here with those events, no scan and no block; a failing
+    ///    change with no room left for its event returns -1 and its errno (T0-receipt).
     /// 4. With no event list, it returns 0, whatever the timeout (F7).
     /// 5. Otherwise it writes the events it finds and returns their count.
     /// 6. With none found, a zero timeout returns 0, and anything else blocks the caller. A NULL
@@ -6488,13 +6533,8 @@ impl Box_ {
         let changes: Vec<retrace_arch::Kevent> = bytes.chunks_exact(gkq::KEVENT_BYTES)
             .map(|c| retrace_arch::Kevent::from_bytes(c.try_into().expect("chunks_exact")))
             .collect();
-        for (i, c) in changes.iter().enumerate() {
-            if matches!(c.filter, retrace_arch::EVFILT_READ | retrace_arch::EVFILT_WRITE) && !self.fds.is_open(c.ident) {
-                return Err(fail(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("M48: kevent change {i}: filter {} on fd {}, which is not open: the \
-                                         kernel answers an EBADF EV_ERROR event, which is not modelled (K4)",
-                                        c.filter, c.ident))));
-            }
-        }
+        // M55: a descriptor that is not open is an EBADF error event on its add, never a wall (T0-receipt).
+        let open: Vec<bool> = changes.iter().map(|c| self.fds.is_open(c.ident)).collect();
         // Probed with the write's own condition (`check_writable_va`), not by reading: an event list
         // the guest has not written yet may reach into a reserved page no store has committed.
         if let Err(why) = self.check_writable_va(elist, nevents * gkq::KEVENT_BYTES) {
@@ -6508,8 +6548,17 @@ impl Box_ {
                                      blocked on it; which thread takes an event is unmeasured (K2)", w.tid))));
         }
         // 3. The changes, then any waiter they readied.
-        self.gkq.apply(kq, &changes).map_err(fail)?;
+        let applied = self.gkq.apply_room(kq, &changes, &open, nevents).map_err(fail)?;
         self.wake_kevent_waiters().map_err(fail)?;
+        // 3b. M55: a receipt or an error event is the call's whole answer. It scans nothing and blocks
+        // nowhere, and a failing change with no room left for its event ends the call with its errno,
+        // the events already stored staying stored (T0-receipt).
+        if !applied.events.is_empty() {
+            let out: Vec<u8> = applied.events.iter().flat_map(|e| e.to_bytes()).collect();
+            self.write_va_committing(elist, &out).map_err(|m| fail(format!("M55: kevent event list: {m}")))?;
+        }
+        if let Some(errno) = applied.errno { return Ok((errno, true)); }
+        if !applied.events.is_empty() { return Ok((applied.events.len() as u64, false)); }
         // 4. F7: no event list, no scan.
         if nevents == 0 { return Ok((0, false)); }
         // 5. The events found.
@@ -6576,13 +6625,64 @@ impl Box_ {
         let effect = match num {
             SYS_KQUEUE => self.gkq.create(ret),
             n if retrace_arch::returns_fd_pair(n) => self.gkq.pipe(ret, ret1),
+            // M55: `socketpair` wrote its two guest descriptors through `sv`, which both sides read back
+            // (record rewrote them, replay applied the recorded rewrite), so one call serves both.
+            n if retrace_arch::returns_fd_pair_out(n).is_some() => {
+                let si = retrace_arch::returns_fd_pair_out(n).expect("matched just above");
+                match self.read_va_checked(args[si], 8) {
+                    Some(raw) => {
+                        let g0 = u64::from(u32::from_le_bytes(raw[..4].try_into().unwrap()));
+                        let g1 = u64::from(u32::from_le_bytes(raw[4..].try_into().unwrap()));
+                        self.gkq.socket_pair(g0, g1)
+                    }
+                    None => Err(format!("M55: socketpair: the descriptor pair at {:#x} is not readable after the call", args[si])),
+                }
+            }
             n if retrace_arch::is_close_syscall(n) => self.gkq.close(args[0]),
             n if n == retrace_arch::SYS_DUP || n == retrace_arch::SYS_DUP2 || retrace_arch::is_fcntl_dupfd(n, &args) =>
                 self.gkq.dup(args[0], ret),
             retrace_arch::SYS_READ | retrace_arch::SYS_READ_NOCANCEL | SYS_READV | SYS_READV_NOCANCEL =>
                 self.gkq.note_read(args[0], ret),
-            n if retrace_arch::is_write_syscall(n) || n == SYS_WRITEV || n == SYS_WRITEV_NOCANCEL =>
+            // M55: `recvfrom` (29, 403) reads a socket end; MSG_PEEK (0x2) returns bytes it leaves unread.
+            retrace_arch::SYS_RECVFROM | retrace_arch::SYS_RECVFROM_NOCANCEL =>
+                if args[3] & 0x2 != 0 { Ok(()) } else { self.gkq.note_read(args[0], ret) },
+            n if retrace_arch::is_write_syscall(n) || n == SYS_WRITEV || n == SYS_WRITEV_NOCANCEL
+                || matches!(n, retrace_arch::SYS_SENDTO | 413 | 28 | 402) =>
                 self.gkq.note_write(args[0], ret),
+            // M55 §3g, §3f: `O_NONBLOCK` and the no-SIGPIPE bit belong to a guest end's open file (T0-nonblock,
+            // T0-nosigpipe). A call that failed never reaches here, so each is read from a call that succeeded.
+            retrace_arch::SYS_FCNTL | retrace_arch::SYS_FCNTL_NOCANCEL
+                if (args[1] == F_SETFL || args[1] == F_SETNOSIGPIPE) && self.gkq.io_end(args[0]).is_some() => {
+                if args[1] == F_SETNOSIGPIPE {
+                    self.gkq.set_nosigpipe(args[0], args[2] as u32 != 0);
+                    Ok(())
+                } else if args[2] as u32 & !(O_NONBLOCK | O_APPEND | O_ASYNC | 0x3) != 0 {
+                    // The access mode (0x3) is ignored by the kernel, and `F_GETFL | O_NONBLOCK` is the
+                    // idiom that passes it; any other bit is one the model cannot account for.
+                    Err(retrace_arch::wall(retrace_arch::WallCategory::Syscalls, format!(
+                        "M55: fcntl(F_SETFL, {:#x}) on guest fd {}: a status flag beyond O_NONBLOCK, O_APPEND and \
+                         O_ASYNC is not modelled", args[2] as u32, args[0])))
+                } else {
+                    self.gkq.set_nonblock(args[0], args[2] as u32 & O_NONBLOCK != 0);
+                    Ok(())
+                }
+            }
+            retrace_arch::SYS_IOCTL if args[1] as u32 == FIONBIO && self.gkq.io_end(args[0]).is_some() =>
+                match self.read_va_checked(args[2], 4) {
+                    Some(raw) => {
+                        self.gkq.set_nonblock(args[0], u32::from_le_bytes(raw[..4].try_into().unwrap()) != 0);
+                        Ok(())
+                    }
+                    None => Err(format!("M55: ioctl(FIONBIO) on guest fd {}: the int at {:#x} is not readable after the call", args[0], args[2])),
+                },
+            retrace_arch::SYS_SETSOCKOPT if args[1] == 0xffff && args[2] == SO_NOSIGPIPE && self.gkq.io_end(args[0]).is_some() =>
+                match self.read_va_checked(args[3], 4) {
+                    Some(raw) if args[4] as u32 >= 4 => {
+                        self.gkq.set_nosigpipe(args[0], u32::from_le_bytes(raw[..4].try_into().unwrap()) != 0);
+                        Ok(())
+                    }
+                    _ => Ok(()),
+                },
             // Not in the fd set: no effect, and no wake (see the doc above).
             _ => return Ok(()),
         };
@@ -6769,13 +6869,15 @@ impl Box_ {
                         if st.write_end {
                             return Err(not_pipe(fd as u64, "a write end in the read set: not modelled".to_string()));
                         }
-                        if st.readable { rout[fd / 8] |= 1 << (fd % 8); count += 1; }
+                        // T0-select: a socket end's read set is also ready on a closed peer.
+                        if st.readable || (st.socket && st.other_closed) { rout[fd / 8] |= 1 << (fd % 8); count += 1; }
                     }
                     if inw {
-                        if !st.write_end {
+                        if !st.write_end && !st.socket {
                             return Err(not_pipe(fd as u64, "a read end in the write set: not modelled".to_string()));
                         }
-                        // Unlike poll, a write end whose reader closed is writable (t0 M7).
+                        // Unlike poll, a write end whose reader closed is writable (t0 M7), and so is a
+                        // socket end whose peer closed (T0-select).
                         if st.writable || st.other_closed { wout[fd / 8] |= 1 << (fd % 8); count += 1; }
                     }
                 }
@@ -7027,28 +7129,50 @@ impl Box_ {
     /// dispatch arms ask this one function (symmetry rule 1).
     pub fn invalid_signal(sig: u64) -> bool { sig as u32 > 31 }
 
-    /// M53 §3f: what raising `sig` on `tid` does, as the one answer the `kill` and `__pthread_kill` arms
-    /// (record and replay) and the timer share. The mask is asked first (M16), then the state:
-    /// - a thread blocked in a sleep or `sigsuspend` is ended by a signal with a handler (`Interrupt`),
-    ///   and ignores one that is ignored or defaults to ignore, as a sleeper does natively (C2);
-    /// - any other blocked thread pends the signal until its wake (M17);
-    /// - a runnable one takes it by its disposition.
+    /// M53 §3f, M55 §3h: what raising `sig` on `tid` does, as the one answer the `kill` and
+    /// `__pthread_kill` arms (record and replay) and the timer share. In order:
+    /// 1. a masked signal pends, for every state (M16);
+    /// 2. one that is ignored or defaults to ignore is discarded, and one that defaults to ending the
+    ///    process ends it, **whatever state the target is in**: natively no thread needs to run for
+    ///    either (M55 t0 `pipethread term`);
+    /// 3. a handler by state: a sleep, `sigsuspend`, semaphore wait or `kevent` is ended by it
+    ///    (`Interrupt`); `Join`, `Wait` and `Yield` pend until their wake (M17); `Cv`, `Mutex`,
+    ///    `Poll` and `Parked` are refused (`Refuse`); a runnable thread takes it (`Deliver`).
     pub fn classify_raise(&self, tid: usize, sig: u64) -> RaiseKind {
-        let by_disposition = |interrupts: bool| match self.sigtable.action(sig).disp {
-            Disposition::Handler(_) => if interrupts { RaiseKind::Interrupt } else { RaiseKind::Deliver },
-            Disposition::Ign => RaiseKind::Ignore,
-            Disposition::Dfl => match retrace_arch::default_action(sig) {
+        if self.threads.is_blocked_for(tid, sig) { return RaiseKind::Pend; }
+        match self.sigtable.action(sig).disp {
+            Disposition::Ign => return RaiseKind::Ignore,
+            Disposition::Dfl => return match retrace_arch::default_action(sig) {
                 retrace_arch::DefaultAction::Ignore => RaiseKind::Ignore,
                 retrace_arch::DefaultAction::Terminate => RaiseKind::Terminate,
             },
-        };
-        if self.threads.is_blocked_for(tid, sig) { return RaiseKind::Pend; }
-        match self.threads.state_of(tid) {
-            thread::ThreadState::Blocked(thread::BlockReason::Sleep { .. } | thread::BlockReason::SigSuspend { .. }) =>
-                by_disposition(true),
-            thread::ThreadState::Blocked(_) => RaiseKind::Pend,
-            _ => by_disposition(false),
+            Disposition::Handler(_) => {}
         }
+        use thread::BlockReason as B;
+        match self.threads.state_of(tid) {
+            thread::ThreadState::Blocked(B::Sleep { .. } | B::SigSuspend { .. } | B::Sem { .. } | B::Kevent { .. }) =>
+                RaiseKind::Interrupt,
+            thread::ThreadState::Blocked(B::Cv { .. } | B::Mutex { .. } | B::Poll { .. } | B::Parked) => RaiseKind::Refuse,
+            thread::ThreadState::Blocked(_) => RaiseKind::Pend,
+            _ => RaiseKind::Deliver,
+        }
+    }
+
+    /// M55 §3h: the text of the wall for a `RaiseKind::Refuse`, which both raise arms and the timer give
+    /// the same words (the arms as `wall`, the timer through `refuse!`).
+    pub fn refuse_raise_text(&self, tid: usize, sig: u64) -> String {
+        use thread::BlockReason as B;
+        let call = match self.threads.state_of(tid) {
+            thread::ThreadState::Blocked(B::Cv { .. }) => "psynch_cvwait",
+            thread::ThreadState::Blocked(B::Mutex { .. }) => "psynch_mutexwait",
+            thread::ThreadState::Blocked(B::Poll { .. }) => "poll, select or pselect",
+            thread::ThreadState::Blocked(B::Parked) => "workq_kernreturn (a parked workqueue thread)",
+            s => panic!("refuse_raise_text for thread {tid}, which is {s:?}"),
+        };
+        format!("a handled signal ({}) to thread {tid}, blocked in {call}: delivery there is not modelled. \
+            The kernel's return for that wait carries an effect (a condition variable's sequence word, a \
+            mutex's state) that retrace does not reproduce, and a delivery over it would leave the program \
+            reading a wait it never finished.", retrace_arch::signal_name(sig))
     }
 
     /// M53 §3f (C2): end `tid`'s sleep or `sigsuspend` for a signal about to be delivered to it. The
@@ -7056,8 +7180,28 @@ impl Box_ {
     /// frame is then built from, so `sigreturn` lands on that return. Called by the `Interrupt` arms of
     /// the raise paths and the timer, ahead of `deliver_signal_to`, on both sides alike.
     pub fn interrupt_for_signal(&mut self, tid: usize) {
+        // M55 §3h: a `kevent` waiter leaves its kqueue's slot without consuming an event; a semaphore
+        // waiter is just its thread's state (the count is the box's `Semaphores`, which a wait that
+        // never completed did not touch).
+        let sem = match self.threads.state_of(tid) {
+            thread::ThreadState::Blocked(thread::BlockReason::Kevent { kq, .. }) => {
+                self.gkq.take_waiter(kq).filter(|w| w.tid == tid).unwrap_or_else(|| panic!(
+                    "M55: thread {tid} is blocked in kevent on kq {kq}, which records no such waiter"));
+                false
+            }
+            thread::ThreadState::Blocked(thread::BlockReason::Sem { .. }) => true,
+            _ => false,
+        };
         self.threads.interrupt(tid);
-        if tid == self.threads.current() {
+        if sem {
+            // T0-carry: a mach trap leaves the carry as the thread entered it; only `x0` (KERN_ABORTED)
+            // is written, and the frame's PSTATE is the entry state untouched.
+            if tid == self.threads.current() {
+                self.vcpu.set_reg(reg::x(0), retrace_arch::KERN_ABORTED).unwrap();
+            } else {
+                self.threads.ctx_mut(tid).regs.x[0] = retrace_arch::KERN_ABORTED;
+            }
+        } else if tid == self.threads.current() {
             self.complete_syscall_before_delivery(retrace_arch::EINTR, true);
         } else {
             let ctx = self.threads.ctx_mut(tid);
@@ -7103,6 +7247,8 @@ impl Box_ {
             RaiseKind::Pend => self.threads.pend(target, sig),
             RaiseKind::Ignore => {}
             RaiseKind::Terminate => self.itimer.set_terminal(sig),
+            // M55 §3h: the timer's SIGALRM has no error channel here, so it is `refuse!`.
+            RaiseKind::Refuse => { let text = self.refuse_raise_text(target, sig); retrace_arch::refuse!(Signals, "M55: {}", text) }
             RaiseKind::Interrupt => {
                 self.interrupt_for_signal(target);
                 self.deliver_signal_to(target, sig, retrace_arch::SI_USER, 0, 0, 0);
@@ -7208,6 +7354,129 @@ impl Box_ {
         Ok((ret, err))
     }
 
+    /// M55 §3b, §3c: the socket calls the model cannot answer, refused by value **before any forward**.
+    /// Record-only: a refusal ends the recording at its wall, so replay never reaches one.
+    ///
+    /// - `socketpair(AF_UNIX, SOCK_DGRAM, *)`: only a stream pair is modelled. Every other shape is
+    ///   forwarded, and native's errno comes back (a shape that succeeds anyway is refused after the
+    ///   forward, in `forward_and_diff`);
+    /// - on a guest socket end: `shutdown`, `sendmsg` with control data (an `SCM_RIGHTS` descriptor
+    ///   would be a host number), `sendmsg_x`, and `setsockopt` of `SO_SNDBUF`, `SO_RCVBUF`,
+    ///   `SO_SNDLOWAT` or `SO_RCVLOWAT`, because the model's constants would go stale.
+    pub fn socket_refusal(&self, num: u64, args: [u64; 8]) -> Option<String> {
+        const SOL_SOCKET: u64 = 0xffff;
+        let wall = |why: String| retrace_arch::wall(retrace_arch::WallCategory::Syscalls, format!(
+            "M55: {why}. syscall {num} args=[{}]", Self::fmt_args(args)));
+        if num == retrace_arch::SYS_SOCKETPAIR && args[0] == 1 && args[1] == 2 {
+            return Some(wall("socketpair of SOCK_DGRAM: only a stream pair is modelled".to_string()));
+        }
+        if !matches!(num, 134 | 481 | 28 | 402 | retrace_arch::SYS_SETSOCKOPT) { return None; }
+        if !matches!(self.gkq.kind_of(args[0]), gkq::FdKind::Sock(_)) { return None; }
+        let call = match num {
+            134 => "shutdown".to_string(),
+            481 => "sendmsg_x".to_string(),
+            28 | 402 => {
+                // struct msghdr: msg_control at 32, msg_controllen (u32) at 40.
+                // F-5: the msghdr's iovec is a nested guest pointer the forward never translates (the host
+                // answers EFAULT), so every `sendmsg` on a guest socket end is refused by value. A successor
+                // translates it with M53's iovec spans.
+                "sendmsg (its msghdr iovec is not translated)".to_string()
+            }
+            _ => {
+                let name = match (args[1], args[2]) {
+                    (SOL_SOCKET, 0x1001) => "SO_SNDBUF",
+                    (SOL_SOCKET, 0x1002) => "SO_RCVBUF",
+                    (SOL_SOCKET, 0x1003) => "SO_SNDLOWAT",
+                    (SOL_SOCKET, 0x1004) => "SO_RCVLOWAT",
+                    _ => return None,
+                };
+                format!("setsockopt {name}")
+            }
+        };
+        Some(wall(format!("{call} on guest socket fd {} is not modelled", args[0])))
+    }
+
+    /// M55 §3g: the total length of the iovec array at `va` with `cnt` entries, or `None` if it cannot be read
+    /// (the call then answers its own error, and is no wait).
+    fn iov_total(&self, va: u64, cnt: u64) -> Option<u64> {
+        let cnt = cnt as i32;
+        if cnt <= 0 || cnt as u64 > retrace_arch::IOV_MAX { return None; }
+        let arr = self.read_va_checked(va, cnt as usize * 16)?;
+        Some(iov::decode(&arr).iter().fold(0u64, |t, &(_, l)| t.saturating_add(l)))
+    }
+
+    /// M55 §3g: a blocking read or write on a guest pipe or socket end that would wait for another thread is
+    /// a wall, never a hang. The forwarded call would block retrace's only thread, and the worker that
+    /// could end the wait could never run. Called before any forward, by record's generic and iovec arms
+    /// and by replay's mirrors of them (symmetry rule 1); a recording that holds such a call does not exist.
+    ///
+    /// - read family (`read`, `readv`, `recvfrom`, `recvmsg`): the end is blocking, the call has no
+    ///   `MSG_DONTWAIT`, its length is not 0, nothing is unread and the other side is open;
+    /// - write family (`write`, `writev`, `sendto`, `sendmsg`): the same, with the other side open and the write
+    ///   longer than `capacity - held` (T0-blockwrite: 65536 for a pipe, 8192 for a socket direction).
+    ///
+    /// A lost count refuses with the existing lost text rather than guess.
+    pub fn would_block(&self, num: u64, args: [u64; 8]) -> Result<(), String> {
+        enum Len { Direct(u64), Iov(u64, u64), Msg(u64) }
+        let (read, flags, len) = match num {
+            3 | 396 => (true, 0, Len::Direct(args[2])),
+            SYS_READV | SYS_READV_NOCANCEL => (true, 0, Len::Iov(args[1], args[2])),
+            29 | 403 => (true, args[3], Len::Direct(args[2])),
+            27 | 401 => (true, args[2], Len::Msg(args[1])),
+            4 | 398 => (false, 0, Len::Direct(args[2])),
+            SYS_WRITEV | SYS_WRITEV_NOCANCEL => (false, 0, Len::Iov(args[1], args[2])),
+            133 | 413 => (false, args[3], Len::Direct(args[2])),
+            28 | 402 => (false, args[2], Len::Msg(args[1])),
+            _ => return Ok(()),
+        };
+        let Some(e) = self.gkq.io_end(args[0]) else { return Ok(()) };
+        if e.nonblock || flags & MSG_DONTWAIT != 0 || !e.other_open { return Ok(()); }
+        if (read && !e.readable) || (!read && !e.writable) { return Ok(()); }
+        let len = match len {
+            Len::Direct(n) => n,
+            Len::Iov(va, cnt) => match self.iov_total(va, cnt) { Some(n) => n, None => return Ok(()) },
+            Len::Msg(va) => {
+                let Some(h) = self.read_va_checked(va, 48) else { return Ok(()) };
+                let iov = u64::from_le_bytes(h[16..24].try_into().unwrap());
+                let cnt = u32::from_le_bytes(h[24..28].try_into().unwrap()) as u64;
+                match self.iov_total(iov, cnt) { Some(n) => n, None => return Ok(()) }
+            }
+        };
+        if len == 0 { return Ok(()); }
+        let what = if e.socket { "socket" } else { "pipe" };
+        let wall = |why: &str| retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
+            "M55: {why}: blocking I/O between threads is not modelled. syscall {num} args=[{}]", Self::fmt_args(args)));
+        let fd = args[0];
+        if read {
+            let unread = e.unread.ok_or_else(|| gkq::lost_count(fd, e.socket))?;
+            if unread == 0 {
+                return Err(wall(&format!("read on guest {what} fd {fd} would wait for another thread to write")));
+            }
+            // F-3: MSG_WAITALL (0x40) on a recv waits natively until `len` bytes arrive.
+            if matches!(num, 29 | 403) && flags & 0x40 != 0 && len > unread {
+                return Err(wall(&format!("read on guest {what} fd {fd} with MSG_WAITALL would wait for {} more bytes from another thread", len - unread)));
+            }
+        } else {
+            let held = e.held.ok_or_else(|| gkq::lost_count(fd, e.socket))?;
+            if len > e.capacity.saturating_sub(held) {
+                return Err(wall(&format!("write of {len} bytes on guest {what} fd {fd} would wait for another thread to read")));
+            }
+        }
+        Ok(())
+    }
+
+    /// M55 §3f (T0-nosigpipe): did this call's `EPIPE` raise SIGPIPE? A write-family call (`write`, `writev`,
+    /// `sendto`, `sendmsg`) that returned `EPIPE` on a guest pipe write end or socket end whose no-SIGPIPE
+    /// bit is clear. Read from the descriptor's kind, not from an effect: a failed call never reaches
+    /// `note_fd_effects`. Both dispatch loops call it with the call's recorded values, after its landmark.
+    pub fn sigpipe_due(&self, num: u64, args: [u64; 8], ret: u64, err: bool) -> bool {
+        // F-1: `MSG_NOSIGNAL` (0x80000) suppresses it: `sendto` carries flags in args[3], `sendmsg` in args[2].
+        let nosignal = match num { 133 | 413 => args[3], 28 | 402 => args[2], _ => 0 } & 0x80000 != 0;
+        err && ret == EPIPE && !nosignal
+            && matches!(num, 4 | 398 | SYS_WRITEV | SYS_WRITEV_NOCANCEL | 133 | 413 | 28 | 402)
+            && self.gkq.io_end(args[0]).is_some_and(|e| e.writable && !e.nosigpipe)
+    }
+
     /// M53 §3c: what `readv`, `writev`, `preadv` and `pwritev` do, decided from the guest's memory and
     /// the box's tables, before anything is forwarded. Record and replay both call it, with the same
     /// arguments (symmetry rule 1): record goes on to forward what `Forward` names; replay compares
@@ -7254,7 +7523,7 @@ impl Box_ {
         if spans.is_empty() && partial { return Ok(IovPrep::Answer(EFAULT)); }
         let reach_total: u64 = reach.iter().map(|e| e.1).sum();
         let kind = self.gkq.kind_of(args[0]);
-        if partial && matches!(kind, gkq::FdKind::PipeRead(_) | gkq::FdKind::PipeWrite(_)) {
+        if partial && matches!(kind, gkq::FdKind::PipeRead(_) | gkq::FdKind::PipeWrite(_) | gkq::FdKind::Sock(_)) {
             return Err(retrace_arch::wall(retrace_arch::WallCategory::Syscalls, format!(
                 "{what} with an unreachable entry after the first, on guest pipe fd {}: natively measured for \
                  `readv`, a pipe transfers only into entry 0 and drains nothing, which the pipe model cannot reproduce; a \

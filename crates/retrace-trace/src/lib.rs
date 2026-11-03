@@ -90,7 +90,7 @@ pub enum Event {
     },
 }
 
-pub const TRACE_MAGIC: [u8;4] = *b"RT\x00\x10"; // "RT" + format version 0x0010. M54 bumped it because a successful exec is an `Event::Exec` carrying the new image, and a pre-M54 recording's exec landmark is the M38 refusal. 0x000f was M53's: M53 bumped it because `readv`, `writev`, `preadv` and `pwritev` are translated (a console `writev` is a console write; a forwarded iovec lands as per-entry writes), so a pre-M53 recording of one holds an EFAULT or a wall where this retrace records the transfer. 0x000e was M52's: M52 bumped it because the synthetic clock moves 5 ticks per timebase read, not 0x2400, so a pre-M52 recording carries a clock whose meaning differs (the clock is regenerated, not recorded, but every recorded timeout, sleep deadline and `gettimeofday` out-parameter was computed against it). 0x000d was M51's: M51 bumped it because `Event::Crash` gained `sig` and J1 changes the ESR a recorded instruction abort carries, so a pre-M51 recording is refused whole. 0x000c was M49's: a translation fault's SignalDelivery frame carries SEGV_ACCERR and the store-exclusive rewrite changes the code bytes a snapshot holds, so a pre-M49 recording would replay into a false divergence. 0x000b was M47's, for `mach_vm_map`'s mask.
+pub const TRACE_MAGIC: [u8;4] = *b"RT\x00\x11"; // "RT" + format version 0x0011. M55 bumped it because a write that returns `EPIPE` on a guest pipe or socket end raises SIGPIPE, so a pre-M55 recording's `EPIPE` would replay with a signal its recording never took. 0x0010 was M54's: M54 bumped it because a successful exec is an `Event::Exec` carrying the new image, and a pre-M54 recording's exec landmark is the M38 refusal. 0x000f was M53's: M53 bumped it because `readv`, `writev`, `preadv` and `pwritev` are translated (a console `writev` is a console write; a forwarded iovec lands as per-entry writes), so a pre-M53 recording of one holds an EFAULT or a wall where this retrace records the transfer. 0x000e was M52's: M52 bumped it because the synthetic clock moves 5 ticks per timebase read, not 0x2400, so a pre-M52 recording carries a clock whose meaning differs (the clock is regenerated, not recorded, but every recorded timeout, sleep deadline and `gettimeofday` out-parameter was computed against it). 0x000d was M51's: M51 bumped it because `Event::Crash` gained `sig` and J1 changes the ESR a recorded instruction abort carries, so a pre-M51 recording is refused whole. 0x000c was M49's: a translation fault's SignalDelivery frame carries SEGV_ACCERR and the store-exclusive rewrite changes the code bytes a snapshot holds, so a pre-M49 recording would replay into a false divergence. 0x000b was M47's, for `mach_vm_map`'s mask.
 
 // Minimal in-tree CRC32 (IEEE) — no external checksum dependency.
 fn crc32(data: &[u8]) -> u32 {
@@ -364,7 +364,8 @@ mod tests {
         // recording's clock-derived values mean changed (the M24 kind of change).
         // M53: the iovec calls are translated (a console writev prints, a forwarded one lands its entries).
         // M54: a successful exec is an `Event::Exec` carrying the new image.
-        assert_eq!(TRACE_MAGIC, *b"RT\x00\x10");
+        // M55: a write's EPIPE on a guest end raises SIGPIPE, so a pre-M55 recording replays with a signal it never took.
+        assert_eq!(TRACE_MAGIC, *b"RT\x00\x11");
     }
 
     #[test]
