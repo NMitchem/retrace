@@ -100,7 +100,12 @@ fn a_sigint_to_the_foreground_group_leaves_retrace_to_reap_the_server() {
     let d = scratch("sigint");
     record_crashy(&d);
     let f = d.join("sleep.lldb");
-    std::fs::write(&f, "script import time; time.sleep(5)\nscript print(\"END\")\n").unwrap();
+    // lldb abandons the rest of a command file once it is interrupted, so the check that needs the server
+    // is on the sleeping command's own line: after the sleep it sends the server a packet of its own
+    // (qHostInfo, whose answer carries `os_version`). If the SIGINT had reached the server, nothing answers
+    // (spec section 4, "leaves retrace and the server alive").
+    let line = r#"script import time, lldb; exec("try:\n time.sleep(5)\nexcept BaseException: pass"); r = lldb.SBCommandReturnObject(); lldb.debugger.GetCommandInterpreter().HandleCommand("process plugin packet send qHostInfo", r); print("SERVER-ANSWERED" if "os_version" in str(r.GetOutput()) else "SERVER-SILENT " + str(r.GetError()))"#;
+    std::fs::write(&f, format!("{line}\n")).unwrap();
     let (out_p, err_p) = (d.join("o"), d.join("e"));
     let child = Command::new(util::bin()).current_dir(&d).env_clear()
         .args(["lldb", "crashy.retrace", "--", "-x", "-b", "-s", f.to_str().unwrap()])
@@ -128,6 +133,9 @@ fn a_sigint_to_the_foreground_group_leaves_retrace_to_reap_the_server() {
     }
     let st = st.expect("retrace exits on its own");
     assert_eq!(st.signal(), None, "retrace must not die of the SIGINT");
+    let out = std::fs::read_to_string(&out_p).unwrap_or_default();
+    assert!(out.contains("SERVER-ANSWERED"), "the server must have survived the SIGINT to answer a packet:\nstdout:\n{out}\nstderr:\n{}",
+        std::fs::read_to_string(&err_p).unwrap_or_default());
     assert!(refused(port), "the server must be reaped");
 }
 
@@ -174,11 +182,49 @@ fn an_incomplete_recording_ends_with_the_servers_line_and_starts_no_lldb() {
 #[test]
 fn an_unusable_lldb_and_a_missing_trace_are_bad_input() {
     let d = scratch("bad");
-    std::fs::write(d.join("x.retrace"), b"x").unwrap();
+    std::fs::write(d.join("x.retrace"), retrace_trace::TRACE_MAGIC).unwrap();
     let r = util::run_in(&d, &["lldb", "x.retrace"], &[("RETRACE_LLDB", "/nonexistent")], BOUND);
     assert_eq!(r.code, Some(2), "{}", r.stderr);
     assert_eq!(r.stderr.trim(), NOT_INSTALLED);
     let r = util::run_in(&d, &["lldb", "missing.retrace"], &[], BOUND);
     assert_eq!(r.code, Some(2), "{}", r.stderr);
     assert!(r.stderr.contains("cannot read missing.retrace"), "{}", r.stderr);
+}
+
+/// Spec section 4, "no listening socket, no child left", where reaping is the only thing that can do it:
+/// lldb ends without ever connecting, so the server is still in `accept` and holds its port. The port is
+/// refused after retrace exits only if retrace killed the server. (After a real lldb session the server
+/// has accepted, dropped its listener and exited on EOF by itself, so that case cannot tell.)
+#[test]
+fn a_server_lldb_never_connected_to_is_reaped() {
+    let d = scratch("reap");
+    record_crashy(&d);
+    let port_file = d.join("port");
+    let script = d.join("fakelldb.sh");
+    std::fs::write(&script, format!(
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo lldb-1; exit 0; fi\n\
+         for a in \"$@\"; do case \"$a\" in \"gdb-remote 127.0.0.1:\"*) echo \"${{a#gdb-remote 127.0.0.1:}}\" > {}; esac; done\nexit 0\n",
+        port_file.display())).unwrap();
+    Command::new("chmod").args(["+x", script.to_str().unwrap()]).status().unwrap();
+    let r = util::run_in(&d, &["lldb", "crashy.retrace"], &[("RETRACE_LLDB", script.to_str().unwrap())], BOUND);
+    assert_eq!(r.code, Some(0), "{}", r.stderr);
+    let port: u16 = std::fs::read_to_string(&port_file).expect("the stand-in saw a gdb-remote argument").trim().parse().unwrap();
+    assert!(refused(port), "the server was left listening after retrace lldb exited");
+}
+
+/// Final review minor 9: the script path is quoted, so a TMPDIR with a space still imports `retrace.py`
+/// (`rsi` exists only through that import).
+#[test]
+fn a_temp_directory_with_a_space_still_loads_the_script() {
+    need_lldb!("a_temp_directory_with_a_space_still_loads_the_script");
+    let d = scratch("space");
+    let ptr = record_crashy(&d);
+    let tmp = d.join("tmp with space");
+    std::fs::create_dir_all(&tmp).unwrap();
+    let r = run_lldb(&d, "crashy.retrace", ptr, &[("TMPDIR", tmp.to_str().unwrap())]);
+    let out = String::from_utf8_lossy(&r.stdout);
+    assert_eq!(r.code, Some(0), "stderr:\n{}\nstdout:\n{out}", r.stderr);
+    assert!(out.contains("stop reason = trace"), "rsi needs the script import: {out}\n{}", r.stderr);
+    let left: Vec<_> = std::fs::read_dir(&tmp).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert!(left.is_empty(), "retrace removes the directory it made: {left:?}");
 }

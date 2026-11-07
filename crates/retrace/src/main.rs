@@ -12,9 +12,12 @@ const USAGE: &str = "usage: retrace <record [-o <trace>] <program> [<args>...] |
                      | lldb <trace> [--exe <path>] [-- <lldb args>...] | debug <trace> --script '...' \
                      | gdbserver <trace> [--port <n>] [--exe <path>]>";
 const RECORD_USAGE: &str = "usage: retrace record [-o <trace>] <program> [<args>...]";
-const HELP: &str = "usage: retrace <command>
+/// The text of `--help`, and of `retrace` with no command.
+fn help() -> String {
+    format!("usage: retrace <command>
 
-  record [-o <trace>] <program> [<args>...]   record a program (static or dynamic); -o defaults to <program>.retrace
+  record [-o <trace>] <program> [<args>...]   record a program (static or dynamic); the trace is <-o>, or
+                                              the program's basename plus .retrace in the working directory
   replay <trace>                              replay a recording, bit for bit
   lldb <trace> [--exe <path>] [-- <lldb args>...]   debug a recording in lldb, with reverse commands
   debug <trace> --script '<cmds>'             run debugger commands over a recording
@@ -22,13 +25,20 @@ const HELP: &str = "usage: retrace <command>
 
   retrace --version    print the version
 
-Programs retrace cannot run yet are listed in docs/walls.md.";
+Programs retrace cannot run yet are listed at {}", retrace_arch::WALLS_URL)
+}
 
 /// One of retrace's own lines on its stderr. A reader that went away is not retrace's failure, so a
 /// failed write is dropped rather than panicking, as `eprintln!` would (Review Focus 1).
 fn say(line: &str) {
     use std::io::Write;
     let _ = writeln!(std::io::stderr(), "{line}");
+}
+
+/// A line on retrace's stdout (`--help`, `--version`), dropped when the reader has gone away.
+fn say_out(line: &str) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stdout(), "{line}");
 }
 
 /// M51 §3e: the program's console writes, printed on retrace's own stdout and stderr as it makes
@@ -162,14 +172,34 @@ fn run(a: &[String]) -> i32 {
     match a.get(1).map(String::as_str) {
         Some("record") => record(a),
         Some("record-dyn") => bad_input("record-dyn is now record: retrace record [-o <trace>] <program> [<args>...]"),
-        Some("--version" | "-V") => { println!("retrace {}", env!("CARGO_PKG_VERSION")); 0 }
-        Some("--help" | "-h" | "help") => { println!("{HELP}"); 0 }
+        Some("--version" | "-V") => { say_out(&format!("retrace {}", env!("CARGO_PKG_VERSION"))); 0 }
+        Some("--help" | "-h" | "help") => { say_out(&help()); 0 }
         Some("replay") => replay(a),
         Some("debug") => debug_cmd(a),
         Some("gdbserver") => gdbserver_cmd(a),
         Some("lldb") => lldbcmd::run(a),
+        // `retrace` alone: the same text as `--help`, and still bad input.
+        None => { say(&help()); 2 }
         _ => bad_input(USAGE),
     }
+}
+
+/// Spec M56 section 3g, final review: `retrace replay` and `retrace lldb` take a recording. A file whose
+/// header is not the trace magic is one line of bad input, before any VM work; an arm64 Mach-O is told
+/// to be recorded first. A trace of another format version passes here, so `open_checked`'s own
+/// message about it still reaches the user.
+fn check_recording(path: &str) -> Result<(), String> {
+    use std::io::Read;
+    let mut head = Vec::with_capacity(4);
+    std::fs::File::open(path).and_then(|f| f.take(4).read_to_end(&mut head))
+        .map_err(|e| format!("cannot read {path}: {e}"))?;
+    if head == retrace_trace::TRACE_MAGIC { return Ok(()); }
+    if retrace_trace::Reader::format_skew(path).ok().flatten().is_some() { return Ok(()); }
+    let macho = [[0xcf, 0xfa, 0xed, 0xfe], [0xca, 0xfe, 0xba, 0xbe], [0xca, 0xfe, 0xba, 0xbf]].iter().any(|m| head == m[..]);
+    let hint = if macho && std::fs::read(path).is_ok_and(|b| retrace_guest::try_parse_macho(&b).is_ok()) {
+        format!(" - record it first: retrace record {path}")
+    } else { String::new() };
+    Err(format!("{path} is not a retrace recording{hint}"))
 }
 
 /// Bad input to retrace itself (R2): one `retrace:` line, and exit 2.
@@ -205,7 +235,8 @@ fn signing_fix(exe: &Path) -> String {
     format!("Sign it with these two commands: printf '%s\\n' '<?xml version=\"1.0\" encoding=\"UTF-8\"?>' \
         '<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">' \
         '<plist version=\"1.0\"><dict><key>com.apple.security.hypervisor</key><true/></dict></plist>' \
-        > /tmp/retrace.entitlements ; codesign --sign - --force --entitlements /tmp/retrace.entitlements {me}")
+        > \"${{TMPDIR:-/tmp}}/retrace.entitlements\" && codesign --sign - --force --entitlements \
+        \"${{TMPDIR:-/tmp}}/retrace.entitlements\" {me}")
 }
 
 /// What `retrace record` was given (M56 section 3b): options come before the program, and
@@ -233,6 +264,14 @@ fn parse_record_args(a: &[String]) -> Result<RecordArgs, String> {
     }
 }
 
+/// `retrace record --help` (or `-h`) in the program position is a request for help. A program with that
+/// name is still reachable as `./--help`, or after `--`.
+fn record_wants_help(a: &[String]) -> bool {
+    let mut i = 2;
+    while a.get(i).map(String::as_str) == Some("-o") { i += 2; }
+    matches!(a.get(i).map(String::as_str), Some("--help" | "-h"))
+}
+
 /// The default trace name: the program's basename plus `.retrace`, in the working directory.
 fn default_trace_name(program: &str) -> String {
     let base = Path::new(program).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| program.into());
@@ -242,11 +281,16 @@ fn default_trace_name(program: &str) -> String {
 /// `record [-o <trace>] <program> [<args>...]`. LC_LOAD_DYLINKER present records through the named
 /// dylinker (real dyld); absent, the freestanding static path.
 fn record(a: &[String]) -> i32 {
+    if record_wants_help(a) { say_out(&help()); return 0; }
     let r = match parse_record_args(a) { Ok(r) => r, Err(u) => return bad_input(&u) };
     let guest = &r.program;
     let bytes = match std::fs::read(guest) {
         Ok(b) => b,
-        Err(e) => return bad_input(&format!("cannot read {guest}: {e}")),
+        Err(e) => {
+            let hint = if guest.contains('/') { String::new() }
+                else { format!(" - give a path, such as ./{guest} or /bin/{guest}") };
+            return bad_input(&format!("cannot read {guest}: {e}{hint}"));
+        }
     };
     let exe = match retrace_guest::try_parse_macho(&bytes) {
         Ok(l) => l,
@@ -291,6 +335,7 @@ fn record(a: &[String]) -> i32 {
 fn replay(a: &[String]) -> i32 {
     let Some(trace) = a.get(2) else { return bad_input("usage: retrace replay <trace>") };
     if let Err(e) = std::fs::metadata(trace) { return bad_input(&format!("cannot read {trace}: {e}")); }
+    if let Err(line) = check_recording(trace) { return bad_input(&line); }
     if let Err(why) = retrace_core::hypervisor_check() { return no_hypervisor(&why); }
     match retrace_core::replay_opts(Path::new(trace), Some(Box::new(LiveOutput::default()))) {
         Ok(r) => finish(r.fall_throughs, &r.outcome),
@@ -435,6 +480,9 @@ mod signing_fix_tests {
         let line = signing_fix(&bare.join("retrace"));
         assert!(line.contains("com.apple.security.hypervisor"), "{line}");
         assert!(line.contains("codesign"), "{line}");
+        assert!(line.contains("&& codesign") && !line.contains("; codesign"), "the second command runs only if the first did: {line}");
+        assert!(line.contains("\"${TMPDIR:-/tmp}/retrace.entitlements\""), "{line}");
+        assert!(!line.contains("> /tmp/"), "{line}");
         assert!(!line.contains("root of the retrace repository"), "{line}");
         assert!(!line.contains("--entitlements retrace.entitlements"), "{line}");
 

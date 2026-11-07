@@ -99,14 +99,31 @@ pub fn run(a: &[String]) -> i32 {
     };
     // Checks come before any child exists.
     if let Err(e) = std::fs::metadata(trace) { return crate::bad_input(&format!("cannot read {trace}: {e}")); }
+    if let Err(line) = crate::check_recording(trace) { return crate::bad_input(&line); }
     if let Err(why) = retrace_core::hypervisor_check() { return crate::no_hypervisor(&why); }
     let lldb = match lldb_usable() { Ok(p) => p, Err(e) => return crate::bad_input(&e) };
 
-    let dir = std::env::temp_dir().join(format!("retrace-lldb-{}", std::process::id()));
-    if let Err(e) = std::fs::create_dir_all(&dir) { return crate::bad_input(&format!("cannot create {}: {e}", dir.display())); }
+    let dir = match private_dir() { Ok(d) => d, Err(e) => return crate::bad_input(&e) };
     let code = session(trace, exe.as_deref(), &lldb, lldb_args, &dir);
     let _ = std::fs::remove_dir_all(&dir);
     code
+}
+
+/// A new directory only this user can enter, named for this process and a counter. `create` (never
+/// `create_dir_all`) fails on one that exists, so the name is retried, and retrace removes only a
+/// directory it made itself.
+fn private_dir() -> Result<PathBuf, String> {
+    use std::os::unix::fs::DirBuilderExt;
+    let base = std::env::temp_dir();
+    for n in 0..1000 {
+        let dir = base.join(format!("retrace-lldb-{}-{n}", std::process::id()));
+        match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("cannot create {}: {e}", dir.display())),
+        }
+    }
+    Err(format!("cannot create a directory under {}: every name is taken", base.display()))
 }
 
 /// Catches SIGINT around the whole session: a caught signal resets to the default on exec, so the
@@ -163,7 +180,7 @@ fn session_inner(trace: &str, exe: Option<&str>, lldb: &Path, lldb_args: &[Strin
     }
     let spawned = Command::new(lldb)
         .arg("-o").arg(format!("gdb-remote 127.0.0.1:{port}"))
-        .arg("-o").arg(format!("command script import {}", script.display()))
+        .arg("-o").arg(format!("command script import \"{}\"", script.display()))
         .args(lldb_args).spawn();
     let mut child = match spawned {
         Ok(c) => c,

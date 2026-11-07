@@ -141,3 +141,94 @@ fn version_and_help_exit_0_and_no_arguments_exits_2() {
     }
     assert_eq!(cli(&[]).code, Some(2));
 }
+
+/// Review Focus 5 for all four arguments: ARGV_ECHO prints only argv[1], so an Apple binary that echoes
+/// them all is the check. `-o x -- --help` after the program are the program's, and retrace names no trace
+/// `x`, prints no help, and treats nothing as its own.
+#[test]
+fn every_option_spelled_argument_after_the_program_reaches_it() {
+    let d = scratch_dir("echo-all");
+    let native = std::process::Command::new("/bin/echo").args(["-o", "x", "--", "--help"]).env_clear().output().unwrap();
+    assert_eq!(native.stdout, b"-o x -- --help\n");
+    let rec = util::run_in(&d, &["record", "/bin/echo", "-o", "x", "--", "--help"], &[], BOUND);
+    assert_eq!(rec.code, Some(0), "stderr:\n{}", rec.stderr);
+    assert_eq!(rec.stdout, native.stdout);
+    assert!(!d.join("x").exists(), "-o after the program names nothing");
+    assert!(d.join("echo.retrace").exists());
+}
+
+/// `retrace record --help` and `-h`, in the program position, are a request for help. A program named
+/// `--help` stays reachable after `--`.
+#[test]
+fn record_help_in_the_program_position_prints_help() {
+    let d = scratch_dir("record-help");
+    for h in ["--help", "-h"] {
+        let r = util::run_in(&d, &["record", h], &[], BOUND);
+        assert_eq!(r.code, Some(0), "{h}: {}", r.stderr);
+        assert!(String::from_utf8_lossy(&r.stdout).starts_with("usage: retrace <command>"), "{h}");
+        let r = util::run_in(&d, &["record", "-o", "t", h], &[], BOUND);
+        assert_eq!(r.code, Some(0), "-o t {h}: {}", r.stderr);
+        assert!(String::from_utf8_lossy(&r.stdout).starts_with("usage: retrace <command>"), "-o t {h}");
+    }
+    let r = util::run_in(&d, &["record", "--", "--help"], &[], BOUND);
+    assert_eq!(r.code, Some(2), "{}", r.stderr);
+    assert!(r.stderr.starts_with("retrace: cannot read --help: "), "{}", r.stderr);
+}
+
+#[test]
+fn a_bare_name_that_cannot_be_read_says_to_give_a_path() {
+    let d = scratch_dir("bare-name");
+    let r = util::run_in(&d, &["record", "ls"], &[], BOUND);
+    assert_eq!(r.code, Some(2), "{}", r.stderr);
+    assert_eq!(r.stderr.trim_end(),
+        "retrace: cannot read ls: No such file or directory (os error 2) - give a path, such as ./ls or /bin/ls");
+    let r = util::run_in(&d, &["record", "./ls"], &[], BOUND);
+    assert!(!r.stderr.contains("give a path"), "{}", r.stderr);
+}
+
+#[test]
+fn no_command_prints_the_help_and_exits_2_and_help_names_the_walls_url() {
+    let bare = cli(&[]);
+    assert_eq!(bare.code, Some(2));
+    let help = cli(&["--help"]);
+    assert_eq!(help.code, Some(0));
+    assert_eq!(bare.stderr.trim_end(), String::from_utf8_lossy(&help.stdout).trim_end(), "the same text");
+    assert!(bare.stderr.contains(&format!("listed at {}", retrace_arch::WALLS_URL)), "{}", bare.stderr);
+    assert!(!bare.stderr.contains("in docs/walls.md."), "{}", bare.stderr);
+    assert!(bare.stderr.contains("basename plus .retrace in the working directory"), "{}", bare.stderr);
+}
+
+/// P-18: `replay` and `lldb` take a recording. The usual slip is naming the program, not its trace.
+#[test]
+fn a_file_that_is_not_a_recording_is_bad_input_for_replay_and_lldb() {
+    use std::os::unix::fs::PermissionsExt;
+    let d = scratch_dir("not-a-trace");
+    std::fs::write(d.join("note.txt"), b"just some text\n").unwrap();
+    std::fs::copy("/bin/echo", d.join("echo_copy")).unwrap();
+    std::fs::set_permissions(d.join("echo_copy"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    for cmd in ["replay", "lldb"] {
+        let r = util::run_in(&d, &[cmd, "note.txt"], &[], BOUND);
+        assert_eq!(r.code, Some(2), "{cmd}: {}", r.stderr);
+        assert_eq!(r.stderr.trim_end(), "retrace: note.txt is not a retrace recording", "{cmd}");
+        let r = util::run_in(&d, &[cmd, "echo_copy"], &[], BOUND);
+        assert_eq!(r.code, Some(2), "{cmd}: {}", r.stderr);
+        assert_eq!(r.stderr.trim_end(),
+            "retrace: echo_copy is not a retrace recording - record it first: retrace record echo_copy", "{cmd}");
+    }
+}
+
+/// A trace of another format version keeps the message `open_checked` gives it: the check must not swallow it.
+#[test]
+fn a_trace_of_another_format_version_keeps_its_own_message() {
+    let d = scratch_dir("skew");
+    std::fs::write(d.join("old.retrace"), b"RT\x00\x0bxxxxxxxx").unwrap();
+    let r = util::run_in(&d, &["replay", "old.retrace"], &[], BOUND);
+    assert!(r.stderr.contains("recorded by a different retrace trace format"), "{}", r.stderr);
+    assert!(!r.stderr.contains("is not a retrace recording"), "{}", r.stderr);
+    let fake = d.join("fakelldb.sh");
+    std::fs::write(&fake, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo lldb-1; exit 0; fi\nexit 0\n").unwrap();
+    std::process::Command::new("chmod").args(["+x", fake.to_str().unwrap()]).status().unwrap();
+    let r = util::run_in(&d, &["lldb", "old.retrace"], &[("RETRACE_LLDB", fake.to_str().unwrap())], BOUND);
+    assert!(r.stderr.contains("recorded by a different retrace trace format"), "{}", r.stderr);
+    assert!(!r.stderr.contains("is not a retrace recording"), "{}", r.stderr);
+}

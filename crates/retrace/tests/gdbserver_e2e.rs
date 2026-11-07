@@ -136,9 +136,10 @@ fn a_relative_recording_gets_its_image_list() {
     assert!(c.send("qHostInfo").contains("os_version:"), "a trusted path selects lldb's newer loader");
     let j = c.send(r#"jGetLoadedDynamicLibrariesInfos:{"fetch_all_solibs":true}"#);
     assert!(!j.contains(r#""images":[]"#) && !j.is_empty(), "{j}");
-    // The server resolves through the real path (/private/var for /var), so match the tail.
-    let tail = format!("/retrace-relrec-{}", std::process::id());
-    assert!(j.contains(&format!(r#"{tail}/./crashy""#)) || j.contains(&format!(r#"{tail}/crashy""#)), "{j}");
+    // The server's working directory is the real path (/private/var for /var), and the image path is
+    // that directory joined with the typed `./crashy`: absolute, so lldb can open it from anywhere.
+    let real = dir.canonicalize().unwrap();
+    assert!(j.contains(&format!(r#""pathname":"{}/./crashy""#, real.display())), "{j}");
 }
 
 #[test]

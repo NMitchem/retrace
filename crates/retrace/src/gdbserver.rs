@@ -542,7 +542,10 @@ fn exec_image_of(s: &ReplaySession, exe_arg: Option<String>, trace_dir: &Path) -
     }
     let cands: Vec<String> = exe_arg.into_iter().chain(exec_path(s)).chain(argv0(s)).collect();
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
-    match resolve_image(&cands, &cwd, trace_dir, want) {
+    // The path lldb is handed must name the file wherever lldb runs, so a relative trace directory is
+    // made absolute against the server's own working directory.
+    let trace_dir = cwd.join(trace_dir);
+    match resolve_image(&cands, &cwd, &trace_dir, want) {
         Ok(path) => rsp::image_json(&exe_hdr, EXE_BASE, &path).ok(),
         Err(line) => {
             if !line.is_empty() { eprintln!("{line}"); }

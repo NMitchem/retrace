@@ -268,3 +268,20 @@ fn a_crash_inside_a_system_library_says_so() {
     }
     let _ = std::fs::remove_file(&t);
 }
+
+/// Final review minor 1: `--help` and `--version` into a reader that has gone away end quietly with exit 0,
+/// not at the bug banner (`println!` panics on EPIPE).
+#[test]
+fn help_and_version_to_a_closed_stdout_do_not_become_a_bug() {
+    for arg in ["--help", "--version"] {
+        for _ in 0..5 {
+            let mut child = Command::new(util::bin()).arg(arg)
+                .env_clear().stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+            drop(child.stdout.take());
+            let mut err = String::new();
+            std::io::Read::read_to_string(child.stderr.as_mut().unwrap(), &mut err).unwrap();
+            assert_eq!(wait_bounded(&mut child, BOUND), Some(0), "{arg}: stderr:\n{err}");
+            assert!(!err.contains("internal error"), "{arg}: {err}");
+        }
+    }
+}
