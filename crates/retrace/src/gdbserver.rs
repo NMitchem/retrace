@@ -586,8 +586,8 @@ fn resolve_image(cands: &[String], cwd: &Path, trace_dir: &Path, want: Option<[u
 /// Final review part 2, M1 (amends Ruling T6-b): the path the kernel used, `executable_path=` (apple[0]) on the same start
 /// stack, which a program's own `argv[0]` (a bare name from `Command::exec`, or a launcher's own) need not name. It is
 /// the path as the exec call wrote it (for a script, the interpreter as written), and `argv[0]` for epoch 0 by C3.
-/// Read as `argv0` reads argv, past envp's NULL: `[sp + 8]` is argc, argv follows, then envp, then apple. Only an
-/// absolute path is trusted, for the same reason as there.
+/// Read as `argv0` reads argv, past envp's NULL: `[sp + 8]` is argc, argv follows, then envp, then apple. Returned as
+/// recorded, absolute or relative; `resolve_image` decides whether to trust it, by `LC_UUID` (M56 §3c).
 fn exec_path(s: &ReplaySession) -> Option<String> {
     let sp = s.thread_ctx(0)?.regs.sp_el0;
     let word = |a: u64| <[u8; 8]>::try_from(s.read_mem_prefix(a, 8)).ok().map(u64::from_le_bytes);
@@ -607,8 +607,8 @@ fn exec_path(s: &ReplaySession) -> Option<String> {
 }
 
 /// §3g (t0 R3): `record-dyn`'s argv[0], out of the opening stack: `[sp]` is the main image's
-/// mach_header (the KernelArgs `build_start_stack` writes) and `[sp + 16]` points at argv[0]. Only
-/// an absolute path is trusted, because the recording's working directory is not recorded. A
+/// mach_header (the KernelArgs `build_start_stack` writes) and `[sp + 16]` points at argv[0]. Returned
+/// as recorded, absolute or relative; `resolve_image` decides whether to trust it, by `LC_UUID` (M56 §3c). A
 /// static guest has no KernelArgs, so `[sp]` is not `EXE_BASE` and this is None.
 fn argv0(s: &ReplaySession) -> Option<String> {
     let sp = s.thread_ctx(0)?.regs.sp_el0;
