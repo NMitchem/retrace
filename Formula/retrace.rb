@@ -6,7 +6,7 @@ class Retrace < Formula
 
   # The stable stanza needs the tarball of the tag v0.1.0, which exists only after the operator pushes
   # that tag. Until then the formula is HEAD-only: `brew install nmitchem/retrace/retrace` without --HEAD
-  # fails with Homebrew's own "no stable version" message. (A short name needs the formula trusted first
+  # fails with Homebrew's own message, "is a HEAD-only formula". (A short name needs the formula trusted first
   # under Homebrew 6 and later, so the fully qualified name is the one to tell a user.)
   # After the tag, fill in the checksum (curl -L <url> | shasum -a 256) and uncomment these two lines.
   # url "https://github.com/NMitchem/retrace/archive/refs/tags/v0.1.0.tar.gz"
