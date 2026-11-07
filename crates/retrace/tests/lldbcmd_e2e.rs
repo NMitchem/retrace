@@ -100,11 +100,13 @@ fn a_sigint_to_the_foreground_group_leaves_retrace_to_reap_the_server() {
     let d = scratch("sigint");
     record_crashy(&d);
     let f = d.join("sleep.lldb");
-    // lldb abandons the rest of a command file once it is interrupted, so the check that needs the server
-    // is on the sleeping command's own line: after the sleep it sends the server a packet of its own
-    // (qHostInfo, whose answer carries `os_version`). If the SIGINT had reached the server, nothing answers
-    // (spec section 4, "leaves retrace and the server alive").
-    let line = r#"script import time, lldb; exec("try:\n time.sleep(5)\nexcept BaseException: pass"); r = lldb.SBCommandReturnObject(); lldb.debugger.GetCommandInterpreter().HandleCommand("process plugin packet send qHostInfo", r); print("SERVER-ANSWERED" if "os_version" in str(r.GetOutput()) else "SERVER-SILENT " + str(r.GetError()))"#;
+    // lldb abandons the rest of a command file once it is interrupted, and refuses further commands while
+    // the interrupt stands, so the check that needs the server is on the sleeping command's own line and
+    // goes through the API: after the sleep it reads 8 bytes of the stack from the stopped process, which
+    // is a packet to the server. If the SIGINT had reached the server, nothing answers (spec section 4,
+    // "leaves retrace and the server alive"). The marker is built from two halves, because lldb echoes the
+    // command's own text to stdout.
+    let line = r#"script import time, lldb; exec("try:\n time.sleep(5)\nexcept BaseException: pass"); p = lldb.debugger.GetSelectedTarget().GetProcess(); e = lldb.SBError(); p.ReadMemory(p.GetSelectedThread().GetFrameAtIndex(0).GetSP(), 8, e); print("SERVER-" + ("ANSWERED" if e.Success() else "SILENT " + str(e)))"#;
     std::fs::write(&f, format!("{line}\n")).unwrap();
     let (out_p, err_p) = (d.join("o"), d.join("e"));
     let child = Command::new(util::bin()).current_dir(&d).env_clear()
