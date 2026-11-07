@@ -165,6 +165,33 @@ pub fn try_slice_native(fat: &[u8]) -> Result<&[u8], String> {
         .ok_or_else(|| "is a universal binary with no arm64 slice, and retrace runs arm64 programs only".into())
 }
 
+/// M56 §3c: the `LC_UUID` of a thin `mach_header_64` and its load commands, or None when there is none or the
+/// commands cannot be walked. Bounds-checked like `try_parse_macho`: it reads guest memory and files on disk.
+pub fn macho_uuid(thin: &[u8]) -> Option<[u8; 16]> {
+    let r32 = |o: usize| -> Option<u32> {
+        Some(u32::from_le_bytes(thin.get(o..o.checked_add(4)?)?.try_into().ok()?))
+    };
+    if r32(0)? != 0xfeed_facf { return None; }
+    let ncmds = r32(16)?;
+    let end = 32usize.checked_add(r32(20)? as usize)?.min(thin.len());
+    let mut off = 32usize;
+    for _ in 0..ncmds {
+        if off.checked_add(8)? > end { return None; }
+        let (cmd, size) = (r32(off)?, r32(off + 4)? as usize);
+        if size < 8 { return None; }
+        if cmd == 0x1b { // LC_UUID: cmd, cmdsize, uuid[16]
+            return thin.get(off + 8..off.checked_add(24)?).filter(|_| size >= 24 && off + size <= end)?.try_into().ok();
+        }
+        off = off.checked_add(size)?;
+    }
+    None
+}
+
+/// M56 §3c: the `LC_UUID` of the slice the loader would execute from `bytes` (`try_slice_native`).
+pub fn file_uuid(bytes: &[u8]) -> Option<[u8; 16]> {
+    macho_uuid(try_slice_native(bytes).ok()?)
+}
+
 pub fn slice_native(fat: &[u8]) -> &[u8] {
     try_slice_native(fat).unwrap_or_else(|why| panic!("slice_native: the image {why}"))
 }
@@ -1112,3 +1139,43 @@ mod fat_tests {
 }
 /// M54 t2: a `posix_spawn` of a real child (`/bin/echo`), which is a ProcessCreation wall.
 pub const FC_SPAWN_CHILD: &str = concat!(env!("OUT_DIR"), "/fc_spawn_child");
+
+#[cfg(test)]
+mod uuid_tests {
+    use super::*;
+
+    /// One line past libtest's capture, as in the other test modules here.
+    fn announce(line: &str) {
+        use std::io::Write;
+        let _ = writeln!(std::io::stderr(), "{line}");
+    }
+
+    fn otool_uuid(path: &str) -> Option<String> {
+        let out = std::process::Command::new("otool").args(["-l", path]).output().ok()?;
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        text.lines().find_map(|l| l.trim().strip_prefix("uuid ").map(str::to_owned))
+    }
+
+    #[test]
+    fn macho_uuid_equals_otool() {
+        let Some(want) = otool_uuid(CRASHY) else {
+            announce("SKIPPED macho_uuid_equals_otool: otool is not available");
+            return;
+        };
+        let bytes = std::fs::read(CRASHY).unwrap();
+        let u = file_uuid(&bytes).expect("crashy has an LC_UUID");
+        let h: String = u.iter().map(|b| format!("{b:02X}")).collect();
+        let got = format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32]);
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn a_truncated_header_has_no_uuid() {
+        let bytes = std::fs::read(CRASHY).unwrap();
+        let thin = try_slice_native(&bytes).unwrap();
+        assert!(macho_uuid(thin).is_some());
+        assert_eq!(macho_uuid(&thin[..20]), None);
+        assert_eq!(macho_uuid(&thin[..40]), None);
+        assert_eq!(macho_uuid(&[]), None);
+    }
+}

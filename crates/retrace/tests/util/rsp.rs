@@ -23,16 +23,17 @@ const REPLY_BOUND: u64 = 180;
 /// `listening on 127.0.0.1:<port>` line. The server's stderr goes to a file, never a pipe: a pipe
 /// nobody reads after the first line would block a server that writes more (`debug_bounded`'s
 /// reasoning). It polls with `thread::sleep`, because clippy bans reading a clock. Returns the child,
-/// the port, and the stderr file (the caller removes it).
-pub fn spawn_server(trace: &Path, extra: &[&str]) -> (Child, u16, PathBuf) {
+/// the port, and the stderr file (the caller removes it). `cwd` is the server's working directory (None: ours).
+pub fn spawn_server(trace: &Path, extra: &[&str], cwd: Option<&Path>) -> (Child, u16, PathBuf) {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
     let err_p = std::env::temp_dir().join(format!("retrace-gdbserver-{}-{n}.err", std::process::id()));
-    let mut child = Command::new(super::bin())
-        .args(["gdbserver", trace.to_str().unwrap(), "--port", "0"]).args(extra)
+    let mut cmd = Command::new(super::bin());
+    cmd.args(["gdbserver", trace.to_str().unwrap(), "--port", "0"]).args(extra)
         .stdin(Stdio::null()).stdout(Stdio::null())
-        .stderr(std::fs::File::create(&err_p).expect("create gdbserver stderr file"))
-        .spawn().expect("spawn gdbserver");
+        .stderr(std::fs::File::create(&err_p).expect("create gdbserver stderr file"));
+    if let Some(d) = cwd { cmd.current_dir(d); }
+    let mut child = cmd.spawn().expect("spawn gdbserver");
     for _ in 0..REPLY_BOUND * 20 {
         let s = std::fs::read_to_string(&err_p).unwrap_or_default();
         if let Some(line) = s.split_once("listening on 127.0.0.1:").and_then(|(_, r)| r.split_once('\n')) {
@@ -75,8 +76,11 @@ fn encode(p: &str) -> Vec<u8> {
 impl Rsp {
     /// Start `retrace gdbserver <trace> --port 0 <extra…>` and connect, completing
     /// `QStartNoAckMode` in ack mode.
-    pub fn spawn(trace: &Path, extra: &[&str]) -> Rsp {
-        let (child, port, err_p) = spawn_server(trace, extra);
+    pub fn spawn(trace: &Path, extra: &[&str]) -> Rsp { Rsp::spawn_in(trace, extra, None) }
+
+    /// `spawn`, with the server's working directory set (M56 §3c).
+    pub fn spawn_in(trace: &Path, extra: &[&str], cwd: Option<&Path>) -> Rsp {
+        let (child, port, err_p) = spawn_server(trace, extra, cwd);
         let _ = std::fs::remove_file(err_p);
         let stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
         stream.set_read_timeout(Some(std::time::Duration::from_secs(REPLY_BOUND))).unwrap();

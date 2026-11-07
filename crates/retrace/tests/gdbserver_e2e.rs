@@ -123,6 +123,25 @@ fn the_exe_is_listed_from_argv0_when_the_recording_has_one() {
 }
 
 #[test]
+fn a_relative_recording_gets_its_image_list() {
+    // M56 §3c: recorded as `./crashy` from a directory, the server (started there) trusts the path by its
+    // LC_UUID. Before M56 a relative argv[0] was never trusted, so the list was `{"images":[]}`.
+    let dir = std::env::temp_dir().join(format!("retrace-relrec-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::copy(retrace_guest::CRASHY, dir.join("crashy")).unwrap();
+    let rec = util::run_in(&dir, &["record", "./crashy"], &[], 600);
+    assert_eq!(rec.code, Some(139), "record ./crashy: {}", rec.stderr);
+    let mut c = Rsp::spawn_in(&dir.join("crashy.retrace"), &[], Some(&dir));
+    assert!(c.send("qHostInfo").contains("os_version:"), "a trusted path selects lldb's newer loader");
+    let j = c.send(r#"jGetLoadedDynamicLibrariesInfos:{"fetch_all_solibs":true}"#);
+    assert!(!j.contains(r#""images":[]"#) && !j.is_empty(), "{j}");
+    // The server resolves through the real path (/private/var for /var), so match the tail.
+    let tail = format!("/retrace-relrec-{}", std::process::id());
+    assert!(j.contains(&format!(r#"{tail}/./crashy""#)) || j.contains(&format!(r#"{tail}/crashy""#)), "{j}");
+}
+
+#[test]
 fn a_static_guest_lists_nothing_unless_given_its_path() {
     let mut c = Rsp::spawn(watchsweep(), &[]);
     assert!(!c.send("qHostInfo").contains("os_version:"), "no path: lldb's older loader (t0 L2)");
@@ -153,7 +172,7 @@ fn a_peer_that_resets_the_connection_ends_the_server_cleanly() {
 fn a_second_connection_is_refused_while_the_first_is_served() {
     use std::io::{Read, Write};
     use std::net::TcpStream;
-    let (mut child, port, err_p) = r::spawn_server(watchsweep(), &[]);
+    let (mut child, port, err_p) = r::spawn_server(watchsweep(), &[], None);
     let _ = std::fs::remove_file(err_p);
     let mut first = TcpStream::connect(("127.0.0.1", port)).expect("connect");
     first.set_read_timeout(Some(std::time::Duration::from_secs(180))).unwrap();
