@@ -90,11 +90,16 @@ fn a_thin_x86_64_binary_is_refused_by_name() {
 /// alone indexed past its arguments and panicked with exit 101.
 #[test]
 fn missing_arguments_are_a_usage_error_not_a_panic() {
-    let cases: [&[&str]; 6] = [&["record"], &["record", "-o"], &["record", "-o", "t.bin"],
-        &["replay"], &["frobnicate"], &[]];
+    let cases: [&[&str]; 5] = [&["record"], &["record", "-o"], &["record", "-o", "t.bin"],
+        &["replay"], &["frobnicate"]];
     for args in cases {
         assert_bad_input(&cli(args), &format!("{args:?}"), &["usage: retrace"]);
     }
+    // `retrace` alone prints the whole help (final review minor 3), which is no `retrace:` line, and exits 2.
+    let bare = cli(&[]);
+    assert_eq!(bare.code, Some(2), "{}", bare.stderr);
+    assert!(bare.stderr.starts_with("usage: retrace <command>"), "{}", bare.stderr);
+    assert!(!bare.stderr.contains("internal error"), "{}", bare.stderr);
 }
 
 /// M56 section 3b: `record-dyn` is gone, refused by name as bad input.
