@@ -20,7 +20,13 @@ extern "C" {
     fn signal(sig: i32, handler: usize) -> usize;
 }
 const SIGINT: i32 = 2;
-const SIG_IGN: usize = 1;
+
+/// Set by the SIGINT handler, which does nothing else (async-signal-safe).
+static INTERRUPTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+extern "C" fn on_sigint(_: i32) {
+    INTERRUPTED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
 
 fn say(line: &str) {
     let _ = writeln!(std::io::stderr(), "{line}");
@@ -103,7 +109,19 @@ pub fn run(a: &[String]) -> i32 {
     code
 }
 
+/// Catches SIGINT around the whole session: a caught signal resets to the default on exec, so the
+/// server and lldb never inherit it, and retrace itself survives a ^C to reap the server.
 fn session(trace: &str, exe: Option<&str>, lldb: &Path, lldb_args: &[String], dir: &Path) -> i32 {
+    INTERRUPTED.store(false, std::sync::atomic::Ordering::SeqCst);
+    // SAFETY: signal(2) with a handler that only stores to an atomic; restored below.
+    let previous = unsafe { signal(SIGINT, on_sigint as extern "C" fn(i32) as usize) };
+    let code = session_inner(trace, exe, lldb, lldb_args, dir);
+    // SAFETY: restores the disposition read above.
+    unsafe { signal(SIGINT, previous) };
+    code
+}
+
+fn session_inner(trace: &str, exe: Option<&str>, lldb: &Path, lldb_args: &[String], dir: &Path) -> i32 {
     let Ok(me) = std::env::current_exe() else { return crate::bad_input("cannot find retrace's own path") };
     let log_path = dir.join("server.err");
     let log_file = match std::fs::File::create(&log_path) {
@@ -122,7 +140,9 @@ fn session(trace: &str, exe: Option<&str>, lldb: &Path, lldb_args: &[String], di
     let mut log = Log { path: log_path, seen: 0 };
 
     // Wait for the port, or for the server to end (an incomplete recording ends it with its line).
+    // No time bound: a slow-opening recording must not fail; a ^C ends the wait.
     let port = loop {
+        if INTERRUPTED.load(std::sync::atomic::Ordering::SeqCst) { reap(&mut server); return 130; }
         let exited = server.try_wait().ok().flatten();
         let mut port = None;
         for l in log.new_lines(exited.is_some()) {
@@ -149,13 +169,8 @@ fn session(trace: &str, exe: Option<&str>, lldb: &Path, lldb_args: &[String], di
         Ok(c) => c,
         Err(e) => { reap(&mut server); return crate::bad_input(&format!("cannot start lldb: {e}")); }
     };
-    // Ignored only now: an ignored disposition survives exec, and lldb must keep its own SIGINT.
-    // SAFETY: signal(2) with SIG_IGN, restored below.
-    let previous = unsafe { signal(SIGINT, SIG_IGN) };
+    // A ^C now is ignored: lldb gets it too, and retrace waits for lldb to end.
     let status = child.wait();
-    // SAFETY: restores the disposition read above.
-    unsafe { signal(SIGINT, previous) };
-
     reap(&mut server);
     for l in log.new_lines(true) { say(&l); }
     match status {
