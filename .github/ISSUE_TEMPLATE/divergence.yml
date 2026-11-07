@@ -1,0 +1,39 @@
+name: replay disagreed with the recording
+description: retrace replay printed a DIVERGENCE line and exited 3
+title: "[divergence] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A recording and a `RETRACE_TRACE` log contain the program's environment and output. Attach one only if nothing in it is secret: tokens, keys, passwords and private paths all travel with it. If in doubt, paste the single line and the command instead.
+  - type: textarea
+    id: line
+    attributes:
+      label: The DIVERGENCE line
+      description: The whole line that starts `DIVERGENCE`.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: The commands you ran
+      description: The exact `retrace record` and `retrace replay` command lines.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: version
+    attributes:
+      label: retrace --version and sw_vers
+      description: Paste the output of both.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: more
+    attributes:
+      label: What the program does (optional)
+      description: What the program is, or a small program that shows it.
+    validations:
+      required: false

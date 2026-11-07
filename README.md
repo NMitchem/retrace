@@ -15,33 +15,42 @@ won't reproduce, and there's no `fork`: a program that starts a child process st
 ## Example
 
 [`crashy.c`](crates/retrace-guest/c/crashy.c) overruns an array into the pointer stored next to it,
-then dereferences that pointer. Record it once (the recording exits 139, the crash's SIGSEGV) and serve it to
-lldb:
+then dereferences that pointer. Record it once (the recording exits 139, the crash's SIGSEGV) and open it in lldb:
 
 ```sh
-$ clang -o crashy crates/retrace-guest/c/crashy.c
-$ retrace record-dyn "$PWD/crashy" -o t.bin
-$ retrace gdbserver t.bin --port 5555
-listening on 127.0.0.1:5555
+$ clang -o crashy crashy.c
+$ retrace record ./crashy
+retrace: the program was killed by SIGSEGV (fault at 0x4000dead0000, pc 0x1000005c4 in _main+0xcc)
+retrace: saved the recording to crashy.retrace
+$ retrace lldb crashy.retrace
 ```
 
-Then, in stock lldb (`0x1000080b0` is `&g.ptr`):
+Then, in lldb (`0x1000080b0` is `&g.ptr`):
 
 ```
-(lldb) gdb-remote 127.0.0.1:5555
-* thread #1, stop reason = start of recording
 (lldb) process continue
+Process 1 stopped
 * thread #1, stop reason = EXC_BAD_ACCESS (code=1, address=0x4000dead0000)
     frame #0: 0x00000001000005c4 crashy`main + 204
+crashy`main:
+->  0x1000005c4 <+204>: str    x8, [x9]
 (lldb) watchpoint set expression -w write -s 8 -- 0x1000080b0
+Watchpoint created: Watchpoint 1: addr = 0x1000080b0 size = 8 state = enabled type = w
 (lldb) process continue -R
 Watchpoint 1 hit:
+old value: 70372480057344
+new value: 4295000208
+Process 1 stopped
 * thread #1, stop reason = watchpoint 1
     frame #0: 0x000000010000059c crashy`main + 164
+crashy`main:
 ->  0x10000059c <+164>: str    x8, [x9, x10, lsl #3]
 (lldb) rsi
+Process 1 stopped
 * thread #1, stop reason = trace
     frame #0: 0x0000000100000598 crashy`main + 160
+crashy`main:
+->  0x100000598 <+160>: movk   x8, #0x4000, lsl #32
 ```
 
 lldb runs to the crash, goes back to the `str` that wrote the bad pointer, then steps back one more
@@ -125,8 +134,19 @@ stored in the trace.
 
 ## Getting started
 
-You need macOS 26 on Apple Silicon and a Rust toolchain (`rust-toolchain.toml` pins the version).
-No root, no Apple developer account, and SIP can stay on.
+```sh
+brew tap nmitchem/retrace https://github.com/NMitchem/retrace
+brew install retrace
+```
+
+<<PRE_TAG_NOTE>> Until `v0.1.0` is tagged, the formula has no stable version: install with
+`brew install --HEAD retrace`.
+
+Homebrew builds retrace from source with the pinned Rust toolchain and signs it with the hypervisor
+entitlement. You need macOS 26 on Apple Silicon and the Command Line Tools for lldb
+(`xcode-select --install`). No root, no Apple developer account, and SIP can stay on.
+
+To build it yourself you need a Rust toolchain (`rust-toolchain.toml` pins the version):
 
 ```sh
 git clone https://github.com/NMitchem/retrace && cd retrace
@@ -135,22 +155,20 @@ codesign -s - -f --entitlements retrace.entitlements target/aarch64-apple-darwin
 ```
 
 Anything that uses Hypervisor.framework needs the `com.apple.security.hypervisor` entitlement, which
-an ad-hoc signature can carry. Re-sign after every build. `cargo run` signs for you through the
-runner in `.cargo/config.toml`. The first run of a freshly signed binary can pause for a while in
-macOS's code-signing check; it isn't hung. The examples call that binary `retrace`, so put its
-directory on your `PATH` or use the full path.
+an ad-hoc signature can carry. Re-sign after every build. For development, `cargo run -p retrace -- ...`
+signs for you through the runner in `.cargo/config.toml`. The first run of a freshly signed binary can
+pause for a while in macOS's code-signing check; it isn't hung. The examples call the binary `retrace`,
+so put its directory on your `PATH` or use the full path.
 
 | Command | What it does |
 |---|---|
-| `retrace record-dyn <exe> -o <trace> [-- <args…>]` | record a program, running it through the real dyld |
+| `retrace record [-o <trace>] <program> [<args...>]` | record a program; the trace is `<program>.retrace` unless `-o` names it |
 | `retrace replay <trace>` | replay and verify; exits 3 on a divergence |
-| `retrace gdbserver <trace> [--port <n>] [--exe <path>]` | serve the recording to lldb |
+| `retrace lldb <trace> [--exe <path>] [-- <lldb args...>]` | serve the recording and open lldb on it, with `rsi` loaded |
 | `retrace debug <trace> --script '<cmds>'` | the built-in debugger (`continue`, `reverse-continue`, `stepi`, `reverse-stepi`, `break`, `watch`, `where`, `regs`, `threads`, `x`) |
-| `retrace record <macho> -o <trace>` | record a freestanding static binary |
+| `retrace gdbserver <trace> [--port <n>] [--exe <path>]` | serve the recording to an lldb you start yourself |
 
-Record with an absolute path to the program so lldb can find its symbols later. In lldb, load the
-reverse-step command with `command script import <repo>/crates/retrace/lldb/retrace.py`. If a
-recording stops at a wall, rerun it with `RETRACE_TRACE=1` to log every trap.
+If a recording stops at a wall, rerun it with `RETRACE_TRACE=1` to log every trap.
 [`docs/current-state.md`](docs/current-state.md#usage) has the full CLI and debugger reference.
 
 ## How it works

@@ -174,10 +174,10 @@ with exit 70, and `RUST_BACKTRACE=1` printing no frames for a wall), `output_e2e
 - Some gates are `#[ignore]`d, parked at a documented wall — see "Honest-gate discipline" below for
   the rule. Which ones and why is on the tests themselves (the `#[ignore]` reason is the primary
   record) and summarised under "Known limits" in `docs/current-state.md`.
-- CLI: `cargo run -p retrace -- record <macho> -o t.bin`, `... record-dyn <exe> -o t.bin` (runs the
-  exe through real `/usr/lib/dyld`; append `-- <guest args…>` to pass the guest an argv),
-  `... replay t.bin`.
-- `RETRACE_TRACE=1` on a `record`/`record-dyn` run logs every dispatched trap (and decodes
+- CLI: `cargo run -p retrace -- record [-o t.bin] <program> [<args…>]` (static or dynamic is read from
+  the file; options go before the program; the trace defaults to `<basename>.retrace`),
+  `... replay t.bin`, `... lldb t.bin` (serves the recording and runs lldb on it).
+- `RETRACE_TRACE=1` on a `record` run logs every dispatched trap (and decodes
   `mach_msg2` sends) — the first tool to reach for on a bring-up failure. **Record-only:** `ReplaySession`
   carries no trace instrumentation, so no `[trap]`/`[mach_msg2]`/`[fault]` line is ever printed on replay.
 - `RETRACE_VERBOSE=1` prints retrace's own diagnostic lines (fall-through counts, warnings), off by default since M51; `RETRACE_TRACE=1` implies it. Since M51 `util::run`, `run_env` and `run_bounded` start the child with an empty environment plus the test's own pairs, so a test that needs a variable passes it.

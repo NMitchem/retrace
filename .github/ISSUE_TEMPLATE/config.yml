@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: What a wall means
+    url: https://github.com/NMitchem/retrace/blob/main/docs/walls.md
+    about: "Each retrace: unsupported line links the section of this page that explains it."
