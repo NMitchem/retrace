@@ -45,6 +45,7 @@ mkdir -p "$SCRATCH/home" "$SCRATCH/work" || fail
 BREW_PREFIX="$(brew --prefix)" || { STEP="brew --prefix"; fail; }
 # The scratch HOME keeps the build's own cargo and rustup state out of the user's; brew reads its
 # own prefix and caches from its environment, not HOME-relative state it cannot recreate.
+export HOME="$SCRATCH/home"
 export CARGO_HOME="$SCRATCH/home/.cargo"
 export RUSTUP_HOME="$SCRATCH/home/.rustup"
 
