@@ -180,10 +180,32 @@ fn bad_input(line: &str) -> i32 {
 
 /// R2: the one line for a process the hypervisor refuses, most often for want of the entitlement.
 fn no_hypervisor(why: &str) -> i32 {
-    let me = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "retrace".into());
+    let exe = std::env::current_exe().unwrap_or_else(|_| "retrace".into());
     bad_input(&format!("cannot create a VM ({why}). retrace needs the com.apple.security.hypervisor \
-        entitlement: sign it with codesign --sign - --force --entitlements retrace.entitlements {me}, \
-        using retrace.entitlements from the root of the retrace repository"))
+        entitlement. {}", signing_fix(&exe)))
+}
+
+/// The fix text for an unsigned `exe` (M56 section 3f), one that works without the repository: the
+/// entitlement file beside a Homebrew install, else a self-contained command (T0-6's two-line form),
+/// and the repository form only when `exe` sits under a tree that holds both files.
+fn signing_fix(exe: &Path) -> String {
+    let me = exe.display();
+    if let Some(bin) = exe.parent() {
+        let shared = bin.join("../share/retrace/retrace.entitlements");
+        if shared.is_file() {
+            return format!("Sign it with: codesign --sign - --force --entitlements {} {me}", shared.display());
+        }
+    }
+    for dir in exe.ancestors().skip(1) {
+        let ent = dir.join("retrace.entitlements");
+        if ent.is_file() && dir.join("Cargo.toml").is_file() {
+            return format!("Sign it with: codesign --sign - --force --entitlements {} {me}", ent.display());
+        }
+    }
+    format!("Sign it with these two commands: printf '%s\\n' '<?xml version=\"1.0\" encoding=\"UTF-8\"?>' \
+        '<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">' \
+        '<plist version=\"1.0\"><dict><key>com.apple.security.hypervisor</key><true/></dict></plist>' \
+        > /tmp/retrace.entitlements ; codesign --sign - --force --entitlements /tmp/retrace.entitlements {me}")
 }
 
 /// What `retrace record` was given (M56 section 3b): options come before the program, and
@@ -381,5 +403,47 @@ mod record_args_tests {
     fn default_names() {
         assert_eq!(default_trace_name("./sub/crashy"), "crashy.retrace");
         assert_eq!(default_trace_name("/bin/ls"), "ls.retrace");
+    }
+}
+
+#[cfg(test)]
+mod signing_fix_tests {
+    use super::*;
+
+    fn tmp(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("retrace-signfix-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn the_fix_names_a_file_that_exists_or_needs_none() {
+        // A Homebrew-shaped prefix: the entitlement sits in share/retrace beside bin.
+        let brew = tmp("brew");
+        std::fs::create_dir_all(brew.join("bin")).unwrap();
+        std::fs::create_dir_all(brew.join("share/retrace")).unwrap();
+        std::fs::write(brew.join("share/retrace/retrace.entitlements"), "x").unwrap();
+        let exe = brew.join("bin/retrace");
+        let line = signing_fix(&exe);
+        let named = brew.join("bin/../share/retrace/retrace.entitlements");
+        assert!(line.contains(&named.display().to_string()), "{line}");
+        assert!(named.exists());
+
+        // A bare directory: no file to name, so the self-contained command, never a repo path.
+        let bare = tmp("bare");
+        let line = signing_fix(&bare.join("retrace"));
+        assert!(line.contains("com.apple.security.hypervisor"), "{line}");
+        assert!(line.contains("codesign"), "{line}");
+        assert!(!line.contains("root of the retrace repository"), "{line}");
+        assert!(!line.contains("--entitlements retrace.entitlements"), "{line}");
+
+        // A repo-shaped tree: the file exists at the root, with Cargo.toml.
+        let repo = tmp("repo");
+        std::fs::create_dir_all(repo.join("target/debug")).unwrap();
+        std::fs::write(repo.join("Cargo.toml"), "").unwrap();
+        std::fs::write(repo.join("retrace.entitlements"), "x").unwrap();
+        let line = signing_fix(&repo.join("target/debug/retrace"));
+        assert!(line.contains(&repo.join("retrace.entitlements").display().to_string()), "{line}");
     }
 }

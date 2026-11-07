@@ -1,0 +1,5 @@
+process continue
+watchpoint set expression -w write -s 8 -- @ADDR@
+process continue -R
+thread list
+frame info
