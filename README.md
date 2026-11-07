@@ -139,7 +139,8 @@ brew tap nmitchem/retrace https://github.com/NMitchem/retrace
 brew install retrace
 ```
 
-<<PRE_TAG_NOTE>> Until `v0.1.0` is tagged, the formula has no stable version: install with
+<!-- PRE_TAG_NOTE: remove this paragraph once v0.1.0 is tagged (docs/launch-checklist.md step 5) -->
+Until `v0.1.0` is tagged, the formula has no stable version: install with
 `brew install --HEAD retrace`.
 
 Homebrew builds retrace from source with the pinned Rust toolchain and signs it with the hypervisor

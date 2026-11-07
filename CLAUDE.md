@@ -41,12 +41,12 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
   cargo test -p retrace --bins -- --test-threads=1          # don't omit — see below
   ```
   **Do not omit the `--bins` chunk.** `--test <name>` selects integration-test targets only, so the
-  35 unit tests inside the `retrace` binary itself (20 in `crates/retrace/src/debug.rs`, 14 in
-  `crates/retrace/src/rsp.rs`, 1 in `crates/retrace/src/main.rs`) run in **none** of
+  47 unit tests inside the `retrace` binary itself (20 in `crates/retrace/src/debug.rs`, 14 in
+  `crates/retrace/src/rsp.rs`, 7 in `crates/retrace/src/main.rs`, 6 in `crates/retrace/src/gdbserver.rs`) run in **none** of
   the other chunks; only the unchunked `--workspace` run, or a whole-package `cargo test -p retrace`
   with no `--test` filter, reaches them — which is why closes before M17 are not owed a
   correction. Leaving it out silently costs
-  35 tests and one binary — and nothing fails to warn you. Contrast `cargo test -p retrace --lib`,
+  47 tests and one binary — and nothing fails to warn you. Contrast `cargo test -p retrace --lib`,
   which is invalid for this crate (there is no lib target) and fails the whole invocation
   **loudly**: the trap is that the wrong flag is loud and the missing one is silent.
 
@@ -117,7 +117,12 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
   determinism check, and the blocked-step and cross-thread `rsi` rows; M44 added `ni`, `next`,
   `thread step-out` and `finish` over a call, an arm64e `bt`, and bounded sessions for M44's
   stepping changes, each asserting lldb does not loop; it skips loudly without lldb, and its CPython
-  test without Homebrew Python), `apple_walls_e2e` (Apple binaries by path: M44's
+  test without Homebrew Python), `cli_e2e` (M56: one `record` for a static or dynamic program by a relative
+  path, the default name, options after the program, the `record-dyn` refusal, `--version`/`--help`),
+  `lldbcmd_e2e` (M56: `retrace lldb` reverse-debugs a relative-path recording in one command, the server gone
+  after lldb exits, a SIGINT leaving retrace to reap the server, the trace directory as a symbol candidate, a
+  rebuilt program without symbols and its UUID line, an incomplete recording ending at the server's line with
+  no lldb, an unusable lldb and a missing trace as bad input; skips loudly without lldb), `apple_walls_e2e` (Apple binaries by path: M44's
   `ls_records_and_replays` and `ed_records_and_replays` run beside `launchctl`'s; the other seven
   are parked at their measured walls), `skiplines` (M44: the skip-line detector and its control), `evidence_secrets` (the M53 scrub: no file under `docs/` holds a credential, a credential-named variable's value or a known token prefix, each reported by name and never by value; and its control), `kqinit_e2e` (M45: libdispatch's
   workqueue-kqueue init, `kevent_qos` with `KEVENT_FLAG_WORKQ`, issued by hand from `kqinit_dyn.c`
