@@ -60,7 +60,7 @@ if [ -d "$TAP_SRC" ]; then
   TAP_DIR="$(brew --repository "$TAP_NAME")" || { STEP="tap dir"; fail; }
   mkdir -p "$TAP_DIR/Formula" || fail
   cp "$TAP_SRC/Formula/retrace.rb" "$SCRATCH/retrace.rb.orig" || { STEP="read formula"; fail; }
-  sed "s|^  head .*|  head \"file://$BARE\", branch: \"$BRANCH\"|" "$SCRATCH/retrace.rb.orig" > "$TAP_DIR/Formula/retrace.rb" || fail
+  sed "s|^  head .*|  head \"file://$BARE\", using: :git, branch: \"$BRANCH\"|" "$SCRATCH/retrace.rb.orig" > "$TAP_DIR/Formula/retrace.rb" || fail
   echo "== the formula's one rewritten line (head)" >&2
   diff -u "$SCRATCH/retrace.rb.orig" "$TAP_DIR/Formula/retrace.rb" | tee "$SCRATCH/formula-head-rewrite.diff"
   if [ "$(diff "$SCRATCH/retrace.rb.orig" "$TAP_DIR/Formula/retrace.rb" | grep -c '^[<>]')" -ne 2 ]; then
