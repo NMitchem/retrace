@@ -11,9 +11,9 @@ class Retrace < Formula
   # url "https://github.com/NMitchem/retrace/archive/refs/tags/v0.1.0.tar.gz"
   # sha256 "FILL-IN-AFTER-THE-TAG"
 
+  depends_on "rustup" => :build
   depends_on arch: :arm64
   depends_on macos: :tahoe
-  depends_on "rustup" => :build
 
   def install
     # The pinned toolchain (rust-toolchain.toml) through keg-only rustup, kept inside the build
@@ -21,10 +21,10 @@ class Retrace < Formula
     ENV["RUSTUP_HOME"] = buildpath/".rustup"
     ENV["CARGO_HOME"] = buildpath/".cargo"
     ENV.prepend_path "PATH", buildpath/".cargo/bin"
-    ENV.prepend_path "PATH", Formula["rustup"].opt_bin
-    system Formula["rustup"].opt_bin/"rustup", "toolchain", "install", "1.95.0",
+    ENV.prepend_path "PATH", formula_opt_bin("rustup")
+    system formula_opt_bin("rustup")/"rustup", "toolchain", "install", "1.95.0",
            "--profile", "minimal", "-t", "aarch64-apple-darwin"
-    system Formula["rustup"].opt_bin/"rustup", "default", "1.95.0"
+    system formula_opt_bin("rustup")/"rustup", "default", "1.95.0"
     system "cargo", "install", "--locked", "--path", "crates/retrace", "--root", prefix
     # Every binary that touches the hypervisor needs this entitlement. Signing after cargo's link
     # step keeps it (t0 measurement 1).
