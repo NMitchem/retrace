@@ -4,6 +4,7 @@ use std::process::exit;
 mod debug;
 mod rsp;
 mod gdbserver;
+mod lldbcmd;
 
 /// Where the bug banner sends a report (M50 §3b).
 const ISSUES_URL: &str = "https://github.com/NMitchem/retrace/issues";
@@ -149,7 +150,8 @@ fn main() {
 }
 
 /// One subcommand, as its exit code (spec §3b): the guest's own exit, or 128 + its signal; 2 for bad
-/// input to retrace; 3 for a divergence; 4 for a wall; 5 for a `debug` or `gdbserver` error.
+/// input to retrace; 3 for a divergence; 4 for a wall; 5 for a `debug` or `gdbserver` error. `lldb`
+/// exits with lldb's own status, or with the server's code (5) when it ends before lldb starts.
 fn run(a: &[String]) -> i32 {
     // M50 §3f: the bug banner's control, in debug builds only. A release build cannot reach it, so it
     // adds no bug path a program could take; the panic stands in for a broken internal invariant.
@@ -165,6 +167,7 @@ fn run(a: &[String]) -> i32 {
         Some("replay") => replay(a),
         Some("debug") => debug_cmd(a),
         Some("gdbserver") => gdbserver_cmd(a),
+        Some("lldb") => lldbcmd::run(a),
         _ => bad_input(USAGE),
     }
 }
