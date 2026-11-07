@@ -174,7 +174,7 @@ with exit 70, and `RUST_BACKTRACE=1` printing no frames for a wall), `output_e2e
 - Some gates are `#[ignore]`d, parked at a documented wall — see "Honest-gate discipline" below for
   the rule. Which ones and why is on the tests themselves (the `#[ignore]` reason is the primary
   record) and summarised under "Known limits" in `docs/current-state.md`.
-- CLI: `cargo run -p retrace -- record [-o t.bin] <program> [<args…>]` (static or dynamic is read from
+- CLI: `cargo run -p retrace -- record [-o t.bin] <program> [<args>...]` (static or dynamic is read from
   the file; options go before the program; the trace defaults to `<basename>.retrace`),
   `... replay t.bin`, `... lldb t.bin` (serves the recording and runs lldb on it).
 - `RETRACE_TRACE=1` on a `record` run logs every dispatched trap (and decodes
