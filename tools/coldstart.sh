@@ -41,6 +41,12 @@ step() {
   "$@" || fail
 }
 
+# A re-run on a machine that already has retrace would test the old keg (Homebrew answers "already
+# installed", exit 0), so it is not a cold start: refuse.
+if brew list --formula retrace >/dev/null 2>&1; then
+  STEP="retrace is already installed"; fail
+fi
+
 mkdir -p "$SCRATCH/home" "$SCRATCH/work" || fail
 BREW_PREFIX="$(brew --prefix)" || { STEP="brew --prefix"; fail; }
 # The scratch HOME keeps the build's own cargo and rustup state out of the user's; brew reads its
@@ -73,6 +79,8 @@ else
   TAP_NAME="nmitchem/retrace"
 fi
 
+# The README's install line: fully qualified, because Homebrew 6 and later trust a non-official tap's
+# formula by its full name only. With --tap <dir> the scratch tap is coldstart/retrace, the same shape.
 # shellcheck disable=SC2086
 step "brew install" brew install $HEAD_FLAG "$TAP_NAME/retrace"
 step "brew test" brew test "$TAP_NAME/retrace"
@@ -114,6 +122,9 @@ STEP="lldb stopped at the watchpoint"
 grep -q 'stop reason = watchpoint 1' lldb.out || fail
 STEP="lldb stopped in crashy main"
 grep -q 'crashy`main' lldb.out || fail
+# The store that wrote the cell (spec 3h), as lldbcmd_e2e asserts.
+STEP="lldb showed the str that wrote the watched cell"
+grep -q 'str ' lldb.out || fail
 
 echo "COLDSTART pass"
 if [ "$CLEANUP" -eq 1 ]; then

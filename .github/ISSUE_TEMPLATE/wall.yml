@@ -25,8 +25,8 @@ body:
   - type: textarea
     id: version
     attributes:
-      label: retrace --version and sw_vers
-      description: Paste the output of both.
+      label: retrace --version, brew list --versions retrace, and sw_vers
+      description: Paste the output of all three. (--version prints 0.1.0 for every HEAD build; the brew line shows which one.)
       render: text
     validations:
       required: true

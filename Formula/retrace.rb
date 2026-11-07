@@ -5,9 +5,10 @@ class Retrace < Formula
   head "https://github.com/NMitchem/retrace.git", branch: "main"
 
   # The stable stanza needs the tarball of the tag v0.1.0, which exists only after the operator pushes
-  # that tag. Until then the formula is HEAD-only: `brew install retrace` without --HEAD fails with
-  # Homebrew's own "no stable version" message. After the tag, fill in the checksum
-  # (curl -L <url> | shasum -a 256) and uncomment these two lines.
+  # that tag. Until then the formula is HEAD-only: `brew install nmitchem/retrace/retrace` without --HEAD
+  # fails with Homebrew's own "no stable version" message. (A short name needs the formula trusted first
+  # under Homebrew 6 and later, so the fully qualified name is the one to tell a user.)
+  # After the tag, fill in the checksum (curl -L <url> | shasum -a 256) and uncomment these two lines.
   # url "https://github.com/NMitchem/retrace/archive/refs/tags/v0.1.0.tar.gz"
   # sha256 "FILL-IN-AFTER-THE-TAG"
 
@@ -22,9 +23,12 @@ class Retrace < Formula
     ENV["CARGO_HOME"] = buildpath/".cargo"
     ENV.prepend_path "PATH", buildpath/".cargo/bin"
     ENV.prepend_path "PATH", formula_opt_bin("rustup")
-    system formula_opt_bin("rustup")/"rustup", "toolchain", "install", "1.95.0",
+    # The version is read from that file, so a pin bump cannot leave the formula on another toolchain.
+    toolchain = File.read("rust-toolchain.toml")[/^channel\s*=\s*"([^"]+)"/, 1]
+    odie "no channel in rust-toolchain.toml" if toolchain.nil?
+    system formula_opt_bin("rustup")/"rustup", "toolchain", "install", toolchain,
            "--profile", "minimal", "-t", "aarch64-apple-darwin"
-    system formula_opt_bin("rustup")/"rustup", "default", "1.95.0"
+    system formula_opt_bin("rustup")/"rustup", "default", toolchain
     system "cargo", "install", "--locked", "--path", "crates/retrace", "--root", prefix
     # Every binary that touches the hypervisor needs this entitlement. Signing after cargo's link
     # step keeps it (t0 measurement 1).
@@ -37,6 +41,9 @@ class Retrace < Formula
     <<~EOS
       retrace's lldb front door (retrace lldb) needs the Command Line Tools:
         xcode-select --install
+
+      The README's example program is installed here:
+        #{pkgshare}/examples/crashy.c
 
       The first run of a freshly signed binary can pause for a few seconds in macOS's
       code-signing check.

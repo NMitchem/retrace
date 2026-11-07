@@ -143,6 +143,24 @@ fn a_relative_recording_gets_its_image_list() {
 }
 
 #[test]
+fn an_image_found_through_a_relative_trace_directory_is_advertised_as_an_absolute_path() {
+    // Final review minor 6: recorded as `./crashy` in `sub`, served from its parent with the relative trace
+    // `sub/crashy.retrace`. The image is found through the trace directory, and lldb, which may run
+    // anywhere, is handed an absolute path.
+    let parent = std::env::temp_dir().join(format!("retrace-reltd-{}", std::process::id()));
+    let sub = parent.join("sub");
+    let _ = std::fs::remove_dir_all(&parent);
+    std::fs::create_dir_all(&sub).unwrap();
+    std::fs::copy(retrace_guest::CRASHY, sub.join("crashy")).unwrap();
+    let rec = util::run_in(&sub, &["record", "./crashy"], &[], 600);
+    assert_eq!(rec.code, Some(139), "record ./crashy: {}", rec.stderr);
+    let mut c = Rsp::spawn_in(Path::new("sub/crashy.retrace"), &[], Some(&parent));
+    let j = c.send(r#"jGetLoadedDynamicLibrariesInfos:{"fetch_all_solibs":true}"#);
+    let real = parent.canonicalize().unwrap();
+    assert!(j.contains(&format!(r#""pathname":"{}/sub/./crashy""#, real.display())), "{j}");
+}
+
+#[test]
 fn a_static_guest_lists_nothing_unless_given_its_path() {
     let mut c = Rsp::spawn(watchsweep(), &[]);
     assert!(!c.send("qHostInfo").contains("os_version:"), "no path: lldb's older loader (t0 L2)");

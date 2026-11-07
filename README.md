@@ -18,6 +18,7 @@ won't reproduce, and there's no `fork`: a program that starts a child process st
 then dereferences that pointer. Record it once (the recording exits 139, the crash's SIGSEGV) and open it in lldb:
 
 ```sh
+$ cp "$(brew --prefix)/share/retrace/examples/crashy.c" .
 $ clang -o crashy crashy.c
 $ retrace record ./crashy
 retrace: the program was killed by SIGSEGV (fault at 0x4000dead0000, pc 0x1000005c4 in _main+0xcc)
@@ -136,12 +137,12 @@ stored in the trace.
 
 ```sh
 brew tap nmitchem/retrace https://github.com/NMitchem/retrace
-brew install retrace
+brew install nmitchem/retrace/retrace
 ```
 
 <!-- PRE_TAG_NOTE: remove this paragraph once v0.1.0 is tagged (docs/launch-checklist.md step 5) -->
 Until `v0.1.0` is tagged, the formula has no stable version: install with
-`brew install --HEAD retrace`.
+`brew install --HEAD nmitchem/retrace/retrace`.
 
 Homebrew builds retrace from source with the pinned Rust toolchain and signs it with the hypervisor
 entitlement. You need macOS 26 on Apple Silicon and the Command Line Tools for lldb
@@ -163,7 +164,7 @@ so put its directory on your `PATH` or use the full path.
 
 | Command | What it does |
 |---|---|
-| `retrace record [-o <trace>] <program> [<args...>]` | record a program; the trace is `<program>.retrace` unless `-o` names it |
+| `retrace record [-o <trace>] <program> [<args...>]` | record a program; the trace is `-o`'s name, or the program's basename plus `.retrace` in the working directory |
 | `retrace replay <trace>` | replay and verify; exits 3 on a divergence |
 | `retrace lldb <trace> [--exe <path>] [-- <lldb args...>]` | serve the recording and open lldb on it, with `rsi` loaded |
 | `retrace debug <trace> --script '<cmds>'` | the built-in debugger (`continue`, `reverse-continue`, `stepi`, `reverse-stepi`, `break`, `watch`, `where`, `regs`, `threads`, `x`) |
