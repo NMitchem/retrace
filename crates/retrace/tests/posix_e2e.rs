@@ -151,7 +151,7 @@ fn an_oversized_xsecurity_length_ends_at_one_clean_wall() {
     let native = util::run_bounded(retrace_guest::POSIX_DYN, &["extbig"], &[], BOUND);
     assert_eq!(String::from_utf8_lossy(&native.stdout), "stat64_extended(oversized length) rc=0 errno=0\nremoved=yes\n", "native succeeds");
     let rec = util::run_bounded(util::bin(),
-        &["record-dyn", retrace_guest::POSIX_DYN, "-o", tp, "--", "extbig"], &[], BOUND);
+        &["record", "-o", tp, retrace_guest::POSIX_DYN, "extbig"], &[], BOUND);
     assert!(!rec.stderr.contains("panicked at") && !rec.stderr.contains("BUG"), "no bug banner. stderr:\n{}", rec.stderr);
     let lines: Vec<&str> = rec.stderr.lines().filter(|l| l.starts_with("retrace:")).collect();
     assert_eq!(lines.len(), 1, "exactly one retrace: line. stderr:\n{}", rec.stderr);
@@ -169,7 +169,7 @@ fn a_flock_that_would_wait_ends_the_recording_at_one_clean_line() {
     let native = util::run_bounded(retrace_guest::POSIX_DYN, &["flockwait"], &[], BOUND);
     assert_eq!(String::from_utf8_lossy(&native.stdout), "locked\nremoved=yes\n", "native waits and then locks");
     let rec = util::run_bounded(util::bin(),
-        &["record-dyn", retrace_guest::POSIX_DYN, "-o", tp, "--", "flockwait"], &[], BOUND);
+        &["record", "-o", tp, retrace_guest::POSIX_DYN, "flockwait"], &[], BOUND);
     assert!(!rec.stderr.contains("panicked at"), "{}", rec.stderr);
     let lines: Vec<&str> = rec.stderr.lines().filter(|l| l.starts_with("retrace:")).collect();
     assert_eq!(lines.len(), 1, "exactly one retrace: line. stderr:\n{}", rec.stderr);

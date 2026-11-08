@@ -25,7 +25,7 @@ fn trace_path() -> PathBuf {
 
 fn record(args: &[&str], bound: u64) -> (util::Bounded, PathBuf) {
     let trace = trace_path();
-    let mut argv = vec!["record-dyn", retrace_guest::SOCKPAIR_DYN, "-o", trace.to_str().unwrap(), "--"];
+    let mut argv = vec!["record", "-o", trace.to_str().unwrap(), retrace_guest::SOCKPAIR_DYN];
     argv.extend_from_slice(args);
     let rec = util::run_bounded(util::bin(), &argv, &[], bound);
     (rec, trace)

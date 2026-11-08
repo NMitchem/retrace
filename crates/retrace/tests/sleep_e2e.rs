@@ -39,7 +39,7 @@ fn record(argv: &[&str]) -> (Option<i32>, Vec<u8>, String, PathBuf) {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
     let trace = std::env::temp_dir().join(format!("retrace-sleep-{}-{n}.bin", std::process::id()));
-    let mut args = vec!["record-dyn", retrace_guest::SLEEP_DYN, "-o", trace.to_str().unwrap(), "--"];
+    let mut args = vec!["record", "-o", trace.to_str().unwrap(), retrace_guest::SLEEP_DYN];
     args.extend_from_slice(argv);
     let (code, out, err) = cli(&args);
     (code, out, err, trace)
@@ -474,7 +474,7 @@ fn a_program_that_reads_the_clock_as_often_as_a_long_test_suite_stays_under_one_
     let r = util::run_bounded(retrace_guest::CLOCKREADS, &[], &[], BOUND);
     assert_eq!(String::from_utf8_lossy(&r.stdout), want, "native");
     let trace = std::env::temp_dir().join(format!("retrace-clockreads-{}.bin", std::process::id()));
-    let (code, out, err) = cli(&["record-dyn", retrace_guest::CLOCKREADS, "-o", trace.to_str().unwrap()]);
+    let (code, out, err) = cli(&["record", "-o", trace.to_str().unwrap(), retrace_guest::CLOCKREADS]);
     assert_eq!(code, Some(0), "record (None: the {BOUND} s bound fired): {err}");
     assert_eq!(String::from_utf8(out).unwrap(), want, "recorded");
     let (code, rp, err) = cli(&["replay", trace.to_str().unwrap()]);

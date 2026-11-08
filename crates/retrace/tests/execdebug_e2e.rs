@@ -27,8 +27,8 @@ fn copy_of(src: &str, name: &str) -> PathBuf {
 fn record_copy(src: &str, expect_code: i32) -> (PathBuf, PathBuf) {
     let target = copy_of(src, "target");
     let t = scratch("t.bin");
-    let r = util::run_bounded(util::bin(), &["record-dyn", retrace_guest::EXECSELF_DYN, "-o", t.to_str().unwrap(),
-                                             "--", "copy", target.to_str().unwrap()], &[], BOUND);
+    let r = util::run_bounded(util::bin(), &["record", "-o", t.to_str().unwrap(), retrace_guest::EXECSELF_DYN,
+                                             "copy", target.to_str().unwrap()], &[], BOUND);
     assert_eq!(r.code, Some(expect_code), "the recording exits {expect_code}. stderr:\n{}", r.stderr);
     (t, target)
 }
@@ -303,8 +303,8 @@ fn the_gdbserver_refuses_to_cross_an_exec_in_reverse_and_reports_the_stop_at_it(
 /// action, so the new image never runs and the recording ends in `Event::Signal`); the trace and the exec's path.
 fn record_hup() -> (PathBuf, String) {
     let t = scratch("hup.bin");
-    let r = util::run_bounded(util::bin(), &["record-dyn", retrace_guest::EXECSELF_DYN, "-o", t.to_str().unwrap(),
-                                             "--", "spawn-hup"], &[], BOUND);
+    let r = util::run_bounded(util::bin(), &["record", "-o", t.to_str().unwrap(), retrace_guest::EXECSELF_DYN,
+                                             "spawn-hup"], &[], BOUND);
     assert_eq!(r.code, Some(129), "the recording exits 129 (SIGHUP). stderr:\n{}", r.stderr);
     let ev = events(&t);
     let Some(Event::Exec { path, .. }) = ev.iter().find(|e| matches!(e, Event::Exec { .. })) else { panic!("no Exec") };
@@ -364,8 +364,8 @@ fn the_gdbserver_ends_a_recording_whose_exec_releases_a_fatal_signal() {
 fn a_bare_argv0_still_names_the_new_epochs_image_by_executable_path() {
     use util::rsp::Rsp;
     let t = scratch("rsexec.bin");
-    let r = util::run_bounded(util::bin(), &["record-dyn", retrace_guest::FC_RS_EXEC, "-o", t.to_str().unwrap(),
-                                             "--", retrace_guest::EXEC_TARGET_DYN], &[], BOUND);
+    let r = util::run_bounded(util::bin(), &["record", "-o", t.to_str().unwrap(), retrace_guest::FC_RS_EXEC,
+                                             retrace_guest::EXEC_TARGET_DYN], &[], BOUND);
     assert_eq!(r.code, Some(0), "{}", r.stderr);
     let ev = events(&t);
     let Some(Event::Exec { path, .. }) = ev.iter().find(|e| matches!(e, Event::Exec { .. })) else { panic!("no Exec") };

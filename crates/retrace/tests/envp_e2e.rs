@@ -15,7 +15,7 @@ fn scratch(name: &str) -> PathBuf {
 }
 
 fn record(t: &str, env: &[(&str, &str)]) -> util::Bounded {
-    util::run_bounded(util::bin(), &["record-dyn", P, "-o", t], env, BOUND)
+    util::run_bounded(util::bin(), &["record", "-o", t, P], env, BOUND)
 }
 
 /// Spec §4 "The environment": what the program prints of its environment under retrace is what it
@@ -84,7 +84,7 @@ fn awkward_environment_bytes_reach_the_program_unchanged() {
     let native = run(P, &[]);
     assert_eq!(native.stdout, b"BYTES=caf\xe9\xff\nEMPTY=\nEQUALS=a=b=c\ncount=3\n", "native");
     let t = scratch("awkward.bin");
-    let rec = run(util::bin(), &["record-dyn", P, "-o", t.to_str().unwrap()]);
+    let rec = run(util::bin(), &["record", "-o", t.to_str().unwrap(), P]);
     assert_eq!((rec.status.code(), rec.stdout), (Some(0), native.stdout), "record");
     let _ = std::fs::remove_file(&t);
 }

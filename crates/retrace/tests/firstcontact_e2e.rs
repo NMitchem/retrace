@@ -385,8 +385,8 @@ fn measure(row: &Row) -> Outcome {
     let Some(ncode) = native.code else { return Outcome::Wall("TIMEOUT native".into()) };
     let trace = std::env::temp_dir().join(format!("retrace-fc-{}-{}.bin", row.name, std::process::id()));
     let t = trace.to_str().unwrap();
-    let mut argv = vec!["record-dyn", row.bin, "-o", t];
-    if !row.args.is_empty() { argv.push("--"); argv.extend_from_slice(row.args); }
+    let mut argv = vec!["record", "-o", t, row.bin];
+    if !row.args.is_empty() { argv.extend_from_slice(row.args); }
     let rec = util::run_bounded(util::bin(), &argv, ENV, PHASE_SECS);
     let got = match judge(ncode, &native.stdout, &native.stderr, &rec, t) {
         Outcome::Wall(l) => Outcome::Wall(mask_addresses(&l)),

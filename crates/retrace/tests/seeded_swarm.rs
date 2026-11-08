@@ -23,7 +23,7 @@ fn swarm_over(bin: &str, tag: &str, guest: &str, expected_stdout: &[u8]) {
 
         // Record (subprocess = its own VM).
         let rec = Command::new(bin)
-            .args(["record", guest, "-o", trace.to_str().unwrap()])
+            .args(["record", "-o", trace.to_str().unwrap(), guest])
             .output().unwrap();
         assert!(rec.status.success(), "seed {seed}: record failed: {}", String::from_utf8_lossy(&rec.stderr));
 

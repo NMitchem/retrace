@@ -24,8 +24,8 @@ fn cli(args: &[&str]) -> util::Bounded { util::run_bounded(util::bin(), args, &[
 /// `record-dyn guest -- args`, bounded; the trace path comes back too.
 fn rec(guest: &str, args: &[&str]) -> (util::Bounded, PathBuf) {
     let t = scratch("t.bin");
-    let mut argv = vec!["record-dyn", guest, "-o", t.to_str().unwrap()];
-    if !args.is_empty() { argv.push("--"); argv.extend_from_slice(args); }
+    let mut argv = vec!["record", "-o", t.to_str().unwrap(), guest];
+    if !args.is_empty() { argv.extend_from_slice(args); }
     (cli(&argv), t)
 }
 

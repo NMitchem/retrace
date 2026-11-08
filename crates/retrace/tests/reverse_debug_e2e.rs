@@ -27,7 +27,7 @@ use std::process::Command;
 fn reverse_debug_transcript_is_deterministic() {
     // Fresh recording of the dynamically-linked hello, through real /usr/lib/dyld.
     let (rec, trace) = util::record_dynamic(retrace_guest::HELLO_DYN);
-    assert_eq!(rec.code, 0, "record-dyn failed: {}", rec.stderr);
+    assert_eq!(rec.code, 0, "record failed: {}", rec.stderr);
 
     // --- In-process landmark discovery. Sequential VMs only: each session is dropped before the
     //     next one opens (one VM per process), and ALL of it precedes the CLI spawns. ---

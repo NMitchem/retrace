@@ -48,12 +48,12 @@ fn assert_bad_input(r: &util::Bounded, what: &str, says: &[&str]) {
     assert_eq!(r.code, Some(2), "{what}: bad input exits 2. stderr:\n{}", r.stderr);
 }
 
-/// A script handed to record-dyn is refused by name; before M50 it failed `parse_macho`'s assert.
+/// A script handed to record is refused by name; before M50 it failed `parse_macho`'s assert.
 #[test]
 fn a_shell_script_is_refused_as_not_a_mach_o() {
     let script = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/cf_script.sh");
     let t = scratch("script.bin");
-    let r = cli(&["record-dyn", script, "-o", t.to_str().unwrap()]);
+    let r = cli(&["record", "-o", t.to_str().unwrap(), script]);
     assert_bad_input(&r, "script", &[script, "is a script, not a Mach-O executable"]);
     assert!(!t.exists(), "nothing is recorded for bad input");
 }
@@ -64,7 +64,7 @@ fn an_empty_file_is_refused_as_not_a_mach_o() {
     let empty = scratch("empty");
     std::fs::write(&empty, b"").unwrap();
     let t = scratch("empty.bin");
-    let r = cli(&["record-dyn", empty.to_str().unwrap(), "-o", t.to_str().unwrap()]);
+    let r = cli(&["record", "-o", t.to_str().unwrap(), empty.to_str().unwrap()]);
     assert_bad_input(&r, "empty", &["is empty or too short to be a Mach-O executable"]);
     let _ = std::fs::remove_file(&empty);
 }
@@ -81,7 +81,7 @@ fn a_thin_x86_64_binary_is_refused_by_name() {
         return;
     }
     let t = scratch("x86_64.bin");
-    let r = cli(&["record-dyn", exe.to_str().unwrap(), "-o", t.to_str().unwrap(), "--", "chroot"]);
+    let r = cli(&["record", "-o", t.to_str().unwrap(), exe.to_str().unwrap(), "chroot"]);
     assert_bad_input(&r, "x86_64", &["is an x86_64 program, and retrace runs arm64 programs only"]);
     let _ = std::fs::remove_file(&exe);
 }
@@ -90,11 +90,23 @@ fn a_thin_x86_64_binary_is_refused_by_name() {
 /// alone indexed past its arguments and panicked with exit 101.
 #[test]
 fn missing_arguments_are_a_usage_error_not_a_panic() {
-    let cases: [&[&str]; 7] = [&["record-dyn"], &["record-dyn", retrace_guest::CF_WALLS],
-        &["record-dyn", retrace_guest::CF_WALLS, "-o"], &["record"], &["replay"], &["frobnicate"], &[]];
+    let cases: [&[&str]; 5] = [&["record"], &["record", "-o"], &["record", "-o", "t.bin"],
+        &["replay"], &["frobnicate"]];
     for args in cases {
         assert_bad_input(&cli(args), &format!("{args:?}"), &["usage: retrace"]);
     }
+    // `retrace` alone prints the whole help (final review minor 3), which is no `retrace:` line, and exits 2.
+    let bare = cli(&[]);
+    assert_eq!(bare.code, Some(2), "{}", bare.stderr);
+    assert!(bare.stderr.starts_with("usage: retrace <command>"), "{}", bare.stderr);
+    assert!(!bare.stderr.contains("internal error"), "{}", bare.stderr);
+}
+
+/// M56 section 3b: `record-dyn` is gone, refused by name as bad input.
+#[test]
+fn record_dyn_is_refused_by_name() {
+    let r = cli(&["record-dyn", retrace_guest::HELLO_DYN, "-o", "x.bin"]);
+    assert_bad_input(&r, "record-dyn", &["record-dyn is now record: retrace record [-o <trace>] <program> [<args>...]"]);
 }
 
 /// Without the hypervisor entitlement `hv_vm_create` is denied. That is one line naming the
@@ -110,7 +122,7 @@ fn a_retrace_without_the_hypervisor_entitlement_says_how_to_sign_it() {
     assert!(signed.status.success(), "codesign: {}", String::from_utf8_lossy(&signed.stderr));
     let t = scratch("unentitled.bin");
     let r = util::run_bounded(copy.to_str().unwrap(),
-        &["record-dyn", retrace_guest::CF_WALLS, "-o", t.to_str().unwrap(), "--", "chroot"], &[], BOUND);
+        &["record", "-o", t.to_str().unwrap(), retrace_guest::CF_WALLS, "chroot"], &[], BOUND);
     assert_bad_input(&r, "unentitled", &["cannot create a VM", "com.apple.security.hypervisor", "codesign"]);
     assert!(!t.exists(), "the check comes before the trace is created");
     let _ = std::fs::remove_file(&copy);
@@ -123,7 +135,7 @@ fn a_retrace_without_the_hypervisor_entitlement_says_how_to_sign_it() {
 fn a_retrace_bug_prints_the_banner_and_exits_70() {
     let t = scratch("bug.bin");
     let r = util::run_bounded(util::bin(),
-        &["record-dyn", retrace_guest::CF_WALLS, "-o", t.to_str().unwrap(), "--", "chroot"],
+        &["record", "-o", t.to_str().unwrap(), retrace_guest::CF_WALLS, "chroot"],
         &[("RETRACE_DEBUG_PANIC", "1")], BOUND);
     assert_no_panic(&r, "banner");
     let lines: Vec<&str> = r.stderr.lines().collect();
@@ -143,7 +155,7 @@ fn a_retrace_bug_prints_the_banner_and_exits_70() {
 #[test]
 fn an_unreadable_guest_path_is_one_clean_line() {
     let t = scratch("missing.bin");
-    let r = cli(&["record-dyn", "/no/such/program", "-o", t.to_str().unwrap()]);
+    let r = cli(&["record", "-o", t.to_str().unwrap(), "/no/such/program"]);
     assert_bad_input(&r, "missing guest", &["cannot read /no/such/program"]);
 }
 
@@ -159,8 +171,8 @@ fn assert_guest_wall(guest: &str, args: &[&str], stdout: &str, what: &str, ancho
 fn assert_guest_wall_both(guest: &str, args: &[&str], stdout: &str, what: &str, anchor: &str) -> (String, String) {
     let t = scratch("wall.bin");
     let tp = t.to_str().unwrap();
-    let mut argv = vec!["record-dyn", guest, "-o", tp];
-    if !args.is_empty() { argv.push("--"); argv.extend_from_slice(args); }
+    let mut argv = vec!["record", "-o", tp, guest];
+    if !args.is_empty() { argv.extend_from_slice(args); }
     let rec = cli(&argv);
     assert_no_panic(&rec, what);
     assert_eq!(String::from_utf8_lossy(&rec.stdout), stdout, "{what}: the output before the wall is printed first");
@@ -197,7 +209,7 @@ fn cut_before_end(full: &Path, cut: &Path) {
 /// `hello_dyn` recorded whole, then cut before its exit: a recording whose recorder was killed.
 fn killed_recording() -> PathBuf {
     let full = scratch("hello.bin");
-    let rec = cli(&["record-dyn", retrace_guest::HELLO_DYN, "-o", full.to_str().unwrap()]);
+    let rec = cli(&["record", "-o", full.to_str().unwrap(), retrace_guest::HELLO_DYN]);
     assert_eq!((rec.code, rec.stdout.as_slice()), (Some(0), &b"hi\n"[..]), "{}", rec.stderr);
     let cut = scratch("hello-cut.bin");
     cut_before_end(&full, &cut);
@@ -208,7 +220,7 @@ fn killed_recording() -> PathBuf {
 /// Review Focus 5: a newcomer's typo in `-o` was a recorder error before M50; it is bad input.
 #[test]
 fn an_unwritable_trace_path_is_one_clean_line() {
-    let r = cli(&["record-dyn", retrace_guest::CF_WALLS, "-o", "/no/such/dir/t.bin", "--", "chroot"]);
+    let r = cli(&["record", "-o", "/no/such/dir/t.bin", retrace_guest::CF_WALLS, "chroot"]);
     assert_bad_input(&r, "unwritable", &["cannot write the trace /no/such/dir/t.bin"]);
 }
 
@@ -391,7 +403,7 @@ fn a_wall_prints_no_backtrace_even_with_rust_backtrace_set() {
     let t = scratch("bt.bin");
     let tp = t.to_str().unwrap();
     let env = [("RUST_BACKTRACE", "1")];
-    let rec = util::run_bounded(util::bin(), &["record-dyn", retrace_guest::CF_WALLS, "-o", tp, "--", "unblock"], &env, BOUND);
+    let rec = util::run_bounded(util::bin(), &["record", "-o", tp, retrace_guest::CF_WALLS, "unblock"], &env, BOUND);
     let rp = util::run_bounded(util::bin(), &["replay", tp], &env, BOUND);
     for (r, side) in [(&rec, "record"), (&rp, "replay")] {
         assert_no_panic(r, side);

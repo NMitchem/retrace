@@ -275,6 +275,16 @@ fn main() {
         .status().expect("clang crashy");
     assert!(status.success(), "crashy guest build failed");
 
+    // apple_dyn: M56 fixture printing argv[0] and the `executable_path=` apple string, so a relative
+    // path is checked reaching the guest as typed. Same recipe as crashy.
+    let src = format!("{}/c/apple_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/apple_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang apple_dyn");
+    assert!(status.success(), "apple_dyn guest build failed");
+
     // crashthread: the M18 fast-follow fixture — threaded AND fatal, the intersection no guest in
     // the tree covered. Same recipe as crashy (real toolchain, links libSystem, plain -arch arm64,
     // no -O so the volatile faulting store survives); pthreads live in libSystem, so no -lpthread.

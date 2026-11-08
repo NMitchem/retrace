@@ -14,7 +14,7 @@ fn scratch(name: &str) -> PathBuf {
 }
 
 fn record(mode: &str, t: &str, env: &[(&str, &str)]) -> util::Bounded {
-    util::run_bounded(util::bin(), &["record-dyn", retrace_guest::FID_OUTPUT, "-o", t, "--", mode], env, BOUND)
+    util::run_bounded(util::bin(), &["record", "-o", t, retrace_guest::FID_OUTPUT, mode], env, BOUND)
 }
 
 fn replay(t: &str, env: &[(&str, &str)]) -> util::Bounded {
@@ -67,7 +67,7 @@ fn stdout_and_stderr_into_one_file_interleave_as_natively() {
     assert_eq!(native, (Some(0), "out1\nerr1\nout2\nerr2\n".to_owned()), "native");
     let t = scratch("both.bin");
     let tp = t.to_str().unwrap();
-    assert_eq!(run(util::bin(), &["record-dyn", retrace_guest::FID_OUTPUT, "-o", tp, "--", "split"]), native, "record");
+    assert_eq!(run(util::bin(), &["record", "-o", tp, retrace_guest::FID_OUTPUT, "split"]), native, "record");
     assert_eq!(run(util::bin(), &["replay", tp]), native, "replay");
     let _ = std::fs::remove_file(&t);
     let _ = std::fs::remove_file(&both);
@@ -80,7 +80,7 @@ fn output_is_printed_as_the_program_writes_it() {
     let t = scratch("stall.bin");
     let out = scratch("stall.out");
     let mut child = Command::new(util::bin())
-        .args(["record-dyn", retrace_guest::FID_OUTPUT, "-o", t.to_str().unwrap(), "--", "stall"])
+        .args(["record", "-o", t.to_str().unwrap(), retrace_guest::FID_OUTPUT, "stall"])
         .env_clear().stdin(Stdio::null())
         .stdout(std::fs::File::create(&out).unwrap()).stderr(Stdio::null())
         .spawn().unwrap();
@@ -106,7 +106,7 @@ fn a_reader_that_goes_away_does_not_stop_the_recording() {
     let tp = t.to_str().unwrap();
     let err = scratch("many.err");
     let mut child = Command::new(util::bin())
-        .args(["record-dyn", retrace_guest::FID_OUTPUT, "-o", tp, "--", "many"])
+        .args(["record", "-o", tp, retrace_guest::FID_OUTPUT, "many"])
         .env_clear().stdin(Stdio::null()).stdout(Stdio::piped())
         .stderr(std::fs::File::create(&err).unwrap()).spawn().unwrap();
     let mut first = String::new();
@@ -135,13 +135,13 @@ fn a_refusal_line_to_a_closed_stderr_does_not_become_a_bug() {
     // Control: with stderr open, the refusal's line is there, so the closed-stderr run below is a run
     // that had a line to lose.
     let t = scratch("refused-open.bin");
-    let open = util::run_bounded(util::bin(), &["record-dyn", retrace_guest::FORKFAIL_DYN, "-o", t.to_str().unwrap()], &[], BOUND);
+    let open = util::run_bounded(util::bin(), &["record", "-o", t.to_str().unwrap(), retrace_guest::FORKFAIL_DYN], &[], BOUND);
     assert_eq!(open.code, Some(0), "{}", open.stderr);
     assert!(open.stderr.lines().any(|l| l.starts_with("retrace: refused: fork") && l.ends_with("returned EAGAIN to the program")),
         "control: the refusal line is printed when stderr is open:\n{}", open.stderr);
     let t = scratch("refused.bin");
     let mut child = Command::new(util::bin())
-        .args(["record-dyn", retrace_guest::FORKFAIL_DYN, "-o", t.to_str().unwrap()])
+        .args(["record", "-o", t.to_str().unwrap(), retrace_guest::FORKFAIL_DYN])
         .env_clear().stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
     // The reader goes away before dyld has finished starting the program, so the refusal's line has nowhere to go.
     drop(child.stderr.take());
@@ -157,7 +157,7 @@ fn a_divergence_line_to_a_closed_stderr_does_not_become_a_bug() {
     use retrace_trace::{Event, Reader, Writer};
     let t = scratch("diverge.bin");
     let tp = t.to_str().unwrap();
-    let rec = util::run_bounded(util::bin(), &["record-dyn", retrace_guest::FID_BADPTR, "-o", tp, "--", "readunmapped"], &[], BOUND);
+    let rec = util::run_bounded(util::bin(), &["record", "-o", tp, retrace_guest::FID_BADPTR, "readunmapped"], &[], BOUND);
     assert_eq!(rec.code, Some(0), "{}", rec.stderr);
     let mut events = Reader::open(&t).unwrap();
     let i = events.iter().rposition(|e| matches!(e, Event::Syscall { num: 3, err: true, .. })).expect("the refused read");
@@ -267,4 +267,21 @@ fn a_crash_inside_a_system_library_says_so() {
             && lines[0].ends_with(" in a system library)"), "{what}: {}", lines[0]);
     }
     let _ = std::fs::remove_file(&t);
+}
+
+/// Final review minor 1: `--help` and `--version` into a reader that has gone away end quietly with exit 0,
+/// not at the bug banner (`println!` panics on EPIPE).
+#[test]
+fn help_and_version_to_a_closed_stdout_do_not_become_a_bug() {
+    for arg in ["--help", "--version"] {
+        for _ in 0..5 {
+            let mut child = Command::new(util::bin()).arg(arg)
+                .env_clear().stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+            drop(child.stdout.take());
+            let mut err = String::new();
+            std::io::Read::read_to_string(child.stderr.as_mut().unwrap(), &mut err).unwrap();
+            assert_eq!(wait_bounded(&mut child, BOUND), Some(0), "{arg}: stderr:\n{err}");
+            assert!(!err.contains("internal error"), "{arg}: {err}");
+        }
+    }
 }

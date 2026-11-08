@@ -45,7 +45,7 @@ fn session(trace: &Path, cmds: &[String]) -> (Option<i32>, String, String) { ses
 
 /// `session`, with `server_args` passed to `retrace gdbserver` after the trace (M44 B5: `--exe`).
 fn session_with(trace: &Path, server_args: &[&str], cmds: &[String]) -> (Option<i32>, String, String) {
-    let (srv, port, srv_err) = util::rsp::spawn_server(trace, server_args);
+    let (srv, port, srv_err) = util::rsp::spawn_server(trace, server_args, None);
     let srv = util::rsp::KillOnDrop(srv);
     let base = std::env::temp_dir().join(format!("retrace-lldb-{}-{port}", std::process::id()));
     let (cmd_p, out_p, err_p) = (base.with_extension("cmds"), base.with_extension("out"), base.with_extension("err"));
@@ -640,8 +640,8 @@ fn exec_trace() -> (PathBuf, PathBuf) {
     let target = dir.join("exec_tgt");
     std::fs::copy(retrace_guest::EXEC_TARGET_DYN, &target).unwrap();
     let trace = dir.join("t.bin");
-    let r = util::run_bounded(util::bin(), &["record-dyn", retrace_guest::EXECSELF_DYN, "-o", trace.to_str().unwrap(),
-                                             "--", "copy", target.to_str().unwrap()], &[], 300);
+    let r = util::run_bounded(util::bin(), &["record", "-o", trace.to_str().unwrap(), retrace_guest::EXECSELF_DYN,
+                                             "copy", target.to_str().unwrap()], &[], 300);
     assert_eq!(r.code, Some(0), "record the exec: {}", r.stderr);
     (trace, target)
 }

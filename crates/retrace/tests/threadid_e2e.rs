@@ -70,7 +70,7 @@ fn a_thread_lookup_by_id_through_proc_pidinfo_is_refused_by_value() {
     assert!(String::from_utf8_lossy(&native.stdout).starts_with("pidinfo="), "native answers");
     let t = std::env::temp_dir().join(format!("retrace-m52-pidinfo-{}.bin", std::process::id()));
     let tp = t.to_str().unwrap();
-    let rec = util::run_bounded(util::bin(), &["record-dyn", retrace_guest::TID_DYN, "-o", tp, "--", "pidinfo"], &[], 60);
+    let rec = util::run_bounded(util::bin(), &["record", "-o", tp, retrace_guest::TID_DYN, "pidinfo"], &[], 60);
     let lines: Vec<&str> = rec.stderr.lines().filter(|l| l.starts_with("retrace:")).collect();
     assert_eq!(lines.len(), 1, "exactly one retrace: line. stderr:\n{}", rec.stderr);
     assert!(lines[0].starts_with("retrace: unsupported: proc_info") && lines[0].contains("PROC_PIDTHREADID64INFO"), "{}", lines[0]);

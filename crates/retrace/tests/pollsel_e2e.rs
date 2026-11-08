@@ -27,7 +27,7 @@ fn trace_path() -> PathBuf {
 fn record(mode: &str) -> (util::Bounded, PathBuf) {
     let trace = trace_path();
     let rec = util::run_bounded(util::bin(),
-        &["record-dyn", retrace_guest::POLLSEL_DYN, "-o", trace.to_str().unwrap(), "--", mode], &[], BOUND);
+        &["record", "-o", trace.to_str().unwrap(), retrace_guest::POLLSEL_DYN, mode], &[], BOUND);
     (rec, trace)
 }
 

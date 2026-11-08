@@ -41,12 +41,12 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
   cargo test -p retrace --bins -- --test-threads=1          # don't omit — see below
   ```
   **Do not omit the `--bins` chunk.** `--test <name>` selects integration-test targets only, so the
-  35 unit tests inside the `retrace` binary itself (20 in `crates/retrace/src/debug.rs`, 14 in
-  `crates/retrace/src/rsp.rs`, 1 in `crates/retrace/src/main.rs`) run in **none** of
+  47 unit tests inside the `retrace` binary itself (20 in `crates/retrace/src/debug.rs`, 14 in
+  `crates/retrace/src/rsp.rs`, 7 in `crates/retrace/src/main.rs`, 6 in `crates/retrace/src/gdbserver.rs`) run in **none** of
   the other chunks; only the unchunked `--workspace` run, or a whole-package `cargo test -p retrace`
   with no `--test` filter, reaches them — which is why closes before M17 are not owed a
   correction. Leaving it out silently costs
-  35 tests and one binary — and nothing fails to warn you. Contrast `cargo test -p retrace --lib`,
+  47 tests and one binary — and nothing fails to warn you. Contrast `cargo test -p retrace --lib`,
   which is invalid for this crate (there is no lib target) and fails the whole invocation
   **loudly**: the trap is that the wrong flag is loud and the missing one is silent.
 
@@ -117,7 +117,12 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
   determinism check, and the blocked-step and cross-thread `rsi` rows; M44 added `ni`, `next`,
   `thread step-out` and `finish` over a call, an arm64e `bt`, and bounded sessions for M44's
   stepping changes, each asserting lldb does not loop; it skips loudly without lldb, and its CPython
-  test without Homebrew Python), `apple_walls_e2e` (Apple binaries by path: M44's
+  test without Homebrew Python), `cli_e2e` (M56: one `record` for a static or dynamic program by a relative
+  path, the default name, options after the program, the `record-dyn` refusal, `--version`/`--help`),
+  `lldbcmd_e2e` (M56: `retrace lldb` reverse-debugs a relative-path recording in one command, the server gone
+  after lldb exits, a SIGINT leaving retrace to reap the server, the trace directory as a symbol candidate, a
+  rebuilt program without symbols and its UUID line, an incomplete recording ending at the server's line with
+  no lldb, an unusable lldb and a missing trace as bad input; skips loudly without lldb), `apple_walls_e2e` (Apple binaries by path: M44's
   `ls_records_and_replays` and `ed_records_and_replays` run beside `launchctl`'s; the other seven
   are parked at their measured walls), `skiplines` (M44: the skip-line detector and its control), `evidence_secrets` (the M53 scrub: no file under `docs/` holds a credential, a credential-named variable's value or a known token prefix, each reported by name and never by value; and its control), `kqinit_e2e` (M45: libdispatch's
   workqueue-kqueue init, `kevent_qos` with `KEVENT_FLAG_WORKQ`, issued by hand from `kqinit_dyn.c`
@@ -174,10 +179,10 @@ with exit 70, and `RUST_BACKTRACE=1` printing no frames for a wall), `output_e2e
 - Some gates are `#[ignore]`d, parked at a documented wall — see "Honest-gate discipline" below for
   the rule. Which ones and why is on the tests themselves (the `#[ignore]` reason is the primary
   record) and summarised under "Known limits" in `docs/current-state.md`.
-- CLI: `cargo run -p retrace -- record <macho> -o t.bin`, `... record-dyn <exe> -o t.bin` (runs the
-  exe through real `/usr/lib/dyld`; append `-- <guest args…>` to pass the guest an argv),
-  `... replay t.bin`.
-- `RETRACE_TRACE=1` on a `record`/`record-dyn` run logs every dispatched trap (and decodes
+- CLI: `cargo run -p retrace -- record [-o t.bin] <program> [<args>...]` (static or dynamic is read from
+  the file; options go before the program; the trace defaults to `<basename>.retrace`),
+  `... replay t.bin`, `... lldb t.bin` (serves the recording and runs lldb on it).
+- `RETRACE_TRACE=1` on a `record` run logs every dispatched trap (and decodes
   `mach_msg2` sends) — the first tool to reach for on a bring-up failure. **Record-only:** `ReplaySession`
   carries no trace instrumentation, so no `[trap]`/`[mach_msg2]`/`[fault]` line is ever printed on replay.
 - `RETRACE_VERBOSE=1` prints retrace's own diagnostic lines (fall-through counts, warnings), off by default since M51; `RETRACE_TRACE=1` implies it. Since M51 `util::run`, `run_env` and `run_bounded` start the child with an empty environment plus the test's own pairs, so a test that needs a variable passes it.

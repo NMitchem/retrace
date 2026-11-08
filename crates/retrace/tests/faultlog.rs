@@ -6,7 +6,7 @@ mod util;
 fn trace_log_shows_the_terminal_fault() {
     let trace = std::env::temp_dir().join(format!("retrace-faultlog-{}.bin", std::process::id()));
     let out = std::process::Command::new(util::bin())
-        .args(["record", retrace_guest::CRASH, "-o", trace.to_str().unwrap()])
+        .args(["record", "-o", trace.to_str().unwrap(), retrace_guest::CRASH])
         .env("RETRACE_TRACE", "1")
         .output().unwrap();
     assert_eq!(out.status.code(), Some(139), "crash guest must record a crash");

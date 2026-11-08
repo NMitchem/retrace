@@ -25,9 +25,8 @@ fn record(guest: &str, mode: &[&str]) -> (Option<i32>, String, String, PathBuf) 
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
     let trace = std::env::temp_dir().join(format!("retrace-mutex-{}-{n}.bin", std::process::id()));
-    let mut args = vec!["record-dyn", guest, "-o", trace.to_str().unwrap()];
+    let mut args = vec!["record", "-o", trace.to_str().unwrap(), guest];
     if !mode.is_empty() {
-        args.push("--");
         args.extend_from_slice(mode);
     }
     let r = util::run_bounded(util::bin(), &args, &[], BOUND);

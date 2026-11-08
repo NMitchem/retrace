@@ -151,7 +151,7 @@ fn a_pipe_readv_with_a_later_unreachable_entry_ends_the_recording_at_one_clean_l
     let t = std::env::temp_dir().join(format!("retrace-iovec-{}-badpipe.bin", std::process::id()));
     let tp = t.to_str().unwrap();
     let rec = util::run_bounded(util::bin(),
-        &["record-dyn", retrace_guest::IOVEC_DYN, "-o", tp, "--", "badpipe"], &[], BOUND);
+        &["record", "-o", tp, retrace_guest::IOVEC_DYN, "badpipe"], &[], BOUND);
     assert!(!rec.stderr.contains("panicked at"), "{}", rec.stderr);
     let lines: Vec<&str> = rec.stderr.lines().filter(|l| l.starts_with("retrace:")).collect();
     assert_eq!(lines.len(), 1, "exactly one retrace: line. stderr:\n{}", rec.stderr);
