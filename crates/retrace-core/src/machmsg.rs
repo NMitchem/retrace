@@ -69,7 +69,7 @@ impl Msg2 {
 /// RefuseMqRecv is a message-queue RECEIVE; the box hosts no senders, so nothing can ever arrive
 /// on it, and it is answered `MACH_RCV_REFUSAL` — deterministic, no host contact (M38 t5).
 #[derive(Debug)]
-pub enum Route { ServiceVmMap, ServiceVmRemap, ServiceVmCopy, ServiceGetSpecialPort, ServiceSetSpecialPort, ServicePortsRegister,
+pub enum Route { ServiceVmMap, ServiceVmRemap, ServiceVmCopy, ServiceVmRealloc, ServiceGetSpecialPort, ServiceSetSpecialPort, ServicePortsRegister,
                  ServiceClockGetTime,
                  StubMigReply(i32), RefuseMqSend, RefuseMqRecv, Forward(&'static str), Unsupported(String) }
 
@@ -150,6 +150,8 @@ pub fn route(m: &Msg2, guest_task_port: Option<u64>) -> Route {
             4811 => return Route::ServiceVmMap,
             // mach_vm_copy (4807): a box-side copy, never forwarded (M52 §3b, t0 M3).
             4807 => return Route::ServiceVmCopy,
+            // mach_vm_reallocate (4829), new on macOS 27: a box-side service (M57 t7).
+            4829 => return Route::ServiceVmRealloc,
             // mach_vm_remap (4813): libffi's Apple trampoline table aliases the freshly-loaded
             // libffi-trampolines.dylib __TEXT into a vm_allocate'd region, shared, on every
             // `import ctypes` (M39 t0). Serviced as a stage-1 alias (Box_::guest_vm_remap) —
@@ -284,6 +286,30 @@ pub fn decode_vm_copy(buf: &[u8]) -> Result<(u64, u64, u64), String> {
     let id = u32_at(buf, 20);
     if id != 4807 { return Err(format!("msgh_id {id} != 4807")); }
     Ok((u64_at(buf, 32), u64_at(buf, 40), u64_at(buf, 48)))
+}
+
+/// mach_vm_reallocate (4829) request, not complex, 80 bytes: header(24) + NDR(8), then src @32,
+/// src_size @40, dst @48, dst_size @56, align_mask @64 (u64 each), options @72, flags @76 (i32).
+pub struct VmReallocReq { pub src: u64, pub src_size: u64, pub dst: u64, pub dst_size: u64, pub mask: u64, pub options: u32, pub flags: u32 }
+
+pub fn decode_vm_realloc(buf: &[u8]) -> Result<VmReallocReq, String> {
+    if buf.len() < 80 { return Err(retrace_arch::wall(retrace_arch::WallCategory::MachMessages, format!("vm_reallocate request short: {} < 80", buf.len()))); }
+    let id = u32_at(buf, 20);
+    if id != 4829 { return Err(format!("msgh_id {id} != 4829")); }
+    Ok(VmReallocReq { src: u64_at(buf, 32), src_size: u64_at(buf, 40), dst: u64_at(buf, 48), dst_size: u64_at(buf, 56),
+        mask: u64_at(buf, 64), options: u32_at(buf, 72), flags: u32_at(buf, 76) })
+}
+
+/// KERN_SUCCESS reply for 4829 (msgh_id 4929): header(24) + NDR(8) + RetCode(4) + dst(8) + trailer(8) = 52,
+/// the 4811 shape. An error is `encode_mig_error` as for every other box-side service.
+pub fn encode_vm_realloc_reply(reply_port: u32, dst: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(52);
+    reply_header(&mut out, 44, reply_port, 4929);
+    out.extend_from_slice(&NDR);
+    out.extend_from_slice(&0i32.to_le_bytes());
+    out.extend_from_slice(&dst.to_le_bytes());
+    out.extend_from_slice(&TRAILER);
+    out
 }
 
 /// _kernelrpc_mach_vm_remap (4813) request body: header(24) + desc_count(4) + port
@@ -597,6 +623,37 @@ mod tests {
     // Live-captured _kernelrpc_mach_vm_map (4811) mach_msg2 register file (libmalloc nano wall).
     const VM_MAP_ARGS: [u64; 8] = [0x1fb638, 0x2_0000_0003, 0x64_8000_1513,
                                    0x1603_0000_0203, 0x12cb_0000_0000, 0x1603_0000_0001, 0x34, 0];
+    #[test]
+    fn decode_vm_realloc_reads_the_request_and_refuses_a_short_send() {
+        let mut buf = vec![0u8; 80];
+        buf[20..24].copy_from_slice(&4829u32.to_le_bytes());
+        for (i, v) in [0x1000u64, 0x2000, 0x3000, 0x4000, 0x3f_ffff].iter().enumerate() { buf[32 + 8 * i..40 + 8 * i].copy_from_slice(&v.to_le_bytes()); }
+        buf[72..76].copy_from_slice(&1u32.to_le_bytes());
+        buf[76..80].copy_from_slice(&0x0300_0001u32.to_le_bytes());
+        let r = decode_vm_realloc(&buf).unwrap();
+        assert_eq!((r.src, r.src_size, r.dst, r.dst_size, r.mask, r.options, r.flags), (0x1000, 0x2000, 0x3000, 0x4000, 0x3f_ffff, 1, 0x0300_0001));
+        assert!(decode_vm_realloc(&buf[..79]).is_err());
+        buf[20..24].copy_from_slice(&4830u32.to_le_bytes());
+        assert!(decode_vm_realloc(&buf).is_err());
+    }
+
+    #[test]
+    fn vm_realloc_reply_bytes_and_error_shape() {
+        let ok = encode_vm_realloc_reply(0x77, 0xdead_0000);
+        assert_eq!(ok.len(), 52);
+        assert_eq!(u32_at(&ok, 4), 44);
+        assert_eq!(u32_at(&ok, 20), 4929);
+        assert_eq!(u32_at(&ok, 32), 0);
+        assert_eq!(u64_at(&ok, 36), 0xdead_0000);
+        let e = encode_mig_error(4829, 0x77, 4);
+        assert_eq!((e.len(), u32_at(&e, 20), u32_at(&e, 32)), (44, 4929, 4));
+    }
+
+    #[test]
+    fn route_sends_4829_to_the_box() {
+        assert!(matches!(route(&msg(4829, 0x203, KOBJ), Some(0x203)), Route::ServiceVmRealloc));
+    }
+
     #[test]
     fn decode_vm_copy_reads_the_measured_request() {
         let mut buf = vec![0u8; 56];

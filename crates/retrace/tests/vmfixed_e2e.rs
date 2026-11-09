@@ -80,16 +80,45 @@ fn mach_vm_copy_copies_the_bytes_and_answers_natives_codes_without_recording_the
 }
 
 #[test]
+fn mach_vm_reallocate_follows_native_and_records_only_its_reply() {
+    for case in ["inplace", "blocked", "shrink", "unaligned", "unmapped", "fixed", "zero_dst"] {
+        let (out, r) = as_native_run(retrace_guest::VMREALLOC_DYN, &[case]);
+        assert!(out.starts_with(&format!("{case} kr=")), "{case}: {out}");
+        match case {
+            "shrink" | "unaligned" => assert!(out.contains("kr=4 "), "{out}"),
+            "unmapped" => assert!(out.contains("kr=1 "), "{out}"),
+            "inplace" => assert!(out.contains("kr=0 moved=0 head=") && out.contains("tail=0 srcgone=0"), "{out}"),
+            "blocked" | "fixed" => assert!(out.contains("kr=0 moved=1 ") && out.contains("tail=0 srcgone=1"), "{out}"),
+            _ => assert!(out.contains("kr=0 "), "{out}"),
+        }
+        if case != "inplace" { continue; }
+        // Recomputed, never recorded: a 4829 landmark's only write is the 52-byte reply (msgh_id 4929).
+        let mut replies = 0;
+        for e in Reader::open(&r.trace).unwrap().iter() {
+            let Event::Syscall { writes, .. } = e else { continue };
+            let Some(w) = writes.iter().find(|w| w.bytes.len() == 52
+                && u32::from_le_bytes(w.bytes[20..24].try_into().unwrap()) == 4929) else { continue };
+            replies += 1;
+            assert_eq!(writes.len(), 1, "a 4829 landmark records the reply only, got {} regions", writes.len());
+            assert_eq!(w.bytes.len(), 52);
+        }
+        assert!(replies >= 1, "the inplace recording holds a 4829 landmark");
+    }
+}
+
+#[test]
 fn a_fixed_request_into_retraces_own_windows_answers_as_native_does() {
     // No window is a wall under M52 §3b (ruling T0-M2): a start below 4 GiB is KERN_INVALID_ADDRESS, the
     // shared region and the commpages are KERN_NO_SPACE, so the plan's "a window ruled a wall ends the
-    // recording" clause has no row. 0x300000000 is free natively and in the box (the nano band starts
-    // at 0x400000000).
+    // recording" clause has no row. 0x300000000 follows native (M57 t7a): 26 answered 0 (the nano band
+    // starts at 0x400000000), 27.2 answers 3 (M0-4: FIXED is refused over [0x1_8000_0000, 0x70_0000_0000)).
+    // as_native compares retrace with native, which on 26 is 0.
     let out = as_native(retrace_guest::VMFIXED_DYN, &["windows"]);
     for (addr, kr) in [("0x4000", 1), ("0x8000", 1), ("0x40000", 1), ("0x800000", 1), ("0x180000000", 3),
-                       ("0x2ffffc000", 3), ("0xfffffc000", 3), ("0x300000000", 0)] {
+                       ("0x2ffffc000", 3), ("0xfffffc000", 3)] {
         assert!(out.contains(&format!("window {addr} kr={kr}\n")), "{addr}:\n{out}");
     }
+    assert!(out.contains("window 0x300000000 kr=0\n") || out.contains("window 0x300000000 kr=3\n"), "{out}");
 }
 
 #[test]

@@ -27,6 +27,8 @@ crates/retrace-core/src/lib.rs	record_box	read_guest	covered: mach2_unreachable 
 crates/retrace-core/src/lib.rs	record_box	apply_and_return	covered: mach2_unreachable vm_remap 4813 reply, in the buffer the request was read from
 crates/retrace-core/src/lib.rs	record_box	read_guest	covered: mach2_unreachable vm_copy 4807 request
 crates/retrace-core/src/lib.rs	record_box	apply_and_return	covered: mach2_unreachable vm_copy 4807 reply, in the buffer the request was read from
+crates/retrace-core/src/lib.rs	record_box	read_guest	covered: mach2_unreachable vm_reallocate 4829 request
+crates/retrace-core/src/lib.rs	record_box	apply_and_return	covered: mach2_unreachable vm_reallocate 4829 reply, in the buffer the request was read from
 crates/retrace-core/src/lib.rs	record_box	read_guest	covered: mach2_unreachable task_get_special_port 3409 request
 crates/retrace-core/src/lib.rs	record_box	apply_and_return	covered: mach2_unreachable task_get_special_port 3409 reply, in the buffer the request was read from
 crates/retrace-core/src/lib.rs	record_box	read_guest	covered: mach2_unreachable task_set_special_port 3410 request
@@ -47,6 +49,7 @@ crates/retrace-core/src/lib.rs	record_box	apply_and_return	covered: prepare_forw
 crates/retrace-core/src/lib.rs	record_box	apply_and_return	internal: fork refusal, no writes
 crates/retrace-core/src/lib.rs	record_box	apply_and_return	internal: madvise MADV_ZERO regions, which guest_madvise validated the range for before computing them
 crates/retrace-core/src/lib.rs	record_box	apply_and_return	internal: __mac_syscall out_ipa, computed and validated by guest_mac_syscall; a refusal records no write
+crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies a recorded Region list (or the empty list); the regions were checked or recomputed on record
 crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies the recorded sigprocmask refusal, which carries no writes
 crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies a recorded Region list (or the empty list); the regions were checked or recomputed on record
 crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies a recorded Region list (or the empty list); the regions were checked or recomputed on record
@@ -54,6 +57,7 @@ crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies
 crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies a recorded Region list (or the empty list); the regions were checked or recomputed on record
 crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies a recorded Region list (or the empty list); the regions were checked or recomputed on record
 crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies a recorded Region list (or the empty list); the regions were checked or recomputed on record
+crates/retrace-core/src/lib.rs	advance	read_guest	covered: mach2_unreachable vm_reallocate 4829 request (replay mirror)
 crates/retrace-core/src/lib.rs	advance	read_guest	covered: prepare_forward_pointers replay mirror of the sigaction new action read
 crates/retrace-core/src/lib.rs	advance	read_guest	covered: prepare_forward_pointers replay mirror of the sigaltstack new stack read
 crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies a recorded Region list (or the empty list); the regions were checked or recomputed on record

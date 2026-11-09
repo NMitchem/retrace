@@ -386,6 +386,8 @@ pub const IPA40_DYN: &str = concat!(env!("OUT_DIR"), "/ipa40_dyn");
 pub const TID_DYN: &str = concat!(env!("OUT_DIR"), "/tid_dyn");
 /// M52 §3b: an xzone huge chunk grown by realloc — modes `page` and `grow`.
 pub const HUGEREALLOC_DYN: &str = concat!(env!("OUT_DIR"), "/hugerealloc_dyn");
+/// M57 t7: `mach_vm_reallocate` by mode (`inplace`, `blocked`, `shrink`, `unaligned`, `unmapped`, `fixed`, `zero_dst`).
+pub const VMREALLOC_DYN: &str = concat!(env!("OUT_DIR"), "/vmrealloc_dyn");
 /// M52 §3b: `mach_vm_copy` by case (`disjoint`, `overlap_fwd`, `overlap_back`, `unmapped_src`, `none_dst`,
 /// `unaligned`, `zero`, `reserved`).
 pub const VMCOPY_DYN: &str = concat!(env!("OUT_DIR"), "/vmcopy_dyn");

@@ -343,6 +343,7 @@ fn mach2_unreachable(b: &mut Box_, m: &machmsg::Msg2, route: &machmsg::Route) ->
         ServiceVmMap => machmsg::encode_vm_map_reply(0, 0).len(),
         ServiceVmRemap => machmsg::encode_vm_remap_reply(0, 0, 0, 0).len(),
         ServiceVmCopy => machmsg::encode_mig_error(0, 0, 0).len(),
+        ServiceVmRealloc => machmsg::encode_vm_realloc_reply(0, 0).len(),
         ServiceGetSpecialPort => machmsg::encode_get_special_port_reply(0, 0).len(),
         ServiceSetSpecialPort | ServicePortsRegister | StubMigReply(_) => machmsg::encode_mig_error(0, 0, 0).len(),
         ServiceClockGetTime => machmsg::encode_clock_get_time_reply(0, 0, 0).len(),
@@ -915,6 +916,21 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                         w.append(&Event::Syscall { num, args, ret: machmsg::MACH_MSG_SUCCESS, ret1: 0,
                             err: false, writes: writes.clone(), thread })
                             .map_err(|e| format!("append mach_msg2 vm_copy: {e}"))?; count += 1;
+                        b.apply_and_return(machmsg::MACH_MSG_SUCCESS, false, &writes);
+                    }
+                    machmsg::Route::ServiceVmRealloc => {
+                        // M57 t7: mach_vm_reallocate is recomputed, never recorded or forwarded.
+                        let buf = b.read_guest(m.data, m.send_size as usize);
+                        let q = machmsg::decode_vm_realloc(&buf)
+                            .map_err(|e| wall_or_bug(retrace_arch::in_context("mach_vm_reallocate (4829) decode", e)))?;
+                        let bytes = match b.guest_vm_reallocate(q.src, q.src_size, q.dst, q.dst_size, q.mask, q.flags as u64) {
+                            Ok(d) => machmsg::encode_vm_realloc_reply(m.reply_port, d),
+                            Err(kr) => machmsg::encode_mig_error(m.msgh_id, m.reply_port, kr as i32),
+                        };
+                        let writes = vec![Region { ipa: m.data, bytes }];
+                        w.append(&Event::Syscall { num, args, ret: machmsg::MACH_MSG_SUCCESS, ret1: 0,
+                            err: false, writes: writes.clone(), thread })
+                            .map_err(|e| format!("append mach_msg2 vm_reallocate: {e}"))?; count += 1;
                         b.apply_and_return(machmsg::MACH_MSG_SUCCESS, false, &writes);
                     }
                     machmsg::Route::ServiceVmRemap => {
@@ -3157,6 +3173,22 @@ impl ReplaySession {
                                         if writes.len() != 1 || writes[0].bytes != reply {
                                             return Err(Divergence { landmark: self.idx, pc,
                                                 detail: format!("mach_vm_copy reply mismatch: replay kr {kr}") });
+                                        }
+                                        self.b.apply_and_return(*ret, *err, writes);
+                                    }
+                                    machmsg::Route::ServiceVmRealloc => {
+                                        // Mirror of record's arm: same decode, same Box_ call, reply byte-compared.
+                                        let buf = self.b.read_guest(m.data, m.send_size as usize);
+                                        let q = machmsg::decode_vm_realloc(&buf).map_err(|e| Divergence {
+                                            landmark: self.idx, pc, detail: format!("replay vm_reallocate decode: {e}") })?;
+                                        let r = self.b.guest_vm_reallocate(q.src, q.src_size, q.dst, q.dst_size, q.mask, q.flags as u64);
+                                        let reply = match r {
+                                            Ok(d) => machmsg::encode_vm_realloc_reply(m.reply_port, d),
+                                            Err(kr) => machmsg::encode_mig_error(m.msgh_id, m.reply_port, kr as i32),
+                                        };
+                                        if writes.len() != 1 || writes[0].bytes != reply {
+                                            return Err(Divergence { landmark: self.idx, pc,
+                                                detail: format!("mach_vm_reallocate reply mismatch: replay {r:?}") });
                                         }
                                         self.b.apply_and_return(*ret, *err, writes);
                                     }

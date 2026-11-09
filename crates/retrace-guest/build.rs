@@ -683,6 +683,15 @@ fn main() {
         .status().expect("clang hugerealloc_dyn");
     assert!(status.success(), "hugerealloc_dyn guest build failed");
 
+    // vmrealloc_dyn: M57 t7 fixture (mach_vm_reallocate by case). Same recipe as hello_dyn.
+    let src = format!("{}/c/vmrealloc_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/vmrealloc_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang vmrealloc_dyn");
+    assert!(status.success(), "vmrealloc_dyn guest build failed");
+
     // vmcopy_dyn: M52 t1 (spec §3b) fixture. Same recipe as hello_dyn.
     let src = format!("{}/c/vmcopy_dyn.c", env!("CARGO_MANIFEST_DIR"));
     let bin = format!("{out}/vmcopy_dyn");
