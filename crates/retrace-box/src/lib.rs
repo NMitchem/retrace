@@ -226,7 +226,7 @@ pub const COMMPAGE2_IPA: u64 = 0x0000_000F_FFFF_4000;
 // staged region [TSD_REGION_BASE, TSD_REGION_BASE+TSD_REGION_SIZE): libpthread/libplatform touch
 // both positive TSD-key slots (`[tp,#+N]`) AND negative pthread-struct fields (`[tp,#-N]`, observed
 // as low as tp-0xE0), so the backing must span generously below and above tp. The whole region sits
-// in block 0's free area below the sign scratch (0x40000) and above PT_L2 (0x8000).
+// in block 0's free area below the sign scratch (0x40000) and above the stack (0x1C000).
 // TPIDR_EL0 is a SEPARATE register and is NOT a second TSD pointer: macOS 26 reads the guest's
 // current CPU number from TPIDR_EL0[11:0] and cluster number from TPIDR_EL0[>=12] (see the
 // set-sys call sites in load_dynamic/restore for the full rationale); it is set to 0 (cpu 0 /
@@ -286,8 +286,8 @@ pub const PT_L3_BASE: u64 = PT_L2_IPA + (L2_PAGES * GRANULE) as u64;
 const PT_L3_CEIL: u64 = 0x0200_0000;          // 32 MiB block boundary
 // M49 F3 (spec §3d, R3): the IPA ranges stage 1 does not map: page 0 (a NULL access then takes the
 // stage-1 fault native takes, so a call through NULL is SIGSEGV, not a permission fault's SIGBUS),
-// retrace's L2 and L1 table pages (a guest store there used to rewrite retrace's own tables:
-// `faults-retrace.txt`, store @0x8000), and the L3 window. All three sit in block 0, whose L3 table
+// retrace's L2 array and L1 page (a guest store there used to rewrite retrace's own tables:
+// `faults-retrace.txt`, store @0x8000, then the single L2 page), the vacated old L2 page, and the L3 window. All sit in block 0, whose L3 table
 // `build_tables` creates for the trampoline. The hardware walker reads the tables by IPA, never
 // through stage 1, so unmapping them at stage 1 costs nothing (t0 M4). `range_is_free` keeps every
 // placement out of them, and `set_region_attr` refuses to map them again.
@@ -456,7 +456,7 @@ const PAC_KEYS: [(hv_sys::SysReg, u64); 10] = [
 // --- Guest signing oracle (M2-cache Task 4) ---
 // Two anon scratch pages, lazy-init'd on the first sign_slots/authenticate, at fixed reserved IPAs
 // in block 0's free area [TSD_end 0x34000, PT_L3_BASE 0x800000) — clear of trampoline (0x4000),
-// PT_L2 (0x8000), stack (0x1C000), TSD (0x30000), dyn stack (40 MiB), PT_L3 (0x800000+), segments (>=4GiB),
+// the stack (0x1C000), TSD (0x30000), dyn stack (40 MiB), the L2 array and PT_L3 (0x800000+), segments (>=4GiB),
 // mmap (>=16GiB), and the cache (>=6GiB). W^X: the STUB page is code (RO+exec, ATTR_CODE) — a fresh
 // IPA promoted via set_region_exec; the TABLE page is data (RW+non-exec, block 0's default
 // ATTR_DATA). Executing a writable page would HANG hv_vcpu_run (Apple-Silicon W^X). Both anon
@@ -1565,10 +1565,6 @@ type Window = (u64, usize, Vec<u8>, Vec<u8>, usize);
 /// M53 §3e: `(ret, err, writes)` of a `poll` or `select` answer, the writes being `(guest VA, bytes)`.
 type PollAnswer = (u64, bool, Vec<(u64, Vec<u8>)>);
 
-/// M50 (spec §3b, R2): whether this process may create a VM. The CLI asks before it loads a guest
-/// or opens a trace, so a missing `com.apple.security.hypervisor` entitlement is one line and exit
-/// 2, not a panic in `Vm::create().expect`. The VM is destroyed before this returns: one VM per
-/// process, and the caller's own comes next.
 /// M57 §3c: why this Mac cannot give a box its guest IPA, or None. Pure, for the unit test.
 pub fn ipa_refusal(max_bits: u32) -> Option<String> {
     (max_bits < IPA_BITS).then(|| format!("this Mac's hypervisor allows a {max_bits}-bit guest address space and retrace needs {IPA_BITS} bits"))
@@ -1581,6 +1577,10 @@ pub fn ipa_check() -> Result<(), String> {
     }
 }
 
+/// M50 (spec §3b, R2): whether this process may create a VM. The CLI asks before it loads a guest
+/// or opens a trace, so a missing `com.apple.security.hypervisor` entitlement is one line and exit
+/// 2, not a panic in `Vm::create().expect`. The VM is destroyed before this returns: one VM per
+/// process, and the caller's own comes next.
 pub fn hypervisor_check() -> Result<(), String> {
     match Vm::create_with_ipa(IPA_BITS) {
         Ok(vm) => { drop(vm); Ok(()) }
@@ -8326,7 +8326,7 @@ impl Box_ {
         // DYN_STACK_BOTTOM, PT_L3_CEIL never vary at runtime), so clippy's assertions_on_constants
         // rightly refuses a plain assert! here — const { assert!(..) } is the existing convention
         // this file already uses for the same situation (see stack_geometry_tests's DYN_STACK_TOP
-        // <= 1 << 36 check), and it is strictly stronger: a layout mistake fails the BUILD, not a
+        // <= IPA_LIMIT check), and it is strictly stronger: a layout mistake fails the BUILD, not a
         // test run or a live load.
         //
         // The window deliberately starts exactly ONE GRANULE above GUARD_PAGE_IPA, not AT it: that
@@ -10059,8 +10059,8 @@ mod ipa_tests {
     #[test]
     fn the_ipa_refusal_names_the_width_and_needs_40_bits() {
         assert_eq!(ipa_refusal(36).as_deref(),
-            Some("this Mac's hypervisor allows a 36-bit guest address space and retrace needs 40 bits"));
-        assert_eq!(ipa_refusal(40), None);
-        assert_eq!(ipa_refusal(42), None);
+            Some(format!("this Mac's hypervisor allows a 36-bit guest address space and retrace needs {IPA_BITS} bits").as_str()));
+        assert_eq!(ipa_refusal(IPA_BITS), None);
+        assert_eq!(ipa_refusal(IPA_BITS + 2), None);
     }
 }

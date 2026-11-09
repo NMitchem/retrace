@@ -174,32 +174,52 @@ fn a_call_through_a_null_function_pointer_is_sigsegv_not_sigbus() {
     let _ = std::fs::remove_file(&trace);
 }
 
-/// Spec §4's `fc_low_store` guard. Before F3 a store to 0x8000 wrote retrace's own L2 table: the
-/// record exited 0, and with a handler replay diverged at an S1PTW abort (`faults-retrace.txt`).
-/// Now stage 1 leaves the table page unmapped, so the store faults, native's handler line is
-/// printed, and the table holds what it held.
+/// Spec §4's `fc_low_store` guard, for a store to the page that held retrace's L2 table before M57. That page
+/// is now empty and unmapped at stage 1 (`PT_L2_OLD_IPA`), so this row only pins the vacated page's fault; the
+/// rows below store to the live tables.
 #[test]
-fn a_store_to_retraces_page_table_page_faults_and_its_handler_replays() {
-    let (want, ncode) = native(&["low8000", "h"]);
+fn a_store_to_the_vacated_0x8000_page_faults_and_its_handler_replays() {
+    a_store_to_a_table_page_faults_and_its_handler_replays(0x8000, "low8000", None);
+}
+
+/// M57 fix round 1: a store to the live L2 array, its first word being block 0's L3 descriptor.
+#[test]
+fn a_store_to_the_live_l2_array_faults_and_its_handler_replays() {
+    a_store_to_a_table_page_faults_and_its_handler_replays(retrace_box::PT_L2_IPA, "storeat", Some(retrace_box::PT_L2_IPA));
+}
+
+/// ... and to the L1 page, still a live table at 0xC000.
+#[test]
+fn a_store_to_the_l1_page_faults_and_its_handler_replays() {
+    a_store_to_a_table_page_faults_and_its_handler_replays(retrace_box::PT_L1_IPA, "storeat", Some(retrace_box::PT_L1_IPA));
+}
+
+fn a_store_to_a_table_page_faults_and_its_handler_replays(target: u64, case: &str, at: Option<u64>) {
+    let hex = format!("{target:#x}");
+    let args: Vec<&str> = if at.is_some() { vec![case, "h", &hex] } else { vec![case, "h"] };
+    let (want, ncode) = native(&args);
     assert_eq!(ncode, 42);
-    let (rec, trace) = util::record_dynamic_args(FAULTCASE_DYN, &["low8000", "h"]);
+    let (rec, trace) = util::record_dynamic_args(FAULTCASE_DYN, &args);
     assert_eq!(rec.code, 42, "{}", rec.stderr);
     assert_eq!(rec.stdout, want);
     let ev = Reader::open(&trace).unwrap();
-    assert!(ev.iter().any(|e| matches!(e, Event::SignalDelivery { sig: 11, si_addr: 0x8000, .. })), "a delivery at 0x8000");
-    // M57: the L2 array moved to PT_L2_IPA. L2[0], its first word, is block 0's L3 table descriptor: the
-    // same in the opening and the final snapshot, and never the 7 the guest stored at 0x8000.
-    const L2: u64 = retrace_box::PT_L2_IPA;
-    let l2_0 = |e: &Event| match e {
+    assert!(ev.iter().any(|e| matches!(e, Event::SignalDelivery { sig: 11, si_addr, .. } if *si_addr == target)), "a delivery at {target:#x}");
+    // The first word of the table page is the same in the opening and the final snapshot, and never the 7 the
+    // guest stored.
+    let word0 = |e: &Event| match e {
         Event::Snapshot { mem, .. } => mem.iter()
-            .find(|r| r.ipa <= L2 && L2 < r.ipa + r.bytes.len() as u64)
-            .map(|r| { let o = (L2 - r.ipa) as usize; u64::from_le_bytes(r.bytes[o..o + 8].try_into().unwrap()) })
-            .expect("the L2 array is in the snapshot"),
+            .find(|r| r.ipa <= target && target < r.ipa + r.bytes.len() as u64)
+            .map(|r| { let o = (target - r.ipa) as usize; u64::from_le_bytes(r.bytes[o..o + 8].try_into().unwrap()) }),
         other => panic!("not a snapshot: {other:?}"),
     };
-    let (first, last) = (l2_0(&ev[0]), l2_0(&ev[ev.len() - 1]));
-    assert_eq!(first, last, "L2[0] is unchanged");
-    assert_ne!(last, 7, "the guest's store did not reach retrace's table");
+    let (first, last) = (word0(&ev[0]), word0(&ev[ev.len() - 1]));
+    if at.is_some() {
+        let (f, l) = (first.expect("the live table page is in the opening snapshot"), last.expect("and in the final one"));
+        assert_eq!(f, l, "the table word is unchanged");
+        assert_ne!(l, 7, "the guest's store did not reach retrace's table");
+    } else {
+        assert_eq!((first, last), (None, None), "the vacated page holds nothing");
+    }
     for i in 1..=2 {
         let rp = util::replay(&trace);
         assert_eq!(rp.code, 42, "replay {i}: {}", rp.stderr);

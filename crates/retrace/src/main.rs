@@ -208,7 +208,6 @@ fn bad_input(line: &str) -> i32 {
     2
 }
 
-/// R2: the one line for a process the hypervisor refuses, most often for want of the entitlement.
 /// M57: what every command that creates a VM checks first, in order: the guest address width this Mac allows (§3c),
 /// then the entitlement (M50). Task 5 puts the OS check in front. `Err` is the exit code, its line printed.
 fn vm_preflight() -> Result<(), i32> {
@@ -220,6 +219,7 @@ fn vm_preflight() -> Result<(), i32> {
     Ok(())
 }
 
+/// R2: the one line for a process the hypervisor refuses, most often for want of the entitlement.
 fn no_hypervisor(why: &str) -> i32 {
     let exe = std::env::current_exe().unwrap_or_else(|_| "retrace".into());
     bad_input(&format!("cannot create a VM ({why}). retrace needs the com.apple.security.hypervisor \
