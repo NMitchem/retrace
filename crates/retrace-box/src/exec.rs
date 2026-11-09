@@ -48,7 +48,7 @@ pub enum FileAction {
 }
 
 const ATTR_SIZE: usize = 0xf8;
-const ATTR_SIZE_27: usize = 0x100;
+const ATTR_SIZES: [usize; 2] = [0xf8, 0x100];
 const ACT_STRIDE: usize = 1040;
 const ACT_MAX: usize = 4096;
 
@@ -113,10 +113,11 @@ pub fn decode_spawn(desc: &[u8], attr: Option<&[u8]>, actions: Option<&[u8]>) ->
     }
     let mut plan = SpawnPlan { flags: 0, sigmask: None, sigdefault: 0, actions: Vec::new(), binpref: (0, -1) };
     if let Some(a) = attr {
-        // SPIKE M57: macOS 27 appends 8 bytes (0xf8..0x100, zero after init); every earlier offset is unchanged.
-        if !(q(0) == ATTR_SIZE as u64 || q(0) == ATTR_SIZE_27 as u64) || a.len() as u64 != q(0) {
+        if !ATTR_SIZES.contains(&(q(0) as usize)) || a.len() as u64 != q(0) {
             return Err(spawn_wall(&format!("an attribute block of {} bytes", q(0))));
         }
+        // M57 §3d: macOS 27's block is 0x100 bytes; `posix_spawnattr_init` leaves 0xf8..0x100 zero and every earlier offset
+        // is 26's (M54's attrdump on 27). A field retrace does not know is refused by its offset.
         if let Some(off) = (ATTR_SIZE..a.len()).find(|&o| a[o] != 0) {
             return Err(spawn_wall(&format!("an unmodelled attribute field at {off:#x} set")));
         }
@@ -821,16 +822,20 @@ mod tests {
     }
 
     /// A descriptor with `attr_size` 0xf8 and `file_actions_size` `fa`, extensions empty.
-    fn desc(fa: u64) -> Vec<u8> {
+    fn desc(fa: u64) -> Vec<u8> { desc_sized(fa, ATTR_SIZE as u64) }
+    /// A descriptor whose `attr_size` is `attr_size`, with `file_actions_size` `fa`.
+    fn desc_sized(fa: u64, attr_size: u64) -> Vec<u8> {
         let mut d = vec![0u8; 144];
-        d[0..8].copy_from_slice(&0xf8u64.to_le_bytes());
+        d[0..8].copy_from_slice(&attr_size.to_le_bytes());
         d[8..16].copy_from_slice(&0x1000u64.to_le_bytes());
         if fa != 0 { d[16..24].copy_from_slice(&fa.to_le_bytes()); d[24..32].copy_from_slice(&0x2000u64.to_le_bytes()); }
         d
     }
     /// `posix_spawnattr_init`'s bytes (t4 addendum A), with `flags`.
-    fn attr(flags: u16) -> Vec<u8> {
-        let mut a = vec![0u8; ATTR_SIZE];
+    fn attr(flags: u16) -> Vec<u8> { attr_sized(flags, ATTR_SIZE) }
+    /// `attr` over a block of `size` bytes; the bytes past 0xf8 are zero, as `posix_spawnattr_init` leaves them.
+    fn attr_sized(flags: u16, size: usize) -> Vec<u8> {
+        let mut a = vec![0u8; size];
         for (o, b) in a.iter_mut().enumerate().take(0xc0) { *b = attr_init_byte(o); }
         a[0..2].copy_from_slice(&flags.to_le_bytes());
         a
@@ -872,6 +877,37 @@ mod tests {
         a[0x10..0x14].copy_from_slice(&u32::MAX.to_le_bytes());
         a[0x70..0x74].copy_from_slice(&2i32.to_le_bytes());
         assert_eq!(decode_spawn(&desc(0), Some(&a), None).unwrap().binpref, (u32::MAX, 2));
+    }
+
+    // M57 §3d: macOS 27's 0x100-byte block, zero past 0xf8, decodes as 26's 0xf8 block does.
+    #[test]
+    fn a_0x100_block_with_a_zero_tail_decodes_like_the_0xf8_one() {
+        let mut a8 = attr(0x40);
+        a8[0x10..0x14].copy_from_slice(&0x0100_000cu32.to_le_bytes());
+        let mut a10 = attr_sized(0x40, 0x100);
+        a10[0x10..0x14].copy_from_slice(&0x0100_000cu32.to_le_bytes());
+        let p8 = decode_spawn(&desc(0), Some(&a8), None).expect("the 0xf8 block");
+        let p10 = decode_spawn(&desc_sized(0, 0x100), Some(&a10), None).expect("the 0x100 block");
+        assert_eq!(p10.flags, p8.flags, "flags");
+        assert_eq!(p10.binpref, p8.binpref, "binpref");
+        assert_eq!(p10.sigmask, p8.sigmask, "sigmask");
+        assert_eq!(p10.sigdefault, p8.sigdefault, "sigdefault");
+        assert_eq!(p10.actions, p8.actions, "actions");
+    }
+
+    #[test]
+    fn a_nonzero_byte_past_0xf8_is_refused_by_name() {
+        let mut a = attr_sized(0x40, 0x100);
+        a[0xf8] = 1;
+        assert_eq!(decode_spawn(&desc_sized(0, 0x100), Some(&a), None).unwrap_err(),
+                   "posix_spawn with an unmodelled attribute field at 0xf8 set (syscall 244)");
+        let mut a = attr_sized(0x40, 0x100);
+        a[0xff] = 1;
+        assert_eq!(decode_spawn(&desc_sized(0, 0x100), Some(&a), None).unwrap_err(),
+                   "posix_spawn with an unmodelled attribute field at 0xff set (syscall 244)");
+        let a = attr_sized(0x40, 0x108);
+        assert_eq!(decode_spawn(&desc_sized(0, 0x108), Some(&a), None).unwrap_err(),
+                   "posix_spawn with an attribute block of 264 bytes (syscall 244)");
     }
 
     #[test]
