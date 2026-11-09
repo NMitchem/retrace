@@ -148,7 +148,7 @@ pub const PTR_WINDOW_CAP: usize = 64 * 1024;
 pub const GUARD_BAND: usize = 64;
 // Bump-allocation base for guest_mmap / mach_vm allocations: 40 GiB. Within the 36-bit (64 GiB)
 // IPA space and ABOVE the loaded segments (~4-5 GiB), the demand-paged shared-cache window
-// [SHARED_REGION_START, SHARED_REGION_END), AND libmalloc's FIXED 24-GiB nano "pointer range"
+// [SHARED_REGION_START, Box_::shared_region_end), AND libmalloc's FIXED 24-GiB nano "pointer range"
 // reservation [NANO_BAND_START, NANO_BAND_END). The last is critical: libmalloc reserves that
 // band and then commits nano sub-ranges at EXACT addresses inside it, both with the ANYWHERE bit
 // CLEAR (`_nano_common_map_vm_space` in nano_malloc_common.c) — i.e. plain FIXED placement, not a
@@ -172,7 +172,16 @@ const GRANULE: usize = 0x4000; // 16 KiB default granule
 // regions' stage-1 attributes are pre-set to ATTR_CODE at load (see host_exec_regions) so a text
 // fault is a pure stage-2 translation fault and demand-paging needs no runtime promotion / TLBI.
 pub const SHARED_REGION_START: u64 = 0x1_8000_0000;
-pub const SHARED_REGION_END:   u64 = 0x3_8000_0000; // EXPERIMENT macOS 27.2
+/// The smallest end the window has (6 GiB past its start): macOS 26's whole cache fits inside it.
+/// The box's own end is `Box_::shared_region_end`, which is this or the host cache's end if that is
+/// past it (M57: macOS 27's cache ends at 0x3_4BB2_8000).
+pub const SHARED_REGION_END_MIN: u64 = 0x3_0000_0000;
+
+/// The window's end for a cache at `[base, base + size)`: the constant, or the cache's end rounded
+/// up to 32 MiB (the granule the box places things on) when that is past it.
+pub fn shared_region_end_for(base: u64, size: u64) -> u64 {
+    SHARED_REGION_END_MIN.max(base.saturating_add(size).next_multiple_of(0x200_0000))
+}
 // The kernel maps a read-only "commpage" of CPU capabilities / cached timing into every process
 // at this fixed high VA; dyld reads it during early init. It is within the 36-bit identity space
 // (block 2047, a default RW/non-exec data block) but not in the guest's stage-2, so load_dynamic
@@ -748,6 +757,12 @@ pub struct Box_ {
     /// M52 §3i: the stall watch. Control-plane and record-only, so it is in no `BoxState`: only
     /// `watch_for_stalls` sets it, and replay never calls that.
     stall: Option<stall::StallWatch>,
+    /// M57 §3b: the shared-region window's end. A plain field, not derived from `self.cache`: replay's
+    /// `restore` starts with `cache: None`, so a derived value would differ between record and replay
+    /// before the pager is installed. Set at load from the `CacheMeta`, at restore from the host
+    /// cache's main header, carried in `BoxState`. Declared last: the field-order rule is about
+    /// `vcpu`, `vm` and `backings` only.
+    shared_region_end: u64,
     /// M48 §3c (K1): the guest's own kqueues and its pipes' byte counts. Box state, not trace state:
     /// record and replay rebuild it from the guest's own syscalls, and every rebuild path carries it
     /// (`BoxState`). Declared after `vcpu`/`vm`, so the drop order is unaffected.
@@ -1291,6 +1306,9 @@ pub struct BoxState {
     pub mmap_next: u64,
     pub bootstrap_port: Option<u32>,
     pub cache_installed: bool,
+    /// M57 §3b: the shared-region window's end. Carried because restore re-derives it from a file
+    /// and a mid-run capture must not need one.
+    pub shared_region_end: u64,
     pub last_far: u64,
     pub synthetic_tsc: u64,
     pub cache_refault_ipa: u64,
@@ -1956,7 +1974,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, STACK_TOP_IPA).unwrap();
         vcpu.set_reg(reg::CPSR, 0x0).unwrap();                  // EL0t
         vcpu.set_reg(reg::PC, loaded.entry).unwrap();
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default(), sleep: sleep::SleepModel::default(), sems: sema::Semaphores::default(), itimer: timer::RealTimer::default(), stall: None }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default(), sleep: sleep::SleepModel::default(), sems: sema::Semaphores::default(), itimer: timer::RealTimer::default(), stall: None, shared_region_end: SHARED_REGION_END_MIN }
     }
 
     pub fn sp(&self) -> u64 { self.vcpu.get_sys(sysreg::SP_EL0).unwrap() }
@@ -2682,7 +2700,8 @@ impl Box_ {
         Self::set_pac_keys(&vcpu);
         Self::start_sysregs(&vcpu, &st);
         let StagedImage { l2_host, next_l3, pac, cache: cache_meta, .. } = st;
-        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default(), sleep: sleep::SleepModel::default(), sems: sema::Semaphores::default(), itimer: timer::RealTimer::default(), stall: None };
+        let shared_region_end = { let (base, size) = cache_meta.window(); shared_region_end_for(base, size) };
+        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default(), sleep: sleep::SleepModel::default(), sems: sema::Semaphores::default(), itimer: timer::RealTimer::default(), stall: None, shared_region_end };
         b.reserve_believed_stack();
         // M14: thread 0's context was zeroed above (the table exists before the vCPU does); overwrite
         // it with the real startup state just written to the vCPU so it reflects reality from the
@@ -2888,7 +2907,7 @@ impl Box_ {
         let (lo, hi) = (addr & !(g - 1), end.max(addr & !(g - 1)));
         if addr < 1 << 32 { return Err(retrace_arch::KERN_INVALID_ADDRESS); }
         let hits = |s: u64, e: u64| lo < e && s < hi;
-        if hits(SHARED_REGION_START, SHARED_REGION_END)
+        if hits(SHARED_REGION_START, self.shared_region_end)
             || hits(COMMPAGE_IPA, COMMPAGE_IPA + g) || hits(COMMPAGE2_IPA, COMMPAGE2_IPA + g)
             || self.backings.iter().any(|b| hits(b.ipa, b.ipa + b.len as u64))
             || self.reservations.iter().any(|&(s, l)| hits(s, s + l)) {
@@ -3151,7 +3170,7 @@ impl Box_ {
     fn range_is_free(&self, ipa: u64, len: u64) -> bool {
         let end = ipa.saturating_add(len);
         if end > IPA_LIMIT { return false; }                            // out of 36-bit IPA space
-        if ipa < SHARED_REGION_END && SHARED_REGION_START < end { return false; } // shared-cache window
+        if ipa < self.shared_region_end && SHARED_REGION_START < end { return false; } // shared-cache window
         // The VMM's lazily-mapped scratch pages: forbidden even while still absent from `backings`.
         if ipa < SCRATCH_RESERVED_END && SCRATCH_RESERVED_START < end { return false; }
         // M49 F3: stage 1 maps none of these, so a placement there would hand the guest memory it
@@ -3190,7 +3209,7 @@ impl Box_ {
             let end = round_up(s + l);
             if end > base { cands.push(end); }
         }
-        if round_up(SHARED_REGION_END) > base { cands.push(round_up(SHARED_REGION_END)); }
+        if round_up(self.shared_region_end) > base { cands.push(round_up(self.shared_region_end)); }
         if round_up(SCRATCH_RESERVED_END) > base { cands.push(round_up(SCRATCH_RESERVED_END)); }
         for &(_, e) in &STAGE1_UNMAPPED { if round_up(e) > base { cands.push(round_up(e)); } }
         cands.sort_unstable();
@@ -4284,7 +4303,14 @@ impl Box_ {
         // correct for M21's believed-stack reservation, which `load_dynamic` makes at load time and
         // which has no landmark to rebuild from, precisely because M21 keeps it below the trace.
         // That one entry is re-established below.
-        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default(), sleep: sleep::SleepModel::default(), sems: sema::Semaphores::default(), itimer: timer::RealTimer::default(), stall: None };
+        // M57 §3b: gated as the TPIDRRO_EL0 set and reserve_believed_stack are: a static guest has no
+        // cache, so it keeps the constant. A dynamic one takes the host cache's end from the main
+        // header, the same bytes record's CacheMeta window came from.
+        let shared_region_end = if stack_top == DYN_STACK_TOP {
+            let h = host_cache_header();
+            shared_region_end_for(h.base, h.size)
+        } else { SHARED_REGION_END_MIN };
+        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default(), sleep: sleep::SleepModel::default(), sems: sema::Semaphores::default(), itimer: timer::RealTimer::default(), stall: None, shared_region_end };
         // M21 task 2.5: replay never runs `load_dynamic`, so the believed-stack reservation it makes
         // would not exist here and the first stack-growth fault would go unserviced and report as a
         // divergence — M21 would be record-only. Re-establish it, gated on the DYNAMIC geometry so a
@@ -5513,7 +5539,7 @@ impl Box_ {
     /// Below the trace: `run()` and `run_one_for_step()` both call it, on record and replay alike.
     fn native_abort_syndrome(&mut self, esr1: u64, far: u64) -> u64 {
         if (esr1 >> 26) & 0x3f != 0x20 || !(0x0c..=0x0f).contains(&(esr1 & 0x3f)) { return esr1; }
-        if (SHARED_REGION_START..SHARED_REGION_END).contains(&far) { return esr1; }
+        if (SHARED_REGION_START..self.shared_region_end).contains(&far) { return esr1; }
         let Some((ipa, Some(leaf))) = self.va_leaf(far) else { return esr1 };
         if self.host_span(ipa).is_some() || self.in_reservation(ipa) { return esr1; }
         if !excl::el0_writable(leaf) || leaf & UXN == 0 { return esr1; }
@@ -7996,7 +8022,7 @@ impl Box_ {
         }
         // `page_in_cache` only for a page nothing backs yet: on a backed page it counts a refault.
         if self.host_span(ipa).is_some() || self.commit_reserved_page(ipa)
-            || ((SHARED_REGION_START..SHARED_REGION_END).contains(&ipa) && self.page_in_cache(ipa)) {
+            || ((SHARED_REGION_START..self.shared_region_end).contains(&ipa) && self.page_in_cache(ipa)) {
             Ok(())
         } else {
             Err(retrace_arch::EFAULT)
@@ -9326,6 +9352,7 @@ impl Box_ {
             mmap_next: self.mmap_next,
             bootstrap_port: self.bootstrap_port,
             cache_installed: self.cache.is_some(),
+            shared_region_end: self.shared_region_end,
             last_far: self.last_far,
             synthetic_tsc: self.synthetic_tsc,
             cache_refault_ipa: self.cache_refault_ipa,
@@ -9468,6 +9495,7 @@ impl Box_ {
             kq: state.kq.clone(),
             excl: state.excl.clone(),
             stall: None,
+            shared_region_end: state.shared_region_end,
             gkq: state.gkq.clone(),
             psynch: state.psynch.clone(),
             jit: state.jit.clone(),
@@ -9497,11 +9525,14 @@ impl Box_ {
     /// Test-only diagnostic: the internal bookkeeping fields `checkpoint()`/`from_checkpoint()` must
     /// round-trip that have no other observable accessor. Never used by production code.
     #[doc(hidden)]
+    /// The shared-region window's end (M57 §3b).
+    pub fn shared_region_end(&self) -> u64 { self.shared_region_end }
+
     pub fn dbg_internal_state(&self) -> String {
-        format!("reservations={:?} mmap_next={:#x} bootstrap_port={:?} cache_installed={} last_far={:#x} synthetic_tsc={:#x} cache_refault_ipa={:#x} cache_refault_count={} pac_enabled={} kq={:?} gkq={:?} psynch={:?} jit={:?} sleep={:?} sems={:?} itimer={:?}",
+        format!("reservations={:?} mmap_next={:#x} bootstrap_port={:?} cache_installed={} last_far={:#x} synthetic_tsc={:#x} cache_refault_ipa={:#x} cache_refault_count={} pac_enabled={} kq={:?} gkq={:?} psynch={:?} jit={:?} sleep={:?} sems={:?} itimer={:?} shared_region_end={:#x}",
             self.reservations, self.mmap_next, self.bootstrap_port, self.cache.is_some(),
             self.last_far, self.synthetic_tsc, self.cache_refault_ipa, self.cache_refault_count,
-            self.pac_enabled, self.kq, self.gkq, self.psynch, self.jit, self.sleep, self.sems, self.itimer)
+            self.pac_enabled, self.kq, self.gkq, self.psynch, self.jit, self.sleep, self.sems, self.itimer, self.shared_region_end)
     }
 
     /// Test-only (M46): the workqueue kqueue, for `checkpointparity.rs` and the box-level manager
@@ -9685,7 +9716,6 @@ fn load_host_cache() -> CacheMeta {
     CacheMeta::load(DEFAULT_CACHE_PATH).unwrap_or_else(|e| cache_wall(e))
 }
 
-#[allow(dead_code)]
 fn host_cache_header() -> cache::MainHeader {
     cache::read_main_header(DEFAULT_CACHE_PATH).unwrap_or_else(|e| cache_wall(e))
 }
@@ -9982,5 +10012,18 @@ mod cache_wall_tests {
         let r = std::panic::catch_unwind(|| cache_wall(cache::CacheError::Io(std::io::Error::other("boom"))));
         let p = r.unwrap_err();
         assert!(retrace_arch::Unsupported::from_panic(p.as_ref()).is_none());
+    }
+}
+
+#[cfg(test)]
+mod shared_region_tests {
+    use super::*;
+
+    #[test]
+    fn shared_region_end_is_the_constant_or_the_caches_end_rounded_to_32_mib() {
+        assert_eq!(shared_region_end_for(0x1_8000_0000, 0x1_cbb2_8000), 0x3_4c00_0000, "27.2's window");
+        assert_eq!(shared_region_end_for(0x1_8000_0000, 0x1_5a00_0000), 0x3_0000_0000, "26-shaped, 5.40 GiB");
+        assert_eq!(shared_region_end_for(0x1_8000_0000, 0x1_8000_0000), 0x3_0000_0000, "ends at the constant");
+        assert_eq!(shared_region_end_for(0x1_8000_0000, 0x1_8000_4000), 0x3_0200_0000);
     }
 }

@@ -112,9 +112,9 @@ pub fn closing_line(o: &Outcome) -> Option<String> {
 }
 
 /// The closing line's place for a crash at `pc`, from the final snapshot record appends after it.
-fn crash_site_of(final_snap: &Event, pc: u64) -> String {
+fn crash_site_of(final_snap: &Event, pc: u64, shared_region_end: u64) -> String {
     match final_snap {
-        Event::Snapshot { mem, .. } => symbols::crash_site(mem, pc),
+        Event::Snapshot { mem, .. } => symbols::crash_site(mem, pc, shared_region_end),
         _ => String::new(),
     }
 }
@@ -599,7 +599,7 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                     FaultAction::Crash { sig } => sig,
                 };
                 let final_snap = b.snapshot();
-                let site = crash_site_of(&final_snap, pc);
+                let site = crash_site_of(&final_snap, pc, b.shared_region_end());
                 w.append(&Event::Crash { pc, esr, far, sig, thread }).map_err(|e| format!("append crash: {e}"))?; count += 1;
                 w.append(&final_snap).map_err(|e| format!("append final snapshot: {e}"))?; count += 1;
                 outcome = Outcome::Crash { pc, esr, far, sig, site };
@@ -1896,7 +1896,7 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                 };
                 macro_rules! undo { () => { if let Some(t) = txn.take() { t.rollback(); } } }
                 // The kernel finds and checks the file first and copies the argument strings in after.
-                let resolved = match exec::resolve(&call) {
+                let resolved = match exec::resolve(&call, b.shared_region_end()) {
                     Ok(r) => r,
                     Err(ExecRefusal::Errno(e)) => { undo!(); append_refused(&mut w, &mut b, &mut count, num, args, e, true, thread)?; continue; }
                     Err(ExecRefusal::Wall(m)) => { undo!(); return Err(m) }
@@ -4357,7 +4357,7 @@ impl ReplaySession {
                                     if let Some(d) = self.b.diff_memory(final_mem) {
                                         return Err(Divergence { landmark: self.idx + 1, pc, detail: d });
                                     }
-                                    let site = symbols::crash_site(final_mem, pc);
+                                    let site = symbols::crash_site(final_mem, pc, self.b.shared_region_end());
                                     return Ok(Advance::Exited(replay_report(&mut self.console, &self.b,
                                         Outcome::Crash { pc, esr, far, sig, site })));
                                 }

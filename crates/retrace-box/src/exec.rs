@@ -363,7 +363,7 @@ pub fn script_argv(line: &[u8], script_path: &[u8], argv: &[Vec<u8>]) -> Result<
 /// `DYLD_BASE`), the box-owned low range `[0, DYN_STACK_TOP)` (trampoline, page tables, signing and TLBI stubs, TSD,
 /// stack), the two commpage granules, or the shared region, or end past the 36-bit IPA space. The nano band and
 /// the mmap area are not checked: they are the program's own reservations, made after the image.
-pub fn image_layout_refusal(exe: &Loaded, dyld: &Loaded) -> Option<String> {
+pub fn image_layout_refusal(exe: &Loaded, dyld: &Loaded, shared_region_end: u64) -> Option<String> {
     let g = GRANULE as u64;
     let mut spans: Vec<(u64, u64, String)> = Vec::new();
     for (who, l, slide) in [("the executable", exe, 0u64), ("the dynamic linker", dyld, DYLD_BASE)] {
@@ -381,7 +381,7 @@ pub fn image_layout_refusal(exe: &Loaded, dyld: &Loaded) -> Option<String> {
     }
     let fixed = [(0, DYN_STACK_TOP, "retrace's low range (trampoline, tables, stubs, TSD, stack)"),
                  (COMMPAGE2_IPA, COMMPAGE2_IPA + g, "the commpage"), (COMMPAGE_IPA, COMMPAGE_IPA + g, "the commpage"),
-                 (SHARED_REGION_START, SHARED_REGION_END, "the shared region")];
+                 (SHARED_REGION_START, shared_region_end, "the shared region")];
     for (i, (a, b, name)) in spans.iter().enumerate() {
         for (fa, fb, fname) in fixed {
             if *a < fb && fa < *b { return Some(format!("{name} overlaps {fname}")); }
@@ -1042,18 +1042,18 @@ mod tests {
         let img = |segments| Loaded { segments, entry: 0, dylinker: None, cpusubtype: 0 };
         let ok_exe = img(vec![seg(EXE_BASE, 0x4000), seg(EXE_BASE + 0x4000, 0x4000)]);
         let ok_dyld = img(vec![seg(0, 0x8000)]);
-        assert_eq!(image_layout_refusal(&ok_exe, &ok_dyld), None);
-        let why = image_layout_refusal(&img(vec![seg(EXE_BASE, 0x4000), seg(EXE_BASE + 0x4000 + 0x1000, 0x1000)]), &ok_dyld).unwrap();
+        assert_eq!(image_layout_refusal(&ok_exe, &ok_dyld, SHARED_REGION_END_MIN), None);
+        let why = image_layout_refusal(&img(vec![seg(EXE_BASE, 0x4000), seg(EXE_BASE + 0x4000 + 0x1000, 0x1000)]), &ok_dyld, SHARED_REGION_END_MIN).unwrap();
         assert!(why.contains("not 16 KiB-aligned"), "{why}");
-        let why = image_layout_refusal(&img(vec![seg(EXE_BASE, 0x8000), seg(EXE_BASE + 0x4000, 0x4000)]), &ok_dyld).unwrap();
+        let why = image_layout_refusal(&img(vec![seg(EXE_BASE, 0x8000), seg(EXE_BASE + 0x4000, 0x4000)]), &ok_dyld, SHARED_REGION_END_MIN).unwrap();
         assert!(why.contains("overlaps"), "{why}");
-        let why = image_layout_refusal(&img(vec![seg(TRAMPOLINE_IPA, 0x4000)]), &ok_dyld).unwrap();
+        let why = image_layout_refusal(&img(vec![seg(TRAMPOLINE_IPA, 0x4000)]), &ok_dyld, SHARED_REGION_END_MIN).unwrap();
         assert!(why.contains("low range"), "{why}");
-        let why = image_layout_refusal(&img(vec![seg(COMMPAGE_IPA, 0x4000)]), &ok_dyld).unwrap();
+        let why = image_layout_refusal(&img(vec![seg(COMMPAGE_IPA, 0x4000)]), &ok_dyld, SHARED_REGION_END_MIN).unwrap();
         assert!(why.contains("commpage"), "{why}");
-        let why = image_layout_refusal(&ok_exe, &img(vec![seg(SHARED_REGION_START - DYLD_BASE, 0x4000)])).unwrap();
+        let why = image_layout_refusal(&ok_exe, &img(vec![seg(SHARED_REGION_START - DYLD_BASE, 0x4000)]), SHARED_REGION_END_MIN).unwrap();
         assert!(why.contains("shared region"), "{why}");
-        let why = image_layout_refusal(&img(vec![seg(DYLD_BASE, 0x4000)]), &ok_dyld).unwrap();
+        let why = image_layout_refusal(&img(vec![seg(DYLD_BASE, 0x4000)]), &ok_dyld, SHARED_REGION_END_MIN).unwrap();
         assert!(why.contains("dynamic linker's segment") && why.contains("overlaps"), "{why}");
     }
 }
