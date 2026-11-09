@@ -24,13 +24,20 @@ fn boxed() -> Box_ {
 
 /// The exact address `hello_rust` asks for today (see the M8-stack Task 6 report).
 const WILD: u64 = 0xffff_ffff_ffa0_4000;
-/// One page past the top of the 36-bit guest IPA space.
-const IPA_CEILING: u64 = 1 << 36;
+/// One page past the top of the 40-bit guest IPA space.
+const IPA_CEILING: u64 = 1 << 40;
 
 const RW: u64 = 3; // PROT_READ|PROT_WRITE
 const ANON_FIXED: u64 = 0x1012; // MAP_ANON|MAP_PRIVATE|MAP_FIXED
 
 // ---- BSD path (mmap) ----
+
+/// M57 §3c: the ceiling moved from 64 GiB to 1 TiB, so a FIXED page past 64 GiB is honoured.
+#[test]
+fn a_map_fixed_past_64_gib_is_honoured() {
+    let mut b = boxed();
+    assert_eq!(b.guest_mmap(0x90_0000_0000, 0x4000, RW, ANON_FIXED), Ok(0x90_0000_0000));
+}
 
 #[test]
 fn wild_map_fixed_is_rejected_with_einval() {
@@ -45,7 +52,7 @@ fn map_fixed_crossing_the_ipa_ceiling_is_rejected() {
     let mut b = boxed();
     // Starts inside the guest IPA space but runs off the top of it.
     assert_eq!(b.guest_mmap(IPA_CEILING - 0x4000, 0x8000, RW, ANON_FIXED), Err(EINVAL),
-        "a MAP_FIXED range that ENDS past the 36-bit IPA ceiling must be rejected -- only its base \
+        "a MAP_FIXED range that ENDS past the 40-bit IPA ceiling must be rejected -- only its base \
          being in range is not enough");
 }
 
@@ -93,7 +100,7 @@ fn an_in_range_map_fixed_still_succeeds() {
 // It fails loud with a diagnosis instead of an opaque HvError -- the same posture as the partial
 // straddle case next to it.
 #[test]
-#[should_panic(expected = "outside the guest's 36-bit IPA space")]
+#[should_panic(expected = "outside the guest's 40-bit IPA space")]
 fn wild_fixed_vm_map_fails_loud() {
     let mut b = boxed();
     let _ = b.guest_vm_map(WILD, 0x4000, false, false);

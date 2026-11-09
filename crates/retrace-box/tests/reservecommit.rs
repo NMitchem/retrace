@@ -6,7 +6,7 @@
 use retrace_box::{Box_, Stop, MMAP_BASE};
 use retrace_guest::{parse_macho, HELLO, WILDSTORE};
 
-// The wild address wildstore.s stores to (0xB_0000_0000 = 44 GiB): inside the 36-bit IPA space so
+// The wild address wildstore.s stores to (0xB_0000_0000 = 44 GiB): inside the guest IPA space so
 // stage-1 identity resolves it, but backed by nothing and inside no reservation.
 const WILD: u64 = 0xB_0000_0000;
 

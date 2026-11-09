@@ -19,7 +19,7 @@ crates/retrace-box/src/lib.rs	guest_vm_remap	Memory	vm_remap: source page
 crates/retrace-box/src/lib.rs	guest_vm_remap	Memory	vm_remap: source pages differ in protect
 crates/retrace-box/src/lib.rs	guest_vm_remap	Memory	vm_remap: unaligned target
 crates/retrace-box/src/lib.rs	guest_vm_reserve_masked	Memory	M47: unmeasured mach_vm_map mask
-crates/retrace-box/src/lib.rs	guest_vm_reserve_masked	Memory	guest_vm_reserve ANYWHERE overflowed 36-
+crates/retrace-box/src/lib.rs	guest_vm_reserve_masked	Memory	guest_vm_reserve ANYWHERE overflowed
 crates/retrace-box/src/lib.rs	guest_workq_open	Threads	M18 Stage 2a: workq_open before bsdthrea
 crates/retrace-box/src/lib.rs	guest_workq_park	Threads	M18 Stage 2b: workq_kernreturn THREAD_RE
 crates/retrace-box/src/lib.rs	guest_workq_reqthreads	Threads	M18 Stage 2b: REQTHREADS for

@@ -236,6 +236,8 @@ and a misaligned PC or stack pointer (SIGBUS, 138).
 
 retrace reads the dyld shared cache's own header to find its files, and checks each file against the subcache table there. A cache laid out in a way retrace has not met is refused with `has a shared cache retrace does not recognise`, naming the host's macOS version and build, rather than mis-read.
 
+The guest's physical address space is 40 bits (1 TiB), because macOS 27's malloc reserves 24 GiB at a random address above 448 GiB. A Mac whose hypervisor allows fewer than 40 bits (`hv_vm_config_get_max_ipa_size`) is refused before any VM is made, with `this Mac's hypervisor allows a <n>-bit guest address space and retrace needs 40 bits`. A guest that maps FIXED at or past 1 TiB still gets the wall or `EINVAL` it got at 64 GiB before.
+
 ## Incomplete recordings
 
 A recording that stopped at a wall, or whose recorder was killed, has no end: no exit, crash or

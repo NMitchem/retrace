@@ -3,8 +3,8 @@
 use retrace_box::{Box_, COMMPAGE_IPA, TSD_IPA};
 use retrace_guest::{parse_macho, slice_arm64e, CRASH, CRASHY, DYLD_PATH, HELLO};
 
-// The crash fixtures' wild pointer: bit 46 set, so L1 index 0x400 — the only valid L1 entry is
-// index 0 (build_tables), so the walk must terminate at level 1. Same constant as c/crashy.c.
+// The crash fixtures' wild pointer: bit 46 set, so L1 index 0x400 — the valid L1 entries are
+// 0..16 (build_tables, M57), so the walk must terminate at level 1. Same constant as c/crashy.c.
 const GARBAGE_VA: u64 = 0x4000_DEAD_0000;
 
 #[test]
@@ -20,12 +20,12 @@ fn walker_is_identity_on_mapped_vas_and_none_on_unmapped() {
     assert_eq!(b.va_to_ipa(text), Some(text), "guest text, identity");
     // Bit-46 VA: L1 index 0x400 is invalid -> None (the crash fixture's GARBAGE_VA).
     assert_eq!(b.va_to_ipa(GARBAGE_VA), None);
-    // Pins the L1 index shift itself — no other assertion here constrains it, since every mapped
-    // VA above is < 2^36 and so lands in L1[0] under a correct >>36 OR a buggy >>37 shift alike.
-    // VA 1<<36 selects L1[1], which is empty (only L1[0] is a table, via build_tables) -> None.
-    // A buggy >>37 would instead select L1[0] -> L2[0] (promoted by the trampoline) -> L3[0]
-    // (identity page 0, valid) -> Some(0), failing this assertion.
-    assert_eq!(b.va_to_ipa(1u64 << 36), None);
+    // Pins the L1 index shift itself: every mapped VA above is < 2^36 and so lands in L1[0] under a
+    // correct >>36 or a buggy >>37 shift alike. VA 1<<36 is L1[1] -> L2 page 1 -> an identity data block.
+    // VA 1<<40 is L1[16], which is empty (L1[0..16] are tables, M57), so it is None; a buggy >>37
+    // sends it to L1[8], which is valid, and fails the None.
+    assert_eq!(b.va_to_ipa(1u64 << 36), Some(1u64 << 36));
+    assert_eq!(b.va_to_ipa(1u64 << 40), None);
     // Beyond the 47-bit space -> None.
     assert_eq!(b.va_to_ipa(1u64 << 47), None);
 }

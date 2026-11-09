@@ -100,7 +100,7 @@ pub fn run(a: &[String]) -> i32 {
     // Checks come before any child exists.
     if let Err(e) = std::fs::metadata(trace) { return crate::bad_input(&format!("cannot read {trace}: {e}")); }
     if let Err(line) = crate::check_recording(trace) { return crate::bad_input(&line); }
-    if let Err(why) = retrace_core::hypervisor_check() { return crate::no_hypervisor(&why); }
+    if let Err(code) = crate::vm_preflight() { return code; }
     let lldb = match lldb_usable() { Ok(p) => p, Err(e) => return crate::bad_input(&e) };
 
     let dir = match private_dir() { Ok(d) => d, Err(e) => return crate::bad_input(&e) };

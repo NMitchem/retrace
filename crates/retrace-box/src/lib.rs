@@ -146,7 +146,7 @@ pub const PTR_WINDOW_CAP: usize = 64 * 1024;
 /// for random data and far likelier for the zero-heavy data a `.pyc` or a freshly zeroed page
 /// contains, and the consequence of a miss is a silently incomplete recording.
 pub const GUARD_BAND: usize = 64;
-// Bump-allocation base for guest_mmap / mach_vm allocations: 40 GiB. Within the 36-bit (64 GiB)
+// Bump-allocation base for guest_mmap / mach_vm allocations: 40 GiB. Within the 40-bit (1 TiB)
 // IPA space and ABOVE the loaded segments (~4-5 GiB), the demand-paged shared-cache window
 // [SHARED_REGION_START, Box_::shared_region_end), AND libmalloc's FIXED 24-GiB nano "pointer range"
 // reservation [NANO_BAND_START, NANO_BAND_END). The last is critical: libmalloc reserves that
@@ -183,7 +183,7 @@ pub fn shared_region_end_for(base: u64, size: u64) -> u64 {
     SHARED_REGION_END_MIN.max(base.saturating_add(size).next_multiple_of(0x200_0000))
 }
 // The kernel maps a read-only "commpage" of CPU capabilities / cached timing into every process
-// at this fixed high VA; dyld reads it during early init. It is within the 36-bit identity space
+// at this fixed high VA; dyld reads it during early init. It is within the guest IPA identity space
 // (block 2047, a default RW/non-exec data block) but not in the guest's stage-2, so load_dynamic
 // stages a FROZEN anon copy of the host commpage here (one granule). Freezing a copy — not the
 // live kernel page — makes record and replay read identical bytes; the copy is captured in the
@@ -266,15 +266,19 @@ extern "C" { fn mach_absolute_time() -> u64; }
 /// the one deliberate, documented exception. Replay has no stall watch and never calls it.
 fn host_ticks() -> u64 { unsafe { mach_absolute_time() } }
 
-pub const PT_L2_IPA:  u64 = 0x0080_0000; // SPIKE M57: an L2 ARRAY of L2_PAGES pages at the base of the L3 window
+/// M57 §3c: the guest IPA width. 40 bits (1 TiB): macOS 27's xzone malloc reserves a 24 GiB range group at an address
+/// it draws from entropy above 0x70_0000_0000 and commits segments in it FIXED (native-xzm-vmlog.txt, M0 wall 3).
 pub const IPA_BITS: u32 = 40;
 pub const IPA_LIMIT: u64 = 1 << IPA_BITS;
+/// One L2 page per 64 GiB L1 slot, contiguous, so the existing `l2[ipa / BLK]` indexing reaches all of `IPA_LIMIT`.
 const L2_PAGES: usize = 1 << (IPA_BITS - 36);
 const L2_ENTRIES: usize = 2048 * L2_PAGES;
-const OLD_L2_PAGE: u64 = 0x8000;           // L2 table (one level below the L1 TTBR0 target); one 16 KiB page = 2048 entries
+/// The L2 array, at the base of the old L3 window (spec §3c).
+pub const PT_L2_IPA: u64 = 0x0080_0000;
+/// The single L2 page before M57. Nothing lives there now; it stays unmapped at stage 1, so the holes a guest can see are unchanged.
+const PT_L2_OLD_IPA: u64 = 0x8000;
 pub const PT_L1_IPA:  u64 = 0xC000;           // L1 table (TTBR0 target under the 47-bit VA); one
-                                              // 16 KiB page, only entry[0] valid (-> L2). Free
-                                              // block-0 page between L2 (0x8000) and the stack (0x1C000).
+                                              // 16 KiB page, L1[0..L2_PAGES] valid (-> L2 pages).
 // L3 tables live at 8 MiB..32 MiB inside block 0 (above the stack IPA at 0x1C000, below the
 // 32 MiB block boundary), so they're identity-covered by block 0's own L3 (block 0 is already
 // L3-promoted for the trampoline). ~1500 tables' worth of room; bump by GRANULE per promoted block.
@@ -288,13 +292,15 @@ const PT_L3_CEIL: u64 = 0x0200_0000;          // 32 MiB block boundary
 // through stage 1, so unmapping them at stage 1 costs nothing (t0 M4). `range_is_free` keeps every
 // placement out of them, and `set_region_attr` refuses to map them again.
 const STAGE1_UNMAPPED: [(u64, u64); 3] =
-    [(0, TRAMPOLINE_IPA), (OLD_L2_PAGE, PT_L1_IPA + GRANULE as u64), (PT_L2_IPA, PT_L3_CEIL)];
+    [(0, TRAMPOLINE_IPA), (PT_L2_OLD_IPA, PT_L1_IPA + GRANULE as u64), (PT_L2_IPA, PT_L3_CEIL)];
 // arm64e data-pointer PAC placement: TBI0(bit37)+TBID0(bit51) match Apple's user TCR so a signed
 // DATA pointer's PAC lands in [54:47] with the top byte (incl. bit 63) preserved = 0. Without TBI
 // the 47-bit-VA PAC field spans [63:56]∪[54:47]; a re-signed class_data_bits pointer then sets
 // bit 63, which objc reads as FAST_IS_RW_POINTER (isRealized) → spurious already-realized →
 // validateAlreadyRealizedClass fatal. See docs/.../2026-07-14-retrace-m2-tbi-design.md.
-const TCR_EL1_V:  u64 = 0x8_0022_0080_B511;    // +TBI0+TBID0. T0SZ=17 (47-bit VA), TG0=16K, WBWA, inner-share, EPD1, IPS=40-bit (SPIKE M57)
+/// TCR_EL1.IPS ([34:32]) for `IPA_BITS`: 0b001 is 36 bits, 0b010 is 40.
+const TCR_IPS: u64 = match IPA_BITS { 36 => 0b001, 40 => 0b010, _ => panic!("IPA_BITS must be 36 or 40") };
+const TCR_EL1_V:  u64 = 0x8_0020_0080_B511 | (TCR_IPS << 32);   // +TBI0+TBID0, T0SZ=17, TG0=16K, WBWA, inner-share, EPD1
 const MAIR_EL1_V: u64 = 0xFF;                 // attr0 = Normal WBWA
 // base 0x30d00800 + M(1) + C(4) + I(0x1000) + DZE(0x4000) + UCI(0x0400_0000). PAC is NOT in the
 // base: it is per-guest (see below). DZE(14) is SET so EL0 `DC ZVA` executes natively instead of
@@ -1563,8 +1569,20 @@ type PollAnswer = (u64, bool, Vec<(u64, Vec<u8>)>);
 /// or opens a trace, so a missing `com.apple.security.hypervisor` entitlement is one line and exit
 /// 2, not a panic in `Vm::create().expect`. The VM is destroyed before this returns: one VM per
 /// process, and the caller's own comes next.
+/// M57 §3c: why this Mac cannot give a box its guest IPA, or None. Pure, for the unit test.
+pub fn ipa_refusal(max_bits: u32) -> Option<String> {
+    (max_bits < IPA_BITS).then(|| format!("this Mac's hypervisor allows a {max_bits}-bit guest address space and retrace needs {IPA_BITS} bits"))
+}
+/// The CLI asks before any VM exists (correction 8).
+pub fn ipa_check() -> Result<(), String> {
+    match hv_sys::max_ipa_bits() {
+        Ok(n) => ipa_refusal(n).map_or(Ok(()), Err),
+        Err(e) => Err(format!("hv_vm_config_get_max_ipa_size returned {:#x}", e.0)),
+    }
+}
+
 pub fn hypervisor_check() -> Result<(), String> {
-    match Vm::create() {
+    match Vm::create_with_ipa(IPA_BITS) {
         Ok(vm) => { drop(vm); Ok(()) }
         Err(e) => Err(format!("hv_vm_create returned {:#x}{}", e.0,
             if e.0 == hv_sys::raw::HV_DENIED as u32 { " (HV_DENIED)" } else { "" })),
@@ -1621,7 +1639,7 @@ impl Box_ {
     }
 
     // W^X identity stage-1 map. Default: every 32 MiB L2 entry is a data BLOCK (RW, non-exec) —
-    // covers stack/data/heap/mmap-data and identity-covers the whole 36 GiB space. Each exec range
+    // covers stack/data/heap/mmap-data and identity-covers the whole guest IPA space. Each exec range
     // (ipa,len,attr) gets page-granularity pages with `attr` via `promote_and_set` (its covering
     // block(s) are promoted to an L3 table, identity-filled with ATTR_DATA, then exec pages
     // overwritten). Pushes the L2 + every L3 as backings; the caller stage-2-maps them. NEVER
@@ -1635,10 +1653,10 @@ impl Box_ {
         backings.push(Backing { host: l2_host, ipa: PT_L2_IPA, len: l2_len });
 
         // 47-bit VA (T0SZ=17) is a 3-level walk: TTBR0 -> L1 -> L2 -> L3. Every mapped IPA is
-        // < 2^36 (one L1 entry spans 64 GiB), so only L1[0] is valid; it points at the L2 above.
+        // < IPA_LIMIT (one L1 entry spans 64 GiB), so L1[0..L2_PAGES] are valid; each points at its L2 page above.
         // The wider VA moves the hardware PAC signature to bits [54:47], above objc's 47-bit
         // ISA_MASK, so a plain-arm64 isa strip is lossless. alloc_pages returns zeroed anon pages,
-        // so L1[1..] are already invalid (a VA >= 2^36 faults).
+        // so L1[L2_PAGES..] are already invalid (a VA >= IPA_LIMIT faults).
         let (l1_host, l1_len) = alloc_pages(GRANULE);
         let l1 = unsafe { std::slice::from_raw_parts_mut(l1_host as *mut u64, 2048) };
         for (i, e) in l1.iter_mut().take(L2_PAGES).enumerate() { *e = (PT_L2_IPA + (i * GRANULE) as u64) | DESC_TABLE; }
@@ -1928,7 +1946,7 @@ impl Box_ {
         // backings, matching the field-order invariant on `pub struct Box_` above — never
         // backings first, which would munmap host pages while their stage-2 mapping is still live.
         let mut backings = Backings::new();
-        let vm = Vm::create().expect("hv_vm_create");
+        let vm = Vm::create_with_ipa(IPA_BITS).expect("hv_vm_create");
         let vcpu = Vcpu::create(&vm).expect("hv_vcpu_create");
         let map = |vm: &Vm, backings: &mut Backings, ipa: u64, src: &[u8], memsz: usize| {
             let (host, len) = alloc_pages(memsz.max(src.len()).max(GRANULE));
@@ -2343,7 +2361,7 @@ impl Box_ {
 
     /// The live stage-1 leaf descriptor for `ipa`, walking the L2/L3 the box maintains: an L3 page
     /// descriptor where the block has been promoted, otherwise the L2 block descriptor itself.
-    /// `None` when there is no live L2, the IPA is outside the 36-bit space, or the promoted L3 is
+    /// `None` when there is no live L2, the IPA is outside the guest IPA space, or the promoted L3 is
     /// not among the tracked backings. Shared by the attribute observables below.
     fn leaf_desc(&self, ipa: u64) -> Option<u64> {
         if self.l2_host.is_null() { return None; }
@@ -2678,7 +2696,7 @@ impl Box_ {
         // backings, matching the field-order invariant on `pub struct Box_` above — never
         // backings first, which would munmap host pages while their stage-2 mapping is still live.
         let mut backings = Backings::new();
-        let vm = Vm::create().expect("hv_vm_create");
+        let vm = Vm::create_with_ipa(IPA_BITS).expect("hv_vm_create");
         let vcpu = Vcpu::create(&vm).expect("hv_vcpu_create");
         let argv_b: Vec<Vec<u8>> = argv.iter().map(|a| a.clone().into_bytes()).collect();
         let mut before_tsd = |vm: &Vm, backings: &mut Backings| {
@@ -2900,7 +2918,7 @@ impl Box_ {
     /// Checked in this order, before anything is allocated. A start below 4 GiB is `KERN_INVALID_ADDRESS`
     /// (`__PAGEZERO` and the box's own low windows). The shared-region window, either commpage page, and
     /// any backing or reservation the page-rounded range overlaps are `KERN_NO_SPACE`; adjacency is free
-    /// (half-open intervals). Free is `Ok`; a range past the 36-bit IPA keeps `place_fixed`'s wall (R3).
+    /// (half-open intervals). Free is `Ok`; a range past the IPA keeps `place_fixed`'s wall (R3).
     fn fixed_answer(&self, addr: u64, size: u64) -> Result<(), u64> {
         let g = GRANULE as u64;
         let end = addr.saturating_add(size).saturating_add(g - 1) & !(g - 1);
@@ -2940,7 +2958,7 @@ impl Box_ {
         let m = mask | (GRANULE as u64 - 1);
         let ipa = if anywhere {
             if mask >= 1 << 36 {
-                retrace_arch::refuse!(Memory, "M47: unmeasured mach_vm_map mask {mask:#x}: no measured guest passes one at or above the 36-bit IPA width, and rounding the bump cursor to it would wrap in a release build");
+                retrace_arch::refuse!(Memory, "M47: unmeasured mach_vm_map mask {mask:#x}: no measured guest passes a mask of 1 << 36 or more, and rounding the bump cursor to it would wrap in a release build");
             }
             // Kernel-faithful VM_FLAGS_ANYWHERE-with-hint: search FORWARD from a non-zero hint for
             // the first free gap, treating reservations as occupied (what vm_map_enter does). When
@@ -3008,7 +3026,7 @@ impl Box_ {
         let rounded = (size + GRANULE as u64 - 1) & !(GRANULE as u64 - 1);
         let base = if anywhere {
             if mask >= 1 << 36 {
-                retrace_arch::refuse!(Memory, "M47: unmeasured mach_vm_map mask {mask:#x}: no measured guest passes one at or above the 36-bit IPA width, and rounding the bump cursor to it would wrap in a release build");
+                retrace_arch::refuse!(Memory, "M47: unmeasured mach_vm_map mask {mask:#x}: no measured guest passes a mask of 1 << 36 or more, and rounding the bump cursor to it would wrap in a release build");
             }
             if mask != 0 {
                 let m = mask | (GRANULE as u64 - 1);
@@ -3016,7 +3034,7 @@ impl Box_ {
             }
             let end = self.mmap_next + rounded;
             if end > IPA_LIMIT {
-                retrace_arch::refuse!(Memory, "guest_vm_reserve ANYWHERE overflowed 36-bit IPA space: {end:#x}");
+                retrace_arch::refuse!(Memory, "guest_vm_reserve ANYWHERE overflowed {IPA_BITS}-bit IPA space: {end:#x}");
             }
             let a = self.mmap_next;
             self.mmap_next = end;
@@ -3164,12 +3182,12 @@ impl Box_ {
     }
 
     /// Is `[ipa, ipa+len)` free of any tracked backing AND any PROT_NONE reservation, clear of the
-    /// shared-cache window, and within the 36-bit IPA space? A real `vm_map_entry` (a reservation)
+    /// shared-cache window, and within the guest IPA space? A real `vm_map_entry` (a reservation)
     /// occupies its VA on the kernel, so an ANYWHERE placement can never land inside one; excluding
     /// `reservations` here makes the emulated VM agree. (Used to decide ANYWHERE hint placement.)
     fn range_is_free(&self, ipa: u64, len: u64) -> bool {
         let end = ipa.saturating_add(len);
-        if end > IPA_LIMIT { return false; }                            // out of 36-bit IPA space
+        if end > IPA_LIMIT { return false; }                            // out of the guest IPA space
         if ipa < self.shared_region_end && SHARED_REGION_START < end { return false; } // shared-cache window
         // The VMM's lazily-mapped scratch pages: forbidden even while still absent from `backings`.
         if ipa < SCRATCH_RESERVED_END && SCRATCH_RESERVED_START < end { return false; }
@@ -3186,7 +3204,7 @@ impl Box_ {
     /// window (`range_is_free`). The optimal `a` is always either the hint itself or the page-rounded
     /// end of some occupied extent (slide right until clear stops exactly at an extent's end), so we
     /// test just those candidates in address order and take the first that fits — a deterministic
-    /// gap-edge first-fit. `None` if nothing fits below the 36-bit ceiling (caller falls back to the
+    /// gap-edge first-fit. `None` if nothing fits below the IPA ceiling (caller falls back to the
     /// bump allocator). Pure function of (hint, len, backings, reservations) — identical on record &
     /// replay, so a first-fit-placed returned address is recomputed identically and byte-checked by
     /// the replay oracle (no new mirror needed; symmetry is structural).
@@ -3255,7 +3273,7 @@ impl Box_ {
         // errno channel plumbed to its four call sites and no guest exercises it, so it fails loud
         // with a diagnosis instead of an opaque `HvError(0xfae94003)` recorder abort.
         if !Self::fixed_fits(addr, rlen) {
-            retrace_arch::refuse!(Memory, "FIXED map at {addr:#x}..{:#x} is not 16 KiB-aligned or lies outside the guest's 36-bit \
+            retrace_arch::refuse!(Memory, "FIXED map at {addr:#x}..{:#x} is not 16 KiB-aligned or lies outside the guest's {IPA_BITS}-bit \
                  IPA space", addr.saturating_add(rlen as u64));
         }
         // M48 §3f (Ruling T6-c): every FIXED path funnels through here, and none may land on a
@@ -3309,7 +3327,7 @@ impl Box_ {
     }
 
     /// Can the guest's address space hold a FIXED request for `[addr, addr+rlen)`? The guest IPA
-    /// space is 36-bit and the stage-1 tables are 16 KiB-granule, so a request that is misaligned,
+    /// space is 40-bit and the stage-1 tables are 16 KiB-granule, so a request that is misaligned,
     /// overflows, or ends above the ceiling is one the real kernel refuses with `EINVAL` — and one
     /// `hv_vm_map` refuses with `HV_BAD_ARGUMENT`, which retrace `expect`s on, converting a guest
     /// error into a recorder abort.
@@ -4221,7 +4239,7 @@ impl Box_ {
         // backings, matching the field-order invariant on `pub struct Box_` above — never
         // backings first, which would munmap host pages while their stage-2 mapping is still live.
         let mut backings = Backings::new();
-        let vm = Vm::create().expect("hv_vm_create");
+        let vm = Vm::create_with_ipa(IPA_BITS).expect("hv_vm_create");
         let vcpu = Vcpu::create(&vm).expect("hv_vcpu_create");
         for r in regions {
             let (host, len) = alloc_pages(r.bytes.len().max(GRANULE));
@@ -4285,6 +4303,9 @@ impl Box_ {
         // allocation window and mints IPAs matching the record run.
         let l2_host = backings.iter().find(|b| b.ipa == PT_L2_IPA).map(|b| b.host)
             .unwrap_or(std::ptr::null_mut());
+        if let Some(b) = backings.iter().find(|b| b.ipa == PT_L2_IPA) {
+            assert_eq!(b.len, L2_PAGES * GRANULE, "restore: the L2 array at {PT_L2_IPA:#x} is {} bytes, not {}", b.len, L2_PAGES * GRANULE);
+        }
         // Minor (a): the `next_l3` recovery below assumes every backing in the L3 window
         // [PT_L3_BASE, PT_L3_CEIL) is a single-GRANULE L3 table (that is the only thing load
         // ever allocates there). Pin that invariant so a stray non-table region in the window
@@ -5937,7 +5958,7 @@ impl Box_ {
     /// construction rather than by that accident. M6.)
     ///
     /// The index shifts mirror `build_tables` exactly: TCR_EL1.T0SZ=17 (47-bit VA) + 16 KiB granule
-    /// is a 3-level walk of 2048-entry tables — L1 [46:36] (one entry per 64 GiB), L2 [35:25] (one
+    /// is a 3-level walk of 2048-entry tables — L1 [46:36] (one entry per 64 GiB; L1[0..16] are tables), L2 [35:25] (one
     /// per `BLK` = 32 MiB), L3 [24:14] (one per `GRANULE`). With a 16 KiB granule a BLOCK descriptor
     /// is architecturally permitted only at L2, so L1 must be a table.
     ///
@@ -9233,7 +9254,7 @@ impl Box_ {
     }
 
     /// Bring-up diagnostic: walk the guest AArch64 frame-pointer chain from x29, returning up to
-    /// `max` return addresses (PAC bits stripped by masking to the 36-bit IPA space). Return
+    /// `max` return addresses (PAC bits stripped by masking to the guest IPA space). Return
     /// addresses are `pacibsp`-signed on the stack; masking recovers the raw VA (dyld ~0x1_4000_0000).
     pub fn dbg_backtrace(&self, max: usize) -> String {
         let mut s = String::new();
@@ -9243,7 +9264,7 @@ impl Box_ {
         for _ in 0..max {
             if fp == 0 || self.host_span(fp).is_none() || fp & 0x7 != 0 { break; }
             let saved_fp = self.read_u64(fp);
-            let ret = self.read_u64(fp + 8) & 0x0000_000F_FFFF_FFFF; // strip PAC bits
+            let ret = self.read_u64(fp + 8) & (IPA_LIMIT - 1); // strip PAC bits
             if ret == 0 { break; }
             s += &format!("  ret {ret:#x}\n");
             if saved_fp <= fp { break; } // stacks grow down; fp must increase up the chain
@@ -9387,7 +9408,7 @@ impl Box_ {
         // backings, matching the field-order invariant on `pub struct Box_` above — never
         // backings first, which would munmap host pages while their stage-2 mapping is still live.
         let mut backings = Backings::new();
-        let vm = Vm::create().expect("hv_vm_create");
+        let vm = Vm::create_with_ipa(IPA_BITS).expect("hv_vm_create");
         let vcpu = Vcpu::create(&vm).expect("hv_vcpu_create");
         for r in &state.mem {
             let (host, len) = alloc_pages(r.bytes.len().max(GRANULE));
@@ -9427,6 +9448,9 @@ impl Box_ {
         for (i, &v) in state.fp.iter().enumerate() { vcpu.set_simd(simd::q(i as u32), v).unwrap(); }
         let l2_host = backings.iter().find(|b| b.ipa == PT_L2_IPA).map(|b| b.host)
             .unwrap_or(std::ptr::null_mut());
+        if let Some(b) = backings.iter().find(|b| b.ipa == PT_L2_IPA) {
+            assert_eq!(b.len, L2_PAGES * GRANULE, "from_checkpoint: the L2 array at {PT_L2_IPA:#x} is {} bytes, not {}", b.len, L2_PAGES * GRANULE);
+        }
         for b in backings.iter().filter(|b| b.ipa >= PT_L3_BASE && b.ipa < PT_L3_CEIL) {
             assert_eq!(b.len, GRANULE,
                 "from_checkpoint: backing at L3-window ipa {:#x} has len {} != GRANULE", b.ipa, b.len);
@@ -9917,7 +9941,7 @@ mod stack_geometry_tests {
         assert!(guard + GRANULE as u64 <= DYN_STACK_TOP - DYN_STACK_SIZE,
             "guard page {guard:#x} overlaps the stack backing [{:#x}, {DYN_STACK_TOP:#x}) — it must \
              sit BELOW the stack it guards", DYN_STACK_TOP - DYN_STACK_SIZE);
-        const { assert!(DYN_STACK_TOP <= 1 << 36, "the stack must fit in the 36-bit guest IPA space") };
+        const { assert!(DYN_STACK_TOP <= IPA_LIMIT, "the stack must fit in the guest IPA space") };
     }
 
     // M21. The believed-stack window is derived, not typed — this pins the arithmetic both ways so
@@ -10025,5 +10049,18 @@ mod shared_region_tests {
         assert_eq!(shared_region_end_for(0x1_8000_0000, 0x1_5a00_0000), 0x3_0000_0000, "26-shaped, 5.40 GiB");
         assert_eq!(shared_region_end_for(0x1_8000_0000, 0x1_8000_0000), 0x3_0000_0000, "ends at the constant");
         assert_eq!(shared_region_end_for(0x1_8000_0000, 0x1_8000_4000), 0x3_0200_0000);
+    }
+}
+
+#[cfg(test)]
+mod ipa_tests {
+    use super::*;
+
+    #[test]
+    fn the_ipa_refusal_names_the_width_and_needs_40_bits() {
+        assert_eq!(ipa_refusal(36).as_deref(),
+            Some("this Mac's hypervisor allows a 36-bit guest address space and retrace needs 40 bits"));
+        assert_eq!(ipa_refusal(40), None);
+        assert_eq!(ipa_refusal(42), None);
     }
 }

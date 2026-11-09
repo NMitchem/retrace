@@ -209,6 +209,17 @@ fn bad_input(line: &str) -> i32 {
 }
 
 /// R2: the one line for a process the hypervisor refuses, most often for want of the entitlement.
+/// M57: what every command that creates a VM checks first, in order: the guest address width this Mac allows (§3c),
+/// then the entitlement (M50). Task 5 puts the OS check in front. `Err` is the exit code, its line printed.
+fn vm_preflight() -> Result<(), i32> {
+    if let Err(why) = retrace_core::ipa_check() {
+        say(&retrace_arch::Unsupported::new(retrace_arch::WallCategory::MacosVersion, why).line());
+        return Err(4);
+    }
+    if let Err(why) = retrace_core::hypervisor_check() { return Err(no_hypervisor(&why)); }
+    Ok(())
+}
+
 fn no_hypervisor(why: &str) -> i32 {
     let exe = std::env::current_exe().unwrap_or_else(|_| "retrace".into());
     bad_input(&format!("cannot create a VM ({why}). retrace needs the com.apple.security.hypervisor \
@@ -312,7 +323,7 @@ fn record(a: &[String]) -> i32 {
         return bad_input(&format!("the arguments and environment take {} KiB, more than retrace's limit of {} KiB - run it \
             under `env -i` with only what the program needs", size.div_ceil(1024), retrace_core::START_ARGS_LIMIT / 1024));
     }
-    if let Err(why) = retrace_core::hypervisor_check() { return no_hypervisor(&why); }
+    if let Err(code) = vm_preflight() { return code; }
     let summary = if dynamic {
         let dyld_path = exe.dylinker.clone().unwrap_or_else(|| retrace_guest::DYLD_PATH.to_string());
         let dyld_bytes = std::fs::read(&dyld_path).unwrap_or_else(|e| panic!("read dyld {dyld_path}: {e}"));
@@ -336,7 +347,7 @@ fn replay(a: &[String]) -> i32 {
     let Some(trace) = a.get(2) else { return bad_input("usage: retrace replay <trace>") };
     if let Err(e) = std::fs::metadata(trace) { return bad_input(&format!("cannot read {trace}: {e}")); }
     if let Err(line) = check_recording(trace) { return bad_input(&line); }
-    if let Err(why) = retrace_core::hypervisor_check() { return no_hypervisor(&why); }
+    if let Err(code) = vm_preflight() { return code; }
     match retrace_core::replay_opts(Path::new(trace), Some(Box::new(LiveOutput::default()))) {
         Ok(r) => finish(r.fall_throughs, &r.outcome),
         Err(d) => {
@@ -373,7 +384,7 @@ fn debug_cmd(a: &[String]) -> i32 {
     let (Some(trace), Some(script)) = (a.get(2), script) else {
         return bad_input("usage: retrace debug <trace> --script '<cmds>'");
     };
-    if let Err(why) = retrace_core::hypervisor_check() { return no_hypervisor(&why); }
+    if let Err(code) = vm_preflight() { return code; }
     match debug::run_script(Path::new(trace), script, &mut std::io::stdout()) {
         Ok(()) => 0,
         Err(e) => { say(&format!("DEBUG ERROR: {e}")); 5 }
@@ -390,7 +401,7 @@ fn gdbserver_cmd(a: &[String]) -> i32 {
     let (Some(trace), Some(port), Some(exe)) = (a.get(2).filter(|t| !t.starts_with("--")), port, exe) else {
         return bad_input("usage: retrace gdbserver <trace> [--port <n>] [--exe <path>]");
     };
-    if let Err(why) = retrace_core::hypervisor_check() { return no_hypervisor(&why); }
+    if let Err(code) = vm_preflight() { return code; }
     match gdbserver::serve(Path::new(trace), port, exe) {
         Ok(()) => 0,
         Err(e) => { say(&format!("GDBSERVER ERROR: {e}")); 5 }

@@ -361,7 +361,7 @@ pub fn script_argv(line: &[u8], script_path: &[u8], argv: &[Vec<u8>]) -> Result<
 /// point of no return (`stage_map` asserts alignment and `hv_vm_map` fails on overlap, both panics past it). A segment
 /// must start on a 16 KiB granule; and none may overlap another (the exe at its own vmaddrs, dyld at
 /// `DYLD_BASE`), the box-owned low range `[0, DYN_STACK_TOP)` (trampoline, page tables, signing and TLBI stubs, TSD,
-/// stack), the two commpage granules, or the shared region, or end past the 36-bit IPA space. The nano band and
+/// stack), the two commpage granules, or the shared region, or end past the 40-bit IPA space. The nano band and
 /// the mmap area are not checked: they are the program's own reservations, made after the image.
 pub fn image_layout_refusal(exe: &Loaded, dyld: &Loaded, shared_region_end: u64) -> Option<String> {
     let g = GRANULE as u64;
@@ -374,7 +374,7 @@ pub fn image_layout_refusal(exe: &Loaded, dyld: &Loaded, shared_region_end: u64)
             }
             let len = (s.memsz.max(s.data.len()).max(GRANULE) as u64).checked_next_multiple_of(g);
             let Some(end) = len.and_then(|len| va.checked_add(len)).filter(|&e| e <= crate::IPA_LIMIT) else {
-                return Some(format!("{who} has a segment at {va:#x} past the 36-bit guest address space"));
+                return Some(format!("{who} has a segment at {va:#x} past the {}-bit guest address space", crate::IPA_BITS));
             };
             spans.push((va, end, format!("{who}'s segment at {va:#x}")));
         }

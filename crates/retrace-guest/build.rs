@@ -656,6 +656,15 @@ fn main() {
         .status().expect("clang vmfixed_dyn");
     assert!(status.success(), "vmfixed_dyn guest build failed");
 
+    // ipa40_dyn: M57 t3 (spec §3c) fixture. Same recipe as hello_dyn.
+    let src = format!("{}/c/ipa40_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/ipa40_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang ipa40_dyn");
+    assert!(status.success(), "ipa40_dyn guest build failed");
+
     // tid_dyn: M52 t2 (spec §3c) fixture. Same recipe as hello_dyn.
     let src = format!("{}/c/tid_dyn.c", env!("CARGO_MANIFEST_DIR"));
     let bin = format!("{out}/tid_dyn");

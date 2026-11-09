@@ -187,13 +187,14 @@ fn a_store_to_retraces_page_table_page_faults_and_its_handler_replays() {
     assert_eq!(rec.stdout, want);
     let ev = Reader::open(&trace).unwrap();
     assert!(ev.iter().any(|e| matches!(e, Event::SignalDelivery { sig: 11, si_addr: 0x8000, .. })), "a delivery at 0x8000");
-    // L2[0], the first word of the table page at 0x8000, is block 0's L3 table descriptor: the
-    // same in the opening and the final snapshot, and never the 7 the guest stored.
+    // M57: the L2 array moved to PT_L2_IPA. L2[0], its first word, is block 0's L3 table descriptor: the
+    // same in the opening and the final snapshot, and never the 7 the guest stored at 0x8000.
+    const L2: u64 = retrace_box::PT_L2_IPA;
     let l2_0 = |e: &Event| match e {
         Event::Snapshot { mem, .. } => mem.iter()
-            .find(|r| r.ipa <= 0x8000 && 0x8000 < r.ipa + r.bytes.len() as u64)
-            .map(|r| { let o = (0x8000 - r.ipa) as usize; u64::from_le_bytes(r.bytes[o..o + 8].try_into().unwrap()) })
-            .expect("the L2 table page is in the snapshot"),
+            .find(|r| r.ipa <= L2 && L2 < r.ipa + r.bytes.len() as u64)
+            .map(|r| { let o = (L2 - r.ipa) as usize; u64::from_le_bytes(r.bytes[o..o + 8].try_into().unwrap()) })
+            .expect("the L2 array is in the snapshot"),
         other => panic!("not a snapshot: {other:?}"),
     };
     let (first, last) = (l2_0(&ev[0]), l2_0(&ev[ev.len() - 1]));

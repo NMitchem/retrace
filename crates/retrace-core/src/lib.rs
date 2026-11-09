@@ -11,7 +11,7 @@ use retrace_arch::{wall, Unsupported, WallCategory, SYS_EXIT};
 pub use retrace_box::thread::{BlockReason, ThreadState, ThreadCtx};
 pub use retrace_box::{Excl, SetBy};
 pub use retrace_box::EXE_BASE;
-pub use retrace_box::hypervisor_check;
+pub use retrace_box::{hypervisor_check, ipa_check};
 pub use retrace_box::Stream;
 pub use retrace_box::{start_args_bytes, START_ARGS_LIMIT};
 
