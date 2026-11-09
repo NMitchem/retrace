@@ -238,9 +238,9 @@ retrace runs on macOS 26 and 27, at any point release. On another major every co
 
 Every recording carries the macOS version, build and shared-cache UUID of the Mac that made it, and **a recording replays only on the macOS build that made it**. Replaying one on a Mac with a different shared cache is refused with `<trace> was recorded on macOS <product> (<build>) with a different shared cache`, exit 2. A recording made by an earlier retrace is refused by its format, as before.
 
-retrace reads the dyld shared cache's own header to find its files, and checks each file against the subcache table there. A cache laid out in a way retrace has not met is refused with `has a shared cache retrace does not recognise`, naming the host's macOS version and build, rather than mis-read.
+retrace reads the dyld shared cache's own header to find its files, and checks each file against the subcache table there. A cache laid out in a way retrace has not met is refused, exit 4, with `has a shared cache retrace does not recognise: <why>`, naming the host's macOS version and build, rather than mis-read.
 
-The guest's physical address space is 40 bits (1 TiB), because macOS 27's malloc reserves 24 GiB at a random address above 448 GiB. A Mac whose hypervisor allows fewer than 40 bits (`hv_vm_config_get_max_ipa_size`) is refused before any VM is made, with `this Mac's hypervisor allows a <n>-bit guest address space and retrace needs 40 bits`. A guest that maps FIXED at or past 1 TiB still gets the wall or `EINVAL` it got at 64 GiB before.
+The guest's physical address space is 40 bits (1 TiB), because macOS 27's malloc reserves 24 GiB at a random address above 448 GiB. A Mac whose hypervisor allows fewer than 40 bits (`hv_vm_config_get_max_ipa_size`) is refused before any VM is made, exit 4, with `this Mac's hypervisor allows a <n>-bit guest address space and retrace needs 40 bits`. A guest that maps FIXED at or past 1 TiB still gets the wall or `EINVAL` it got at 64 GiB before.
 
 ## Incomplete recordings
 

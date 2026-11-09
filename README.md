@@ -81,8 +81,10 @@ script.
 [`docs/current-state.md`](docs/current-state.md#known-limits) has every limit and the measurement
 behind it. These are the ones you'll hit first:
 
-- macOS 26 on Apple Silicon only. retrace depends on measured behaviour of macOS 26 internals (dyld,
-  libpthread, libdispatch, the shared cache), so an OS update can break it.
+- macOS 26 or 27 on Apple Silicon only. retrace depends on measured behaviour of macOS internals (dyld,
+  libpthread, libdispatch, the shared cache), so an OS update can break it; another major is refused until it is
+  measured. macOS 27 is measured (27.2); macOS 26 was measured at 26.5.2 and is kept by construction, not
+  re-measured since. A recording replays only on the macOS build that made it.
 - Threads run one at a time and switch only when one blocks or exits. That keeps the schedule
   replayable without recording it, but races that need preemption won't reproduce and parallel
   programs run serially. A thread that spins waiting for another one, without ever blocking, hangs
@@ -117,7 +119,7 @@ behind it. These are the ones you'll hit first:
 
 ## Performance
 
-Median of 5 runs with `tools/bench.py`, Apple M4 Pro, macOS 26.5.2, release build, 2026-10-04:
+Median of 5 runs with `tools/bench.py`, Apple M4 Pro, release build. The figures on macOS 27.2 (26B123) are ⟪TBD:bench⟫; the table is the last measurement, on macOS 26.5.2, 2026-10-04:
 
 | workload | native | record | replay | recorder RSS | trace |
 |---|---|---|---|---|---|
@@ -145,7 +147,7 @@ Until `v0.1.0` is tagged, the formula has no stable version: install with
 `brew install --HEAD nmitchem/retrace/retrace`.
 
 Homebrew builds retrace from source with the pinned Rust toolchain and signs it with the hypervisor
-entitlement. You need macOS 26 on Apple Silicon and the Command Line Tools for lldb
+entitlement. You need macOS 26 or 27 on Apple Silicon (27.2 and 26.5.2 are the measured builds) and the Command Line Tools for lldb
 (`xcode-select --install`). No root, no Apple developer account, and SIP can stay on.
 
 To build it yourself you need a Rust toolchain (`rust-toolchain.toml` pins the version):
@@ -221,7 +223,7 @@ The original design is in
 
 ## Contributing
 
-There's no CI: the tests need macOS 26 on Apple Silicon and a working `hv_vm_create`, which hosted
+There's no CI: the tests need macOS 26 or 27 on Apple Silicon and a working `hv_vm_create`, which hosted
 macOS runners (themselves VMs) don't provide. Run `just gate` locally and paste the counts;
 [`docs/current-state.md`](docs/current-state.md#testing) explains why it has to be chunked and why
 `--test-threads=1` is required.
