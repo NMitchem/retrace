@@ -9159,6 +9159,9 @@ impl Box_ {
     }
 
     /// Capture all backings + architectural registers as an Event::Snapshot.
+    /// M57 §3e: the UUID of the shared cache this dynamic guest loaded, `None` for a static one.
+    pub fn cache_uuid(&self) -> Option<[u8; 16]> { self.cache.as_ref().map(|c| c.uuid()) }
+
     pub fn snapshot(&self) -> retrace_trace::Event {
         let mut mem = Vec::new();
         for bk in self.backings.iter() {
@@ -9738,6 +9741,12 @@ fn cache_wall(e: cache::CacheError) -> ! {
 
 fn load_host_cache() -> CacheMeta {
     CacheMeta::load(DEFAULT_CACHE_PATH).unwrap_or_else(|e| cache_wall(e))
+}
+
+/// M57 §3e: this Mac's shared cache UUID (the main header's bytes 0x58..0x68), for the replay-side host pin. An
+/// error is the text of why the header could not be read; this never walls or panics.
+pub fn host_cache_uuid() -> Result<[u8; 16], String> {
+    cache::read_main_header(DEFAULT_CACHE_PATH).map(|h| h.uuid).map_err(|e| e.to_string())
 }
 
 fn host_cache_header() -> cache::MainHeader {

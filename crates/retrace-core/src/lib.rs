@@ -462,7 +462,10 @@ fn record_sigpipe(w: &mut Writer, b: &mut Box_, count: &mut usize, thread: u32, 
 }
 
 fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>) -> Result<RecordSummary, String> {
-    let mut w = Writer::create(trace_path).map_err(|e| format!("create trace: {e}"))?;
+    // M57 §3e: the real host, never the startup gate's override, so a recording never carries a stand-in.
+    let os = retrace_arch::host_os();
+    let host = retrace_trace::Host { product: os.product, build: os.build, cache_uuid: b.cache_uuid() };
+    let mut w = Writer::create_with_host(trace_path, &host).map_err(|e| format!("create trace: {e}"))?;
     let mut count = 0usize;
     // M54 C10: retrace's own 0/1/2, which the console slots map to, start without FD_CLOEXEC, as a process's
     // do natively, so `cloexec_on_host` reads only what the guest set. Before the opening snapshot; record only.
@@ -2226,8 +2229,25 @@ pub enum Armed {
 #[derive(Clone)]
 pub struct DecodedTrace { events: Rc<[Event]>, truncated: bool }
 
+/// M57 §3e (R4): why `trace` cannot replay on this Mac, or None. Only a recording carrying a cache UUID is checked;
+/// a static one, a torn header, another format and an unreadable file give None and are left to `DecodedTrace::load`.
+pub fn host_refusal(trace: &Path) -> Option<String> {
+    let host = retrace_trace::Reader::host(trace).ok().flatten()?;
+    let recorded = host.cache_uuid?;
+    let base = format!(
+        "{} was recorded on macOS {} ({}) with a different shared cache; a recording replays only on the macOS build that made it",
+        trace.display(), host.product, host.build);
+    match retrace_box::host_cache_uuid() {
+        Ok(live) if live == recorded => None,
+        Ok(_) => Some(base),
+        Err(e) => Some(format!("{base} (this Mac's shared cache could not be read: {e})")),
+    }
+}
+
 impl DecodedTrace {
     pub fn load(trace_path: &Path) -> Result<Self, String> {
+        // M57 §3e backstop: a foreign cache is refused before anything is decoded or restored.
+        if let Some(why) = host_refusal(trace_path) { return Err(why); }
         let (events, truncated) = retrace_trace::Reader::open_checked(trace_path)
             .map_err(|e| format!("cannot open trace: {e}"))?;
         // M47: nothing kept because the header names ANOTHER format version means a different

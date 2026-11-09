@@ -172,7 +172,7 @@ fn run(a: &[String]) -> i32 {
     match a.get(1).map(String::as_str) {
         Some("record") => record(a),
         Some("record-dyn") => bad_input("record-dyn is now record: retrace record [-o <trace>] <program> [<args>...]"),
-        Some("--version" | "-V") => { say_out(&format!("retrace {}", env!("CARGO_PKG_VERSION"))); 0 }
+        Some("--version" | "-V") => { say_out(&format!("retrace {} ({})", env!("CARGO_PKG_VERSION"), retrace_arch::host::supported_text())); 0 }
         Some("--help" | "-h" | "help") => { say_out(&help()); 0 }
         Some("replay") => replay(a),
         Some("debug") => debug_cmd(a),
@@ -208,9 +208,26 @@ fn bad_input(line: &str) -> i32 {
     2
 }
 
+/// M57 §3e: the macOS the startup check reads. In a debug build only, `RETRACE_DEBUG_MACOS=<product>,<build>` stands in
+/// for it, so `osgate_e2e` can show the refusal for a major this Mac does not run. A release build has no such variable
+/// (RETRACE_DEBUG_PANIC's precedent, `run`).
+fn gate_os() -> retrace_arch::HostOs {
+    #[cfg(debug_assertions)]
+    if let Some(os) = std::env::var("RETRACE_DEBUG_MACOS").ok().as_deref().and_then(retrace_arch::host::parse_os_override) {
+        return os;
+    }
+    retrace_arch::host_os()
+}
+
+/// M57 §3e (R4): a recording made on another macOS build is bad input, before any VM work.
+fn host_pin(trace: &str) -> Result<(), i32> {
+    match retrace_core::host_refusal(Path::new(trace)) { Some(why) => Err(bad_input(&why)), None => Ok(()) }
+}
+
 /// M57: what every command that creates a VM checks first, in order: the guest address width this Mac allows (§3c),
-/// then the entitlement (M50). Task 5 puts the OS check in front. `Err` is the exit code, its line printed.
+/// then the entitlement (M50), after the OS gate (§3e). `Err` is the exit code, its line printed.
 fn vm_preflight() -> Result<(), i32> {
+    if let Some(u) = retrace_arch::host::os_refusal(&gate_os()) { say(&u.line()); return Err(4); }
     if let Err(why) = retrace_core::ipa_check() {
         say(&retrace_arch::Unsupported::new(retrace_arch::WallCategory::MacosVersion, why).line());
         return Err(4);
@@ -348,6 +365,7 @@ fn replay(a: &[String]) -> i32 {
     if let Err(e) = std::fs::metadata(trace) { return bad_input(&format!("cannot read {trace}: {e}")); }
     if let Err(line) = check_recording(trace) { return bad_input(&line); }
     if let Err(code) = vm_preflight() { return code; }
+    if let Err(code) = host_pin(trace) { return code; }
     match retrace_core::replay_opts(Path::new(trace), Some(Box::new(LiveOutput::default()))) {
         Ok(r) => finish(r.fall_throughs, &r.outcome),
         Err(d) => {
@@ -385,6 +403,7 @@ fn debug_cmd(a: &[String]) -> i32 {
         return bad_input("usage: retrace debug <trace> --script '<cmds>'");
     };
     if let Err(code) = vm_preflight() { return code; }
+    if let Err(code) = host_pin(trace) { return code; }
     match debug::run_script(Path::new(trace), script, &mut std::io::stdout()) {
         Ok(()) => 0,
         Err(e) => { say(&format!("DEBUG ERROR: {e}")); 5 }
@@ -402,6 +421,7 @@ fn gdbserver_cmd(a: &[String]) -> i32 {
         return bad_input("usage: retrace gdbserver <trace> [--port <n>] [--exe <path>]");
     };
     if let Err(code) = vm_preflight() { return code; }
+    if let Err(code) = host_pin(trace) { return code; }
     match gdbserver::serve(Path::new(trace), port, exe) {
         Ok(()) => 0,
         Err(e) => { say(&format!("GDBSERVER ERROR: {e}")); 5 }

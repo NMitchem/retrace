@@ -28,14 +28,15 @@ fn swarm_over(bin: &str, tag: &str, guest: &str, expected_stdout: &[u8]) {
         assert!(rec.status.success(), "seed {seed}: record failed: {}", String::from_utf8_lossy(&rec.stderr));
 
         // Inject a seeded trace-IO fault. record_offsets are cumulative on-disk record
-        // boundaries computed exactly as the writer framed them (4-byte magic header, then
-        // each record's 8-byte header + body), so TruncateAfter(index) cuts on a real record
-        // boundary. The accumulator starts at 4 (past the magic), not 0.
+        // boundaries computed exactly as the writer framed them (the magic and the M57 host
+        // record come first, then each record's 8-byte header + body), so TruncateAfter(index) cuts on a real
+        // record boundary. The accumulator starts past the host record, not at 0.
         let events = retrace_trace::Reader::open(&trace).unwrap();
         let mut bytes = std::fs::read(&trace).unwrap();
-        let mut offsets = vec![4usize];
+        let first = retrace_trace::first_event_offset(&bytes).unwrap();
+        let mut offsets = vec![first];
         {
-            let mut off = 4usize;
+            let mut off = first;
             for e in &events {
                 let body = bincode::serialize(e).unwrap();
                 off += 8 + body.len();

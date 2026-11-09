@@ -101,6 +101,7 @@ pub fn run(a: &[String]) -> i32 {
     if let Err(e) = std::fs::metadata(trace) { return crate::bad_input(&format!("cannot read {trace}: {e}")); }
     if let Err(line) = crate::check_recording(trace) { return crate::bad_input(&line); }
     if let Err(code) = crate::vm_preflight() { return code; }
+    if let Err(code) = crate::host_pin(trace) { return code; }
     let lldb = match lldb_usable() { Ok(p) => p, Err(e) => return crate::bad_input(&e) };
 
     let dir = match private_dir() { Ok(d) => d, Err(e) => return crate::bad_input(&e) };
