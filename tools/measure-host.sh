@@ -76,9 +76,11 @@ cleanenv() { lim 300 env -i PATH=/usr/bin:/bin HOME="${HOME:-/}" "$@"; }
 { echo "# $(sw_vers -productVersion) $(sw_vers -buildVersion)"; echo "# retrace: $R"; shasum -a 256 "$R"; } >> "$SUM"
 run() {
   local n=$1; shift; local t=$B/traces/$n.retrace
-  cleanenv "$@" > "$B/$n.native.out" 2> "$B/$n.native.err"; local ne=$?
-  cleanenv "$R" record -o "$t" "$@" > "$B/$n.record.out" 2> "$B/$n.record.err"; local re=$?
-  lim 300 "$R" replay "$t" > "$B/$n.replay.out" 2> "$B/$n.replay.err"; local pe=$?
+  # stdin is /dev/null for all three: an inherited stdin can be a socket (an agent's or an IDE's shell), and node's
+  # libuv then calls getsockname on fd 0, a wall unrelated to the host being measured (M57 Task K review).
+  cleanenv "$@" < /dev/null > "$B/$n.native.out" 2> "$B/$n.native.err"; local ne=$?
+  cleanenv "$R" record -o "$t" "$@" < /dev/null > "$B/$n.record.out" 2> "$B/$n.record.err"; local re=$?
+  lim 300 "$R" replay "$t" < /dev/null > "$B/$n.replay.out" 2> "$B/$n.replay.err"; local pe=$?
   local same=no
   cmp -s "$B/$n.native.out" "$B/$n.record.out" && cmp -s "$B/$n.record.out" "$B/$n.replay.out" && same=yes
   local sz; sz=$(stat -f %z "$t" 2>/dev/null || echo -)
@@ -92,7 +94,7 @@ run git       "$G" --version
 run jq        /opt/homebrew/bin/jq -n '[range(0;100000)] | add'
 run python    /opt/homebrew/bin/python3 -c 'print(1)'
 run node      /opt/homebrew/bin/node -e 'console.log(1)'
-lim 300 "$R" debug "$B/traces/crashy.retrace" --script 'continue; where; regs; reverse-stepi; where; reverse-continue; where' \
+lim 300 "$R" debug "$B/traces/crashy.retrace" < /dev/null --script 'continue; where; regs; reverse-stepi; where; reverse-continue; where' \
   > "$B/crashy.debug.out" 2> "$B/crashy.debug.err"
 echo "debug     exit=$?" >> "$SUM"
 
