@@ -209,6 +209,114 @@ struct Mapping {
     slide_info: Option<SlideInfo5>,
 }
 
+/// Why the cache could not be loaded. `Layout` is a valid-looking cache retrace does not recognise (a wall,
+/// M57 §3a); `Io` is a read error on a file that exists (a bug).
+#[derive(Debug)]
+pub enum CacheError {
+    Io(io::Error),
+    Layout(String),
+}
+
+impl From<io::Error> for CacheError {
+    fn from(e: io::Error) -> Self {
+        CacheError::Io(e)
+    }
+}
+
+impl std::fmt::Display for CacheError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CacheError::Io(e) => write!(f, "{e}"),
+            CacheError::Layout(s) => write!(f, "{s}"),
+        }
+    }
+}
+
+/// The fields of the main file's header retrace relies on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MainHeader {
+    pub base: u64,
+    pub size: u64,
+    pub uuid: [u8; 16],
+}
+
+/// One entry of the header's subcache array: where the file starts in the cache and its suffix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SubcacheEntry {
+    vm_offset: u64,
+    suffix: String,
+}
+
+/// The shared region's start, which retrace's loader and dyld's 294 answer both assume.
+const EXPECTED_BASE: u64 = 0x1_8000_0000;
+
+fn layout<T>(s: String) -> Result<T, CacheError> {
+    Err(CacheError::Layout(s))
+}
+
+/// Read and validate the main file's header (M57 §3a).
+pub fn read_main_header(path: impl AsRef<Path>) -> Result<MainHeader, CacheError> {
+    let path = path.as_ref();
+    let file = match File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return layout(format!("there is no shared cache at {}", path.display()))
+        }
+        Err(e) => return Err(e.into()),
+    };
+    let mut hdr = [0u8; 0x200];
+    match file.read_exact_at(&mut hdr, 0) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
+            return layout(format!("{} does not start with a dyld shared cache magic", path.display()))
+        }
+        Err(e) => return Err(e.into()),
+    }
+    if &hdr[0..7] != b"dyld_v1" {
+        return layout(format!("{} does not start with a dyld shared cache magic", path.display()));
+    }
+    let mapping_offset = u32le(&hdr, 0x10);
+    if mapping_offset < 0x200 {
+        return layout(format!("its header is {mapping_offset:#x} bytes, and retrace reads fields up to 0x200"));
+    }
+    let base = u64le(&hdr, 0xE0);
+    let size = u64le(&hdr, 0xE8);
+    if base != EXPECTED_BASE {
+        return layout(format!("its window starts at {base:#x}, and retrace places the shared region at 0x180000000"));
+    }
+    let count = u32le(&hdr, 0x18C);
+    if count > 4096 {
+        return layout(format!("its subcache array has {count} entries, and retrace reads at most 4096"));
+    }
+    let mut uuid = [0u8; 16];
+    uuid.copy_from_slice(&hdr[0x58..0x68]);
+    Ok(MainHeader { base, size, uuid })
+}
+
+/// Read the main header's subcache array (empty when the header has none).
+fn read_subcache_array(file: &File) -> Result<Vec<SubcacheEntry>, CacheError> {
+    let mut h = [0u8; 8];
+    file.read_exact_at(&mut h, 0x188)?;
+    let off = u32le(&h, 0) as u64;
+    let count = u32le(&h, 4) as u64;
+    if off == 0 || count == 0 {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::with_capacity(count as usize);
+    for i in 0..count {
+        let mut e = [0u8; 56];
+        file.read_exact_at(&mut e, off + i * 56)?;
+        let vm_offset = u64le(&e, 16);
+        let raw = &e[24..56];
+        let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+        let Ok(suffix) = std::str::from_utf8(&raw[..end]) else {
+            return layout(format!("subcache array entry {i} has a file suffix that is not UTF-8"));
+        };
+        out.push(SubcacheEntry { vm_offset, suffix: suffix.to_string() });
+    }
+    Ok(out)
+}
+
 /// A subcache file (the main cache file, or one of its numbered `.NN[.suffix]` companions) and
 /// its parsed mappings. `file` is kept open (the pager `pread`s pristine cache pages from it on
 /// demand — SPTM forbids ever `hv_vm_map`ing a file page); `None` only for synthetic
@@ -216,6 +324,8 @@ struct Mapping {
 #[derive(Debug)]
 struct Subcache {
     path: PathBuf,
+    /// `""` for the main file, `.NN[.dylddata|.dyldreadonly|.dyldlinkedit]` otherwise.
+    suffix: String,
     file: Option<File>,
     mappings: Vec<Mapping>,
 }
@@ -238,6 +348,7 @@ pub struct CacheRegion<'a> {
 /// route a faulting cache IPA to the right subcache file, page, and (for DATA) slide-info.
 #[derive(Debug)]
 pub struct CacheMeta {
+    uuid: [u8; 16],
     base: u64,
     size: u64,
     /// The per-process dynamic data region the kernel creates at the top of the shared region
@@ -257,12 +368,14 @@ pub struct CacheMeta {
 /// Read one subcache file's `dyld_cache_header` + `mapping_and_slide_info[]` (and each
 /// mapping's slide-info blob, if any). Panics loudly if a slide-info blob isn't version 5 —
 /// this loader only understands v5 and must never silently mis-load an unsupported format.
-fn read_subcache(path: &Path) -> io::Result<(u64, u64, Vec<Mapping>, File)> {
+fn read_subcache(path: &Path) -> Result<(u64, u64, Vec<Mapping>, File), CacheError> {
     let file = File::open(path)?;
 
     let mut hdr = [0u8; 0x140];
     file.read_exact_at(&mut hdr, 0)?;
-    assert_eq!(&hdr[0..7], b"dyld_v1", "{}: not a dyld shared-cache header (bad magic)", path.display());
+    if &hdr[0..7] != b"dyld_v1" {
+        return layout(format!("{} does not start with a dyld shared cache magic", path.display()));
+    }
 
     let shared_region_start = u64le(&hdr, 0xE0);
     let shared_region_size = u64le(&hdr, 0xE8);
@@ -293,17 +406,18 @@ fn read_subcache(path: &Path) -> io::Result<(u64, u64, Vec<Mapping>, File)> {
     Ok((shared_region_start, shared_region_size, mappings, file))
 }
 
-/// Read one `dyld_cache_slide_info5` blob at file offset `offset`. Asserts `version == 5`
-/// (fails loudly on anything else — no silent mis-load of an unhandled slide format).
-fn read_slide_info5(file: &File, path: &Path, offset: u64) -> io::Result<SlideInfo5> {
+/// Read one `dyld_cache_slide_info5` blob at file offset `offset`. A version other than 5 is a `Layout`
+/// refusal — no silent mis-load of an unhandled slide format.
+fn read_slide_info5(file: &File, path: &Path, offset: u64) -> Result<SlideInfo5, CacheError> {
     let mut prefix = [0u8; 0x18];
     file.read_exact_at(&mut prefix, offset)?;
     let version = u32le(&prefix, 0x00);
-    assert_eq!(
-        version, 5,
-        "{}: unsupported slide-info version {version} at file offset 0x{offset:x} (only v5 is handled)",
-        path.display()
-    );
+    if version != 5 {
+        return layout(format!(
+            "{}: slide-info version {version} at file offset {offset:#x}; retrace reads version 5",
+            path.display()
+        ));
+    }
     let page_size = u32le(&prefix, 0x04);
     let page_starts_count = u32le(&prefix, 0x08) as u64;
     let value_add = u64le(&prefix, 0x10);
@@ -315,48 +429,97 @@ fn read_slide_info5(file: &File, path: &Path, offset: u64) -> io::Result<SlideIn
     Ok(SlideInfo5 { page_size, value_add, page_starts })
 }
 
-/// Assert that the subcaches discovered by [`CacheMeta::load`]'s suffix-probe loop actually
-/// cover the cache's whole VA window `[base, base + size)`, so an enumeration that stopped
-/// early (a missing/renamed subcache file) is a loud load-time panic instead of a silent
-/// `region_of` -> `None` for the un-enumerated tail.
-///
-/// Calibrated against the real cache (`spikes/covprobe.c`, run against
-/// `dyld_shared_cache_arm64e` + its 12 subcaches on this host): mappings are **not** gapless
-/// byte-for-byte — a subcache's own mapping list can have multi-megabyte gaps between segments
-/// (e.g. unmapped guard space between `.02.dylddata`'s `__DATA_CONST` and `__AUTH_CONST`
-/// mappings), so we don't require that. But every subcache *file* boundary is exactly
-/// contiguous with the next (main -> `.01` -> `.02.dylddata` -> ... -> `.12.dyldlinkedit`, each
-/// one's lowest mapping address equals the previous file's highest mapping end, verified on the
-/// real cache), and the whole chain ends within one `CACHE_PAGE_SIZE` of the window's end (the
-/// real cache's last 0x4000 bytes are an unmapped trailing guard page). So: assert each
-/// subcache file's mappings pick up exactly where the previous file's left off, and that the
-/// last one reaches within a page of the window end.
-fn assert_covers_window(base: u64, size: u64, subcaches: &[Subcache]) {
+fn span(sc: &Subcache) -> Option<(u64, u64)> {
+    let lo = sc.mappings.iter().map(|m| m.address).min()?;
+    let hi = sc.mappings.iter().map(|m| m.address + m.size).max()?;
+    Some((lo, hi))
+}
+
+/// The pre-M57 rule, kept for a header with no subcache array: every subcache file starts exactly where the
+/// previous files' mappings end and the chain reaches within a page of the window's end.
+fn check_contiguous(base: u64, size: u64, subcaches: &[Subcache]) -> Result<(), String> {
     let window_end = base + size;
     let mut cover_end = base;
     for sc in subcaches {
-        if sc.mappings.is_empty() {
-            continue;
+        let Some((sc_min, sc_max)) = span(sc) else { continue };
+        if sc_min != cover_end {
+            return Err(format!(
+                "cache routing table incomplete: {} subcache file(s) found, but {} starts at 0x{sc_min:x} \
+                 while the previous subcache(s) only covered up to 0x{cover_end:x} — first uncovered \
+                 address 0x{cover_end:x}. Subcache enumeration likely stopped early or skipped a file.",
+                subcaches.len(),
+                sc.path.display(),
+            ));
         }
-        let sc_min = sc.mappings.iter().map(|m| m.address).min().unwrap();
-        let sc_max = sc.mappings.iter().map(|m| m.address + m.size).max().unwrap();
-        assert!(
-            sc_min >= cover_end,
-            "cache routing table incomplete: {} subcache file(s) found, but {} starts at 0x{sc_min:x} \
-             while the previous subcache(s) only covered up to 0x{cover_end:x} — first uncovered \
-             address 0x{cover_end:x}. Subcache enumeration likely stopped early or skipped a file.",
-            subcaches.len(),
-            sc.path.display(),
-        );
         cover_end = cover_end.max(sc_max);
     }
-    assert!(
-        cover_end + CACHE_PAGE_SIZE >= window_end,
-        "cache routing table incomplete: {} subcache file(s) found, covering only up to 0x{cover_end:x}, \
-         but the cache window is [0x{base:x}, 0x{window_end:x}) — first uncovered address 0x{cover_end:x}. \
-         Subcache enumeration likely stopped before the last subcache.",
-        subcaches.len(),
-    );
+    if cover_end + CACHE_PAGE_SIZE < window_end {
+        return Err(format!(
+            "cache routing table incomplete: {} subcache file(s) found, covering only up to 0x{cover_end:x}, \
+             but the cache window is [0x{base:x}, 0x{window_end:x}) — first uncovered address 0x{cover_end:x}. \
+             Subcache enumeration likely stopped before the last subcache.",
+            subcaches.len(),
+        ));
+    }
+    Ok(())
+}
+
+/// Check the files found against the main header's own subcache array (M57 §3a). `subcaches[0]` is the main
+/// file. With no array the old contiguity rule applies unchanged.
+fn check_layout(base: u64, size: u64, subcaches: &[Subcache], array: &[SubcacheEntry]) -> Result<(), String> {
+    if array.is_empty() {
+        return check_contiguous(base, size, subcaches);
+    }
+    for e in array {
+        if !subcaches.iter().any(|sc| sc.suffix == e.suffix) {
+            return Err(format!("the header names subcache file {:?}, and there is no such file", e.suffix));
+        }
+    }
+    if array.len() != subcaches.len() - 1 {
+        let unnamed = subcaches
+            .iter()
+            .skip(1)
+            .find(|sc| !array.iter().any(|e| e.suffix == sc.suffix))
+            .map(|sc| sc.suffix.as_str())
+            .unwrap_or("?");
+        return Err(format!(
+            "the header names {} subcache file(s) but {} were found; {unnamed:?} is not in its array",
+            array.len(),
+            subcaches.len() - 1
+        ));
+    }
+    for e in array {
+        let sc = subcaches.iter().find(|sc| sc.suffix == e.suffix).unwrap();
+        if let Some((lo, _)) = span(sc) {
+            let want = base + e.vm_offset;
+            if lo != want {
+                return Err(format!(
+                    "subcache file {:?} starts at {lo:#x}, but the header's cacheVMOffset puts it at {want:#x}",
+                    e.suffix
+                ));
+            }
+        }
+    }
+    let mut spans: Vec<(u64, u64, &str)> =
+        subcaches.iter().filter_map(|sc| span(sc).map(|(lo, hi)| (lo, hi, sc.suffix.as_str()))).collect();
+    spans.sort();
+    for w in spans.windows(2) {
+        if w[1].0 < w[0].1 {
+            return Err(format!(
+                "subcache files {:?} [{:#x}, {:#x}) and {:?} [{:#x}, {:#x}) overlap",
+                w[0].2, w[0].0, w[0].1, w[1].2, w[1].0, w[1].1
+            ));
+        }
+    }
+    let end = spans.iter().map(|s| s.1).max().unwrap_or(base);
+    if end + CACHE_PAGE_SIZE < base + size {
+        return Err(format!(
+            "the subcache files cover only up to {end:#x}, but the cache window is [{base:#x}, {:#x}); \
+             Subcache enumeration likely stopped before the last subcache",
+            base + size
+        ));
+    }
+    Ok(())
 }
 
 impl CacheMeta {
@@ -368,14 +531,16 @@ impl CacheMeta {
     /// (`dylddata`, `dyldreadonly`, `dyldlinkedit`). We probe `NN = 1, 2, ...` against each known
     /// suffix and stop at the first `NN` with no match. This is a heuristic (no documented
     /// "subcache count" header field to parse instead), so `load` asserts afterwards
-    /// (`assert_covers_window`) that the discovered mappings actually cover the whole
+    /// (`check_layout`) that the discovered mappings actually cover the whole
     /// `[sharedRegionStart, sharedRegionStart + sharedRegionSize)` window — if the probe stopped
     /// before the real last subcache (e.g. a future suffix we don't know about), that is a
     /// load-time panic naming the gap, not a silent `region_of(ipa) -> None` later.
-    pub fn load(main_path: impl AsRef<Path>) -> io::Result<CacheMeta> {
+    pub fn load(main_path: impl AsRef<Path>) -> Result<CacheMeta, CacheError> {
         let main_path = main_path.as_ref();
+        let header = read_main_header(main_path)?;
 
         let (base, size, main_mappings, main_file) = read_subcache(main_path)?;
+        let array = read_subcache_array(&main_file)?;
         // dyld_cache_header.dynamicDataOffset (0x1f0) / dynamicDataMaxSize (0x1f8): the kernel-made
         // per-process region at the top of the shared region (see `dynamic_data_region`).
         let mut dd = [0u8; 16];
@@ -386,24 +551,26 @@ impl CacheMeta {
         // The cache file's (dev, ino): the kernel's FileIdTuple in the dynamic data region.
         let cmeta = std::fs::metadata(main_path)?;
         let (file_dev, file_ino) = (cmeta.dev(), cmeta.ino());
-        let mut subcaches = vec![Subcache { path: main_path.to_path_buf(), file: Some(main_file), mappings: main_mappings }];
+        let mut subcaches =
+            vec![Subcache { path: main_path.to_path_buf(), suffix: String::new(), file: Some(main_file), mappings: main_mappings }];
 
         const SUFFIXES: [&str; 4] = ["", ".dylddata", ".dyldreadonly", ".dyldlinkedit"];
         let mut n = 1u32;
         loop {
             let found = SUFFIXES
                 .iter()
-                .map(|suf| PathBuf::from(format!("{}.{n:02}{suf}", main_path.display())))
-                .find(|p| p.is_file());
-            let Some(path) = found else { break };
+                .map(|suf| format!(".{n:02}{suf}"))
+                .find(|suf| PathBuf::from(format!("{}{suf}", main_path.display())).is_file());
+            let Some(suffix) = found else { break };
+            let path = PathBuf::from(format!("{}{suffix}", main_path.display()));
             let (_, _, mappings, file) = read_subcache(&path)?;
-            subcaches.push(Subcache { path, file: Some(file), mappings });
+            subcaches.push(Subcache { path, suffix, file: Some(file), mappings });
             n += 1;
         }
 
-        assert_covers_window(base, size, &subcaches);
+        check_layout(base, size, &subcaches, &array).map_err(CacheError::Layout)?;
 
-        Ok(CacheMeta { base, size, dynamic_data_addr, dynamic_data_size: dyn_size, file_dev, file_ino, subcaches })
+        Ok(CacheMeta { uuid: header.uuid, base, size, dynamic_data_addr, dynamic_data_size: dyn_size, file_dev, file_ino, subcaches })
     }
 
     /// The `dyld_cache_dynamic_data_header` (plus the cache-path string) the kernel writes at the
@@ -427,6 +594,11 @@ impl CacheMeta {
         h[0x24..0x28].copy_from_slice(&(PATH_OFF as u32).to_le_bytes());
         h[PATH_OFF..PATH_OFF + path.len()].copy_from_slice(path);
         h
+    }
+
+    /// The main header's UUID.
+    pub fn uuid(&self) -> [u8; 16] {
+        self.uuid
     }
 
     /// The cache's VA window: `(sharedRegionStart, sharedRegionSize)` from the main header.
@@ -517,6 +689,7 @@ mod tests {
     fn fake_subcache(name: &str, ranges: &[(u64, u64)]) -> Subcache {
         Subcache {
             path: PathBuf::from(name),
+            suffix: name.to_string(),
             file: None,
             mappings: ranges
                 .iter()
@@ -525,44 +698,186 @@ mod tests {
         }
     }
 
-    #[test]
-    fn coverage_assertion_accepts_contiguous_subcaches_and_trailing_guard_page() {
-        // Mirrors the real cache's shape: subcache files are exactly contiguous with each
-        // other, and the window's last CACHE_PAGE_SIZE bytes are an unmapped trailing guard
-        // page with no backing mapping at all.
-        let base = 0x1_8000_0000u64;
-        let subcaches = vec![
-            fake_subcache("main", &[(base, 0x1000)]),
-            fake_subcache(".01", &[(base + 0x1000, 0x2000)]),
-        ];
-        let covered_end = base + 0x1000 + 0x2000;
-        let size = (covered_end - base) + CACHE_PAGE_SIZE; // window extends one guard page past coverage
-        assert_covers_window(base, size, &subcaches); // must not panic
+    const BASE: u64 = 0x1_8000_0000;
+
+    /// Build subcaches and the header array for them; each entry's offset is its file's lowest mapping.
+    fn shaped(files: &[(&str, &[(u64, u64)])]) -> (Vec<Subcache>, Vec<SubcacheEntry>) {
+        let subcaches: Vec<Subcache> = files.iter().map(|(n, r)| fake_subcache(n, r)).collect();
+        let array = files
+            .iter()
+            .skip(1)
+            .map(|(n, r)| SubcacheEntry {
+                vm_offset: r.iter().map(|x| x.0).min().unwrap() - BASE,
+                suffix: n.to_string(),
+            })
+            .collect();
+        (subcaches, array)
+    }
+
+    type NamedMaps = (String, Vec<(u64, u64)>);
+
+    /// 27.2's shape (`cache-layout-27.2.txt`): 81 subcaches, TEXT files after a gap, TEXT_STUBS contiguous.
+    fn shape27() -> (Vec<NamedMaps>, u64) {
+        let mut files = vec![("".to_string(), vec![(BASE, 0x4000u64)])];
+        let mut cur = BASE + 0x4000;
+        let mut size = 0;
+        for n in 1..=81u32 {
+            let (suf, maps): (&str, Vec<(u64, u64)>) = match n {
+                25 | 79 => (
+                    ".dylddata",
+                    vec![(cur, 0x10000), (cur + 0x10000, 0x10000), (cur + 0x20000 + 0x200_0000, 0x10000)],
+                ),
+                26 | 80 => (".dyldreadonly", vec![(cur, 0x10000)]),
+                81 => (".dyldlinkedit", vec![(cur, 0x10000)]),
+                n if n % 2 == 1 => {
+                    cur = (cur + 0x3f_ffff) & !0x3f_ffff; // next 4 MiB boundary
+                    ("", vec![(cur, 0x10000)])
+                }
+                _ => ("", vec![(cur, 0x8000)]),
+            };
+            let end = maps.iter().map(|m| m.0 + m.1).max().unwrap();
+            files.push((format!(".{n:02}{suf}"), maps));
+            cur = end;
+            size = end - BASE + CACHE_PAGE_SIZE;
+        }
+        (files, size)
+    }
+
+    fn built27() -> (Vec<Subcache>, Vec<SubcacheEntry>, u64) {
+        let (files, size) = shape27();
+        let refs: Vec<(&str, &[(u64, u64)])> = files.iter().map(|(n, r)| (n.as_str(), r.as_slice())).collect();
+        let (s, a) = shaped(&refs);
+        (s, a, size)
     }
 
     #[test]
-    #[should_panic(expected = "Subcache enumeration likely stopped before the last subcache")]
-    fn coverage_assertion_rejects_incomplete_enumeration() {
-        // Simulates a suffix-probe loop that stopped early: the discovered subcaches only
-        // cover the first slice of the window, well beyond one guard page short of the end.
-        let base = 0x1_8000_0000u64;
-        let subcaches = vec![fake_subcache("main", &[(base, 0x1000)])];
-        let size = 0x10_0000; // window is far larger than what got discovered
-        assert_covers_window(base, size, &subcaches);
+    fn with_no_array_contiguous_subcaches_and_a_trailing_guard_page_load() {
+        let (subcaches, _) = shaped(&[("", &[(BASE, 0x1000)]), (".01", &[(BASE + 0x1000, 0x2000)])]);
+        let size = 0x3000 + CACHE_PAGE_SIZE;
+        assert_eq!(check_layout(BASE, size, &subcaches, &[]), Ok(()));
     }
 
     #[test]
-    #[should_panic(expected = "Subcache enumeration likely stopped early or skipped a file")]
-    fn coverage_assertion_rejects_gap_between_subcache_files() {
-        // A gap between two discovered subcache files' mapping ranges: real subcache-file
-        // boundaries are always exactly contiguous, so this signals a skipped/misrouted file.
-        let base = 0x1_8000_0000u64;
-        let subcaches = vec![
-            fake_subcache("main", &[(base, 0x1000)]),
-            fake_subcache(".01", &[(base + 0x2000, 0x1000)]), // gap: [base+0x1000, base+0x2000)
-        ];
-        let size = 0x3000;
-        assert_covers_window(base, size, &subcaches);
+    fn with_no_array_an_early_stop_is_refused() {
+        let (subcaches, _) = shaped(&[("", &[(BASE, 0x1000)])]);
+        let e = check_layout(BASE, 0x10_0000, &subcaches, &[]).unwrap_err();
+        assert!(e.contains("Subcache enumeration likely stopped before the last subcache"), "{e}");
+    }
+
+    #[test]
+    fn a_file_whose_start_is_off_its_cache_vm_offset_is_refused() {
+        let (mut subcaches, array) = shaped(&[("", &[(BASE, 0x4000)]), (".01", &[(BASE + 0x40_0000, 0x4000)])]);
+        let size = 0x40_0000 + 0x4000 + CACHE_PAGE_SIZE;
+        assert_eq!(check_layout(BASE, size, &subcaches, &array), Ok(()));
+        subcaches[1].mappings[0].address += 0x40_0000; // the file moved 4 MiB later; its entry did not
+        let e = check_layout(BASE, size + 0x40_0000, &subcaches, &array).unwrap_err();
+        assert!(e.contains(".01") && e.contains("0x180800000") && e.contains("0x180400000"), "{e}");
+    }
+
+    #[test]
+    fn a_26_shaped_cache_loads() {
+        let (subcaches, array) = shaped(&[
+            ("", &[(BASE, 0x10000)]),
+            (".01", &[(BASE + 0x10000, 0x20000)]),
+            (".02.dylddata", &[(BASE + 0x30000, 0x10000), (BASE + 0x40000, 0x10000)]),
+            (".03.dyldreadonly", &[(BASE + 0x50000, 0x10000)]),
+            (".04.dyldlinkedit", &[(BASE + 0x60000, 0x10000)]),
+        ]);
+        assert_eq!(array.len(), 4);
+        assert_eq!(check_layout(BASE, 0x70000 + CACHE_PAGE_SIZE, &subcaches, &array), Ok(()));
+    }
+
+    #[test]
+    fn a_27_shaped_cache_loads() {
+        let (subcaches, array, size) = built27();
+        assert_eq!(array.len(), 81);
+        assert_eq!(check_layout(BASE, size, &subcaches, &array), Ok(()));
+    }
+
+    #[test]
+    fn with_no_array_the_27_shaped_cache_is_refused() {
+        let (subcaches, _, size) = built27();
+        assert!(check_layout(BASE, size, &subcaches, &[]).is_err(), "the gaps are 27's own; only the array makes them legal");
+    }
+
+    #[test]
+    fn a_missing_file_is_refused_by_its_suffix() {
+        let (mut subcaches, array, size) = built27();
+        subcaches.retain(|sc| sc.suffix != ".40");
+        let e = check_layout(BASE, size, &subcaches, &array).unwrap_err();
+        assert!(e.contains(".40"), "{e}");
+    }
+
+    #[test]
+    fn overlapping_files_are_refused() {
+        let (mut subcaches, mut array) = shaped(&[
+            ("", &[(BASE, 0x4000)]),
+            (".01", &[(BASE + 0x4000, 0x8000)]),
+            (".02", &[(BASE + 0xc000, 0x4000)]),
+        ]);
+        subcaches[2].mappings[0].address = BASE + 0x6000; // inside .01
+        array[1].vm_offset = 0x6000;
+        let e = check_layout(BASE, 0x10000 + CACHE_PAGE_SIZE, &subcaches, &array).unwrap_err();
+        assert!(e.contains(".01") && e.contains(".02") && e.contains("overlap"), "{e}");
+    }
+
+    fn temp_file(tag: &str, bytes: &[u8]) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("retrace-cache-test-{}-{tag}", std::process::id()));
+        std::fs::write(&p, bytes).unwrap();
+        p
+    }
+
+    #[test]
+    fn a_slide_info_version_other_than_5_is_a_layout_refusal() {
+        let mut b = vec![0u8; 0x18];
+        b[0] = 4;
+        let p = temp_file("slide4", &b);
+        let f = File::open(&p).unwrap();
+        let r = read_slide_info5(&f, &p, 0);
+        std::fs::remove_file(&p).ok();
+        match r {
+            Err(CacheError::Layout(m)) => assert!(m.contains("version 4"), "{m}"),
+            other => panic!("expected Layout, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_header_that_is_not_a_dyld_cache_is_a_layout_refusal() {
+        let p = temp_file("zero", &[0u8; 0x200]);
+        let r = read_main_header(&p);
+        std::fs::remove_file(&p).ok();
+        assert!(matches!(r, Err(CacheError::Layout(_))), "{r:?}");
+        let mut b = vec![0u8; 0x200];
+        b[0..7].copy_from_slice(b"dyld_v1");
+        b[0x10..0x14].copy_from_slice(&0x140u32.to_le_bytes());
+        let p = temp_file("short", &b);
+        let r = read_main_header(&p);
+        std::fs::remove_file(&p).ok();
+        match r {
+            Err(CacheError::Layout(m)) => assert!(m.contains("0x140"), "{m}"),
+            other => panic!("expected Layout, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn this_hosts_cache_matches_its_subcache_array() {
+        let meta = CacheMeta::load(DEFAULT_CACHE_PATH).expect("load the host's shared cache");
+        let main = File::open(DEFAULT_CACHE_PATH).unwrap();
+        let mut h = [0u8; 8];
+        main.read_exact_at(&mut h, 0x188).unwrap();
+        let (off, count) = (u32le(&h, 0) as u64, u32le(&h, 4) as u64);
+        assert!(count > 0);
+        assert_eq!(meta.subcaches.len() as u64 - 1, count);
+        for i in 0..count {
+            let mut e = [0u8; 56];
+            main.read_exact_at(&mut e, off + i * 56).unwrap();
+            let vm = u64le(&e, 16);
+            let raw = &e[24..56];
+            let suf = std::str::from_utf8(&raw[..raw.iter().position(|&b| b == 0).unwrap()]).unwrap();
+            let sc = meta.subcaches.iter().find(|sc| sc.path.to_string_lossy().ends_with(&format!("arm64e{suf}"))).unwrap();
+            let lo = sc.mappings.iter().map(|m| m.address).min().unwrap();
+            assert_eq!(lo, 0x1_8000_0000 + vm, "{suf}");
+        }
     }
 
     /// Hand-encode a raw v5 slide-info slot value from its decoded fields (inverse of

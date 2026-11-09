@@ -232,6 +232,10 @@ Since M51 the traps a program uses to stop itself are recorded as crashes with n
 exit status: `brk` (Swift's and Rust's runtime checks, SIGTRAP, 133), `udf` and `hlt` (SIGILL, 132),
 and a misaligned PC or stack pointer (SIGBUS, 138).
 
+## macOS version
+
+retrace reads the dyld shared cache's own header to find its files, and checks each file against the subcache table there. A cache laid out in a way retrace has not met is refused with `has a shared cache retrace does not recognise`, naming the host's macOS version and build, rather than mis-read.
+
 ## Incomplete recordings
 
 A recording that stopped at a wall, or whose recorder was killed, has no end: no exit, crash or

@@ -2,6 +2,8 @@
 mod sysnames;
 mod wall;
 pub use wall::*;
+pub mod host;
+pub use host::{host_os, HostOs};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ec { Svc, Hvc, SysReg, SoftStep, Breakpoint, Watchpoint, DataAbort, InstrAbort, Other(u8) }

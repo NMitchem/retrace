@@ -2016,7 +2016,7 @@ impl Box_ {
     /// replay, so both sides page identical bytes. Idempotent (a second #536 is a no-op).
     pub fn install_cache_pager(&mut self) {
         if self.cache.is_none() {
-            self.cache = Some(CacheMeta::load(DEFAULT_CACHE_PATH).expect("install_cache_pager: load dyld shared cache"));
+            self.cache = Some(load_host_cache());
         }
     }
 
@@ -2760,7 +2760,7 @@ impl Box_ {
         // re-faults forever. Pre-setting the real per-page attrs from the cache's OWN mappings (at
         // slide 0, exactly where page_in_cache maps them) closes that gap. `CacheMeta` is loaded here
         // and kept as the pager so #294/#536 need only confirm it.
-        let cache_meta = CacheMeta::load(DEFAULT_CACHE_PATH).expect("load_dynamic: load dyld shared cache");
+        let cache_meta = load_host_cache();
         let mut exec = vec![(TRAMPOLINE_IPA, 0x800u64, ATTR_TRAMP)];
         for s in &exe.segments  { if s.exec { exec.push((s.vaddr,             s.memsz as u64, ATTR_CODE)); } }
         for s in &dyld.segments { if s.exec { exec.push((s.vaddr + DYLD_BASE, s.memsz as u64, ATTR_CODE)); } }
@@ -9669,6 +9669,28 @@ fn format_seen_entry(tid: usize, kport: Option<u32>, exited: bool) -> String {
     format!("(tid={tid}, kport={kport}{})", if exited { ", exited" } else { "" })
 }
 
+/// M57 §3a: a shared cache retrace cannot read. A layout is a wall in `macos-version`, naming the host, because a
+/// valid cache from an OS build retrace has not met trips it; an I/O error on a file that exists is a bug.
+fn cache_wall(e: cache::CacheError) -> ! {
+    match e {
+        cache::CacheError::Layout(why) => {
+            let os = retrace_arch::host_os();
+            retrace_arch::refuse!(MacosVersion, "macOS {} ({}) has a shared cache retrace does not recognise: {why}", os.product, os.build)
+        }
+        cache::CacheError::Io(e) => panic!("read the dyld shared cache {DEFAULT_CACHE_PATH}: {e}"),
+    }
+}
+
+fn load_host_cache() -> CacheMeta {
+    CacheMeta::load(DEFAULT_CACHE_PATH).unwrap_or_else(|e| cache_wall(e))
+}
+
+#[allow(dead_code)]
+fn host_cache_header() -> cache::MainHeader {
+    cache::read_main_header(DEFAULT_CACHE_PATH).unwrap_or_else(|e| cache_wall(e))
+}
+
+
 #[cfg(test)]
 mod thread_of_port_diagnostic_tests {
     use super::*;
@@ -9942,5 +9964,23 @@ mod workq_feature_word_tests {
         // Bit 7 is deliberately clear — it is the scope lever, not an accident.
         assert_ne!(w & (1 << 6), 0, "bit 6 must be set when bit 7 is clear, else .cold.4");
         assert_eq!(w & (1 << 7), 0, "bit 7 must stay CLEAR to keep the workloop worker out of scope");
+    }
+}
+
+#[cfg(test)]
+mod cache_wall_tests {
+    use super::*;
+
+    #[test]
+    fn a_cache_layout_error_is_the_macos_version_wall() {
+        let r = std::panic::catch_unwind(|| cache_wall(cache::CacheError::Layout("x".into())));
+        let p = r.unwrap_err();
+        let w = retrace_arch::Unsupported::from_panic(p.as_ref()).expect("a wall");
+        let os = retrace_arch::host_os();
+        assert_eq!(w.category, retrace_arch::WallCategory::MacosVersion);
+        assert_eq!(w.what, format!("macOS {} ({}) has a shared cache retrace does not recognise: x", os.product, os.build));
+        let r = std::panic::catch_unwind(|| cache_wall(cache::CacheError::Io(std::io::Error::other("boom"))));
+        let p = r.unwrap_err();
+        assert!(retrace_arch::Unsupported::from_panic(p.as_ref()).is_none());
     }
 }

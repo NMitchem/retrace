@@ -19,14 +19,14 @@ pub const WALLS_URL: &str = "https://github.com/NMitchem/retrace/blob/main/docs/
 /// divergence detail can reach `debug`'s error line, and it should still say what happened.
 pub const WALL_MARKER: &str = "[retrace-wall:";
 
-/// The seven kinds of wall (spec §3b). Each names the `docs/walls.md` section its line links to.
+/// The eight kinds of wall (spec §3b). Each names the `docs/walls.md` section its line links to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WallCategory { Syscalls, MachMessages, ProcessCreation, Signals, Threads, Memory, Exceptions }
+pub enum WallCategory { Syscalls, MachMessages, ProcessCreation, Signals, Threads, Memory, Exceptions, MacosVersion }
 
 impl WallCategory {
-    pub const ALL: [WallCategory; 7] = [WallCategory::Syscalls, WallCategory::MachMessages,
+    pub const ALL: [WallCategory; 8] = [WallCategory::Syscalls, WallCategory::MachMessages,
         WallCategory::ProcessCreation, WallCategory::Signals, WallCategory::Threads, WallCategory::Memory,
-        WallCategory::Exceptions];
+        WallCategory::Exceptions, WallCategory::MacosVersion];
 
     /// The `docs/walls.md` anchor this category's line links to.
     pub fn anchor(self) -> &'static str {
@@ -38,6 +38,7 @@ impl WallCategory {
             WallCategory::Threads => "threads",
             WallCategory::Memory => "memory",
             WallCategory::Exceptions => "exceptions",
+            WallCategory::MacosVersion => "macos-version",
         }
     }
 
@@ -234,7 +235,7 @@ mod tests {
     fn every_category_has_a_distinct_anchor_that_parses_back_and_a_section_in_walls_md() {
         let anchors: Vec<&str> = WallCategory::ALL.iter().map(|c| c.anchor()).collect();
         assert_eq!(anchors, ["syscalls", "mach-messages", "process-creation", "signals", "threads", "memory",
-                             "exceptions"]);
+                             "exceptions", "macos-version"]);
         for c in WallCategory::ALL { assert_eq!(WallCategory::from_anchor(c.anchor()), Some(c)); }
         // GitHub derives a heading's anchor by lowercasing it and turning spaces into hyphens.
         let doc = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/walls.md")).unwrap();
