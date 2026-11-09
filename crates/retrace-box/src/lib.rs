@@ -6,8 +6,8 @@ use retrace_trace::{Regs, Region};
 mod backings;
 use backings::Backings;
 mod cache;
-pub use cache::AuthSlot;
-use cache::{walk_page, CacheMeta, DEFAULT_CACHE_PATH};
+pub use cache::{AuthSlot, DEFAULT_CACHE_PATH};
+use cache::{walk_page, CacheMeta};
 
 mod sig;
 mod exec;
@@ -9158,10 +9158,10 @@ impl Box_ {
         self.sync_jit_view();
     }
 
-    /// Capture all backings + architectural registers as an Event::Snapshot.
     /// M57 §3e: the UUID of the shared cache this dynamic guest loaded, `None` for a static one.
     pub fn cache_uuid(&self) -> Option<[u8; 16]> { self.cache.as_ref().map(|c| c.uuid()) }
 
+    /// Capture all backings + architectural registers as an Event::Snapshot.
     pub fn snapshot(&self) -> retrace_trace::Event {
         let mut mem = Vec::new();
         for bk in self.backings.iter() {

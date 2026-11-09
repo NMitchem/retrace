@@ -41,8 +41,7 @@ fn a_dynamic_recording_carries_this_hosts_version_build_and_cache_uuid() {
     let h = retrace_trace::Reader::host(&t).unwrap().expect("a host record");
     assert_eq!(h.product, sw_vers("-productVersion"));
     assert_eq!(h.build, sw_vers("-buildVersion"));
-    let cache = std::fs::File::open("/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_arm64e")
-        .or_else(|_| std::fs::File::open("/System/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_arm64e")).unwrap();
+    let cache = std::fs::File::open(retrace_core::DEFAULT_CACHE_PATH).unwrap();
     let mut hdr = [0u8; 0x68];
     std::os::unix::fs::FileExt::read_exact_at(&cache, &mut hdr, 0).unwrap();
     assert_eq!(h.cache_uuid, Some(<[u8; 16]>::try_from(&hdr[0x58..0x68]).unwrap()));
@@ -94,6 +93,7 @@ fn a_pre_m57_recording_is_refused_as_another_format() {
     let t = scratch("old");
     std::fs::write(&t, b"RT\x00\x11rest-of-a-pre-M57-trace").unwrap();
     let rep = util::run_bounded(util::bin(), &["replay", t.to_str().unwrap()], &[], BOUND);
+    assert_eq!(rep.code, Some(3), "format skew keeps exit 3: {}", rep.stderr);
     assert!(rep.stderr.contains("recorded by a different retrace trace format"), "{}", rep.stderr);
     assert!(rep.stderr.contains(r"RT\x00\x11") && rep.stderr.contains(r"RT\x00\x12"), "{}", rep.stderr);
     assert!(!rep.stderr.contains("panicked at") && !rep.stderr.contains("internal error"), "{}", rep.stderr);
