@@ -48,6 +48,7 @@ pub enum FileAction {
 }
 
 const ATTR_SIZE: usize = 0xf8;
+const ATTR_SIZE_27: usize = 0x100;
 const ACT_STRIDE: usize = 1040;
 const ACT_MAX: usize = 4096;
 
@@ -112,8 +113,12 @@ pub fn decode_spawn(desc: &[u8], attr: Option<&[u8]>, actions: Option<&[u8]>) ->
     }
     let mut plan = SpawnPlan { flags: 0, sigmask: None, sigdefault: 0, actions: Vec::new(), binpref: (0, -1) };
     if let Some(a) = attr {
-        if q(0) != ATTR_SIZE as u64 || a.len() != ATTR_SIZE {
+        // SPIKE M57: macOS 27 appends 8 bytes (0xf8..0x100, zero after init); every earlier offset is unchanged.
+        if !(q(0) == ATTR_SIZE as u64 || q(0) == ATTR_SIZE_27 as u64) || a.len() as u64 != q(0) {
             return Err(spawn_wall(&format!("an attribute block of {} bytes", q(0))));
+        }
+        if let Some(off) = (ATTR_SIZE..a.len()).find(|&o| a[o] != 0) {
+            return Err(spawn_wall(&format!("an unmodelled attribute field at {off:#x} set")));
         }
         let flags = u16::from_le_bytes([a[0], a[1]]);
         for bit in 0..16 {
@@ -368,7 +373,7 @@ pub fn image_layout_refusal(exe: &Loaded, dyld: &Loaded) -> Option<String> {
                 return Some(format!("{who} has a segment at {va:#x}, which is not 16 KiB-aligned (retrace maps whole 16 KiB granules)"));
             }
             let len = (s.memsz.max(s.data.len()).max(GRANULE) as u64).checked_next_multiple_of(g);
-            let Some(end) = len.and_then(|len| va.checked_add(len)).filter(|&e| e <= 1 << 36) else {
+            let Some(end) = len.and_then(|len| va.checked_add(len)).filter(|&e| e <= crate::IPA_LIMIT) else {
                 return Some(format!("{who} has a segment at {va:#x} past the 36-bit guest address space"));
             };
             spans.push((va, end, format!("{who}'s segment at {va:#x}")));

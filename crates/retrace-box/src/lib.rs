@@ -172,7 +172,7 @@ const GRANULE: usize = 0x4000; // 16 KiB default granule
 // regions' stage-1 attributes are pre-set to ATTR_CODE at load (see host_exec_regions) so a text
 // fault is a pure stage-2 translation fault and demand-paging needs no runtime promotion / TLBI.
 pub const SHARED_REGION_START: u64 = 0x1_8000_0000;
-pub const SHARED_REGION_END:   u64 = 0x3_0000_0000;
+pub const SHARED_REGION_END:   u64 = 0x3_8000_0000; // EXPERIMENT macOS 27.2
 // The kernel maps a read-only "commpage" of CPU capabilities / cached timing into every process
 // at this fixed high VA; dyld reads it during early init. It is within the 36-bit identity space
 // (block 2047, a default RW/non-exec data block) but not in the guest's stage-2, so load_dynamic
@@ -257,14 +257,19 @@ extern "C" { fn mach_absolute_time() -> u64; }
 /// the one deliberate, documented exception. Replay has no stall watch and never calls it.
 fn host_ticks() -> u64 { unsafe { mach_absolute_time() } }
 
-pub const PT_L2_IPA:  u64 = 0x8000;           // L2 table (one level below the L1 TTBR0 target); one 16 KiB page = 2048 entries
+pub const PT_L2_IPA:  u64 = 0x0080_0000; // SPIKE M57: an L2 ARRAY of L2_PAGES pages at the base of the L3 window
+pub const IPA_BITS: u32 = 40;
+pub const IPA_LIMIT: u64 = 1 << IPA_BITS;
+const L2_PAGES: usize = 1 << (IPA_BITS - 36);
+const L2_ENTRIES: usize = 2048 * L2_PAGES;
+const OLD_L2_PAGE: u64 = 0x8000;           // L2 table (one level below the L1 TTBR0 target); one 16 KiB page = 2048 entries
 pub const PT_L1_IPA:  u64 = 0xC000;           // L1 table (TTBR0 target under the 47-bit VA); one
                                               // 16 KiB page, only entry[0] valid (-> L2). Free
                                               // block-0 page between L2 (0x8000) and the stack (0x1C000).
 // L3 tables live at 8 MiB..32 MiB inside block 0 (above the stack IPA at 0x1C000, below the
 // 32 MiB block boundary), so they're identity-covered by block 0's own L3 (block 0 is already
 // L3-promoted for the trampoline). ~1500 tables' worth of room; bump by GRANULE per promoted block.
-pub const PT_L3_BASE: u64 = 0x0080_0000;
+pub const PT_L3_BASE: u64 = PT_L2_IPA + (L2_PAGES * GRANULE) as u64;
 const PT_L3_CEIL: u64 = 0x0200_0000;          // 32 MiB block boundary
 // M49 F3 (spec §3d, R3): the IPA ranges stage 1 does not map: page 0 (a NULL access then takes the
 // stage-1 fault native takes, so a call through NULL is SIGSEGV, not a permission fault's SIGBUS),
@@ -274,13 +279,13 @@ const PT_L3_CEIL: u64 = 0x0200_0000;          // 32 MiB block boundary
 // through stage 1, so unmapping them at stage 1 costs nothing (t0 M4). `range_is_free` keeps every
 // placement out of them, and `set_region_attr` refuses to map them again.
 const STAGE1_UNMAPPED: [(u64, u64); 3] =
-    [(0, TRAMPOLINE_IPA), (PT_L2_IPA, PT_L1_IPA + GRANULE as u64), (PT_L3_BASE, PT_L3_CEIL)];
+    [(0, TRAMPOLINE_IPA), (OLD_L2_PAGE, PT_L1_IPA + GRANULE as u64), (PT_L2_IPA, PT_L3_CEIL)];
 // arm64e data-pointer PAC placement: TBI0(bit37)+TBID0(bit51) match Apple's user TCR so a signed
 // DATA pointer's PAC lands in [54:47] with the top byte (incl. bit 63) preserved = 0. Without TBI
 // the 47-bit-VA PAC field spans [63:56]∪[54:47]; a re-signed class_data_bits pointer then sets
 // bit 63, which objc reads as FAST_IS_RW_POINTER (isRealized) → spurious already-realized →
 // validateAlreadyRealizedClass fatal. See docs/.../2026-07-14-retrace-m2-tbi-design.md.
-const TCR_EL1_V:  u64 = 0x8_0021_0080_B511;    // +TBI0+TBID0. T0SZ=17 (47-bit VA), TG0=16K, WBWA, inner-share, EPD1, IPS=36-bit
+const TCR_EL1_V:  u64 = 0x8_0022_0080_B511;    // +TBI0+TBID0. T0SZ=17 (47-bit VA), TG0=16K, WBWA, inner-share, EPD1, IPS=40-bit (SPIKE M57)
 const MAIR_EL1_V: u64 = 0xFF;                 // attr0 = Normal WBWA
 // base 0x30d00800 + M(1) + C(4) + I(0x1000) + DZE(0x4000) + UCI(0x0400_0000). PAC is NOT in the
 // base: it is per-guest (see below). DZE(14) is SET so EL0 `DC ZVA` executes natively instead of
@@ -1606,8 +1611,8 @@ impl Box_ {
     // edit the live L2 and continue the same L3 allocation window.
     fn build_tables(backings: &mut Backings, exec: &[(u64, u64, u64)]) -> (u64, *mut u8, u64) {
         assert!(exec.iter().all(|&(_, len, _)| len > 0), "exec ranges must be non-empty");
-        let (l2_host, l2_len) = alloc_pages(GRANULE);
-        let l2 = unsafe { std::slice::from_raw_parts_mut(l2_host as *mut u64, 2048) };
+        let (l2_host, l2_len) = alloc_pages(GRANULE * L2_PAGES);
+        let l2 = unsafe { std::slice::from_raw_parts_mut(l2_host as *mut u64, L2_ENTRIES) };
         for (i, e) in l2.iter_mut().enumerate() { *e = ((i as u64) * BLK) | ATTR_DATA | DESC_BLOCK; }
         backings.push(Backing { host: l2_host, ipa: PT_L2_IPA, len: l2_len });
 
@@ -1618,7 +1623,7 @@ impl Box_ {
         // so L1[1..] are already invalid (a VA >= 2^36 faults).
         let (l1_host, l1_len) = alloc_pages(GRANULE);
         let l1 = unsafe { std::slice::from_raw_parts_mut(l1_host as *mut u64, 2048) };
-        l1[0] = PT_L2_IPA | DESC_TABLE;
+        for (i, e) in l1.iter_mut().take(L2_PAGES).enumerate() { *e = (PT_L2_IPA + (i * GRANULE) as u64) | DESC_TABLE; }
         backings.push(Backing { host: l1_host, ipa: PT_L1_IPA, len: l1_len });
 
         let mut next_l3 = PT_L3_BASE;
@@ -1675,7 +1680,7 @@ impl Box_ {
              (page 0, retrace's page tables, the L3 window)", ipa + len);
         let l2_host = self.l2_host;
         assert!(!l2_host.is_null(), "set_region_attr: no live L2 table (restore had no PT_L2 region)");
-        let l2 = unsafe { std::slice::from_raw_parts_mut(l2_host as *mut u64, 2048) };
+        let l2 = unsafe { std::slice::from_raw_parts_mut(l2_host as *mut u64, L2_ENTRIES) };
         let mut next_l3 = self.next_l3;
         let created = {
             let mut alloc_l3 = || {
@@ -2325,8 +2330,8 @@ impl Box_ {
     fn leaf_desc(&self, ipa: u64) -> Option<u64> {
         if self.l2_host.is_null() { return None; }
         let bi = (ipa / BLK) as usize;
-        if bi >= 2048 { return None; }
-        let l2 = unsafe { std::slice::from_raw_parts(self.l2_host as *const u64, 2048) };
+        if bi >= L2_ENTRIES { return None; }
+        let l2 = unsafe { std::slice::from_raw_parts(self.l2_host as *const u64, L2_ENTRIES) };
         if l2[bi] & 0x3 == DESC_TABLE {
             let l3_ipa = l2[bi] & !(GRANULE as u64 - 1);
             let host = self.backings.iter().find(|b| b.ipa == l3_ipa).map(|b| b.host)?;
@@ -2991,7 +2996,7 @@ impl Box_ {
                 self.mmap_next = (self.mmap_next + m) & !m;
             }
             let end = self.mmap_next + rounded;
-            if end > (1u64 << 36) {
+            if end > IPA_LIMIT {
                 retrace_arch::refuse!(Memory, "guest_vm_reserve ANYWHERE overflowed 36-bit IPA space: {end:#x}");
             }
             let a = self.mmap_next;
@@ -3032,7 +3037,7 @@ impl Box_ {
     /// unpromoted data BLOCK (no page-granular entry exists). Walks the live L2 like
     /// `promote_and_set` does, by host pointer, not through guest memory.
     fn l3_desc(&self, va: u64) -> Option<u64> {
-        let l2 = unsafe { std::slice::from_raw_parts(self.l2_host as *const u64, 2048) };
+        let l2 = unsafe { std::slice::from_raw_parts(self.l2_host as *const u64, L2_ENTRIES) };
         let l2e = l2[(va / BLK) as usize];
         if l2e & 0x3 != DESC_TABLE { return None; }
         let l3_ipa = l2e & !(GRANULE as u64 - 1);
@@ -3044,7 +3049,7 @@ impl Box_ {
     /// Overwrite the live L3 descriptor for `va`'s page. The block must already be promoted
     /// (callers `set_region_attr` first).
     fn write_l3_desc(&mut self, va: u64, desc: u64) {
-        let l2 = unsafe { std::slice::from_raw_parts(self.l2_host as *const u64, 2048) };
+        let l2 = unsafe { std::slice::from_raw_parts(self.l2_host as *const u64, L2_ENTRIES) };
         let l2e = l2[(va / BLK) as usize];
         assert!(l2e & 0x3 == DESC_TABLE, "write_l3_desc: {va:#x} is in an unpromoted block");
         let l3_ipa = l2e & !(GRANULE as u64 - 1);
@@ -3145,7 +3150,7 @@ impl Box_ {
     /// `reservations` here makes the emulated VM agree. (Used to decide ANYWHERE hint placement.)
     fn range_is_free(&self, ipa: u64, len: u64) -> bool {
         let end = ipa.saturating_add(len);
-        if end > (1u64 << 36) { return false; }                            // out of 36-bit IPA space
+        if end > IPA_LIMIT { return false; }                            // out of 36-bit IPA space
         if ipa < SHARED_REGION_END && SHARED_REGION_START < end { return false; } // shared-cache window
         // The VMM's lazily-mapped scratch pages: forbidden even while still absent from `backings`.
         if ipa < SCRATCH_RESERVED_END && SCRATCH_RESERVED_START < end { return false; }
@@ -3299,7 +3304,7 @@ impl Box_ {
     /// identically, so the rejection needs no mirror (symmetry is structural).
     fn fixed_fits(addr: u64, rlen: usize) -> bool {
         addr & (GRANULE as u64 - 1) == 0
-            && addr.checked_add(rlen as u64).is_some_and(|end| end <= 1u64 << 36)
+            && addr.checked_add(rlen as u64).is_some_and(|end| end <= IPA_LIMIT)
     }
 
     /// Free every tracked backing that overlaps `[ipa, ipa+len)` (stage-2 unmap + release the anon

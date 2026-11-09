@@ -22,7 +22,12 @@ impl MemFlags {
 pub struct Vm(());
 impl Vm {
     pub fn create() -> Result<Vm, HvError> {
-        check(unsafe { hv_vm_create(std::ptr::null_mut()) })?;
+        // SPIKE M57: a 40-bit IPA (macOS 27's malloc range groups sit at ~0x70_0000_0000+).
+        unsafe {
+            let cfg = hv_vm_config_create();
+            check(hv_vm_config_set_ipa_size(cfg, 40))?;
+            check(hv_vm_create(cfg))?;
+        }
         Ok(Vm(()))
     }
     pub fn map(&self, host: *mut u8, ipa: u64, len: usize, flags: MemFlags) -> Result<(), HvError> {
