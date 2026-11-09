@@ -12,10 +12,15 @@ static mach_vm_size_t outsz = S2;
 static int mapped(mach_vm_address_t a) { // a one-page mach_vm_copy out of `a`: kr 0 iff it is mapped
   return mach_vm_copy(mach_task_self(), a, 0x4000, scratch) == 0;
 }
+#define AREA 0x4000000ULL
+static char outbuf[4096];
+// P15: map a 64 MiB area, then free everything after the source's first S1, immediately before the call, so
+// the source's neighbourhood is the same on every run whatever holes the address space has.
 static mach_vm_address_t mk(mach_vm_size_t sz) {
   mach_vm_address_t a = 0;
-  if (mach_vm_map(mach_task_self(), &a, sz, 0x3fffff, VM_FLAGS_ANYWHERE | VM_MAKE_TAG(3), MACH_PORT_NULL, 0, 0, VM_PROT_DEFAULT, VM_PROT_ALL, VM_INHERIT_DEFAULT)) return 0;
+  if (mach_vm_map(mach_task_self(), &a, AREA, 0x3fffff, VM_FLAGS_ANYWHERE | VM_MAKE_TAG(3), MACH_PORT_NULL, 0, 0, VM_PROT_DEFAULT, VM_PROT_ALL, VM_INHERIT_DEFAULT)) return 0;
   memset((void *)a, 0xab, sz);
+  if (mach_vm_deallocate(mach_task_self(), a + sz, AREA - sz)) return 0;
   return a;
 }
 static void report(const char *m, kern_return_t kr, mach_vm_address_t src, mach_vm_address_t dst) {
@@ -28,6 +33,7 @@ static void report(const char *m, kern_return_t kr, mach_vm_address_t src, mach_
   printf("%s kr=%d moved=%d head=%ld tail=%ld srcgone=%d\n", m, kr, kr == 0 && dst != src, head, tail, !mapped(src));
 }
 int main(int argc, char **argv) {
+  setvbuf(stdout, outbuf, _IOFBF, sizeof outbuf);
   mach_vm_allocate(mach_task_self(), &scratch, 0x4000, VM_FLAGS_ANYWHERE);
   const char *m = argc > 1 ? argv[1] : "inplace";
   task_t t = mach_task_self(); int fl = VM_FLAGS_ANYWHERE | VM_MAKE_TAG(3);
@@ -41,7 +47,7 @@ int main(int argc, char **argv) {
   else if (!strcmp(m, "shrink")) kr = mach_vm_reallocate(t, a, S1, &d, 0x4000, 0x3fffff, 0, fl);
   else if (!strcmp(m, "unaligned")) kr = mach_vm_reallocate(t, a + 1, S1, &d, S2, 0, 0, fl);
   else if (!strcmp(m, "unmapped")) { d = 0x10000000; a = d; kr = mach_vm_reallocate(t, a, S1, &d, S2, 0, 0, fl); }
-  else if (!strcmp(m, "fixed")) { d = a + 0x10000000; kr = mach_vm_reallocate(t, a, S1, &d, S2, 0, 0, VM_FLAGS_FIXED | VM_MAKE_TAG(3)); }
+  else if (!strcmp(m, "fixed")) { d = a + 0x2000000; kr = mach_vm_reallocate(t, a, S1, &d, S2, 0, 0, VM_FLAGS_FIXED | VM_MAKE_TAG(3)); }
   else if (!strcmp(m, "zero_dst")) { d = 0; kr = mach_vm_reallocate(t, a, S1, &d, S2, 0, 0, fl); }
   else if (!strcmp(m, "reservation_after")) {
     mach_vm_address_t b = a + S1;
