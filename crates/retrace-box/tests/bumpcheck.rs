@@ -54,3 +54,20 @@ fn a_bsd_mmap_bump_never_lands_in_a_reservation_above_the_old_ceiling() {
     drive(|b, l| b.guest_mmap(0, l, 3, MAP_ANON_PRIVATE),
           |b| b.guest_vm_map_masked(HINT, 4 << 20, 0, ANYWHERE, false).unwrap());
 }
+
+// An exec placement must still start on a fresh 32 MiB block when the cursor is occupied.
+#[test]
+fn an_exec_bump_past_an_occupied_cursor_still_starts_on_a_block() {
+    const BLK: u64 = 1 << 25;
+    let mut b = boxed();
+    // Float the cursor high (above the old ceiling, where a FIXED reservation no longer floats it),
+    // then reserve over the cursor itself, ending off a block boundary.
+    b.guest_vm_map_masked(HINT, 4 << 20, 0, ANYWHERE, false).unwrap();
+    let cur = HINT + (4 << 20);
+    let c = (cur + BLK - 1) & !(BLK - 1);
+    b.guest_vm_reserve_masked(cur, c - cur + 0x104000, 0, FIXED).expect("reserve");
+    let a = b.guest_vm_map_masked(0, 1 << 20, 0, ANYWHERE, true).unwrap();
+    assert_eq!(a % BLK, 0, "exec map at {a:#x} is not block aligned");
+    let a2 = b.guest_mmap(0, 1 << 20, 5, MAP_ANON_PRIVATE).unwrap();
+    assert_eq!(a2 % BLK, 0, "exec mmap at {a2:#x} is not block aligned");
+}

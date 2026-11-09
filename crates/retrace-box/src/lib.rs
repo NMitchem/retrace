@@ -2981,7 +2981,9 @@ impl Box_ {
                     if exec { self.mmap_next = (self.mmap_next + (BLK - 1)) & !(BLK - 1); }
                     if mask != 0 { self.mmap_next = (self.mmap_next + m) & !m; }
                     // M57 t8: the bump is checked like a hinted placement; nothing fits => no space.
-                    match self.first_fit(self.mmap_next, rlen as u64, m) {
+                    // An exec placement still starts on a fresh BLK block when the cursor is occupied.
+                    let fm = if exec { m | (BLK - 1) } else { m };
+                    match self.first_fit(self.mmap_next, rlen as u64, fm) {
                         Some(a) => { self.mmap_next = a + rlen as u64; a }
                         None => {
                             // SAFETY: `host` is the fresh `alloc_pages` result above, never published.
@@ -3544,7 +3546,8 @@ impl Box_ {
             addr
         } else {
             // M57 t8: the bump is checked; nothing fits => ENOMEM, with `host` released (we own it).
-            match self.first_fit(self.mmap_next, rlen as u64, GRANULE as u64 - 1) {
+            let fm = if prot & Self::PROT_EXEC != 0 { BLK - 1 } else { GRANULE as u64 - 1 };
+            match self.first_fit(self.mmap_next, rlen as u64, fm) {
                 Some(a) => a,
                 None => {
                     // SAFETY: `host` is this function's unpublished `rlen`-byte mapping.

@@ -139,8 +139,18 @@ fn hint_zero_allocations_after_a_hinted_map_and_a_reservation_never_overlap_it()
     // M57 t8: the bump cursor used to hand out whatever lay at it. Native: no overlap, the pattern
     // written into every page of every allocation survives a FIXED|OVERWRITE commit of the
     // reservation's head.
-    let out = as_native(retrace_guest::VMFIXED_DYN, &["bump"]);
-    assert!(out.contains("reserve kr=0\n"), "the reservation must be accepted natively:\n{out}");
-    assert!(out.contains("commit kr=0\n"), "{out}");
-    assert!(out.contains("overlaps=0 corrupted=0\n"), "{out}");
+    // Ruling P16: the expected stdout is the kernel's guarantee, known by construction, so record and
+    // both replays are held to it. Native's neighbourhood varies (its FIXED reservation can find all
+    // eight gaps occupied and print `reserve kr=3`), so native is a sanity check only: it must exit 0,
+    // and its stdout is compared only when it printed `reserve kr=0`. A native loop cannot fail this row.
+    let mut expected = String::from("hinted kr=0\nreserve kr=0\n");
+    for i in 0..8 { expected.push_str(&format!("alloc {i} overlap=0\n")); }
+    expected.push_str("commit kr=0\noverlaps=0 corrupted=0\n");
+    let guest = retrace_guest::VMFIXED_DYN;
+    let native = util::run_bounded(guest, &["bump"], &[], 30);
+    assert_eq!(native.code, Some(0), "native: {}", native.stderr);
+    if String::from_utf8_lossy(&native.stdout).contains("reserve kr=0\n") {
+        assert_eq!(String::from_utf8_lossy(&native.stdout), expected, "native");
+    }
+    util::assert_rung_records_and_replays(guest, &["bump"], expected.as_bytes());
 }
