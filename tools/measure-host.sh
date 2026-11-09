@@ -4,7 +4,7 @@
 #   tools/measure-host.sh [--skip-gate] [--skip-sweeps] <out-dir>
 # Writes <out>/environment.txt, baseline/, gate/ (unless --skip-gate), sweeps/ (unless --skip-sweeps) and
 # README.md. Every program runs under an alarm, with an explicit minimal environment; nothing is written
-# outside <out> (cargo's target dir is <out>/target). Exits 0 when it completes, whatever it measured.
+# outside <out> (cargo's target dirs are <out>/target and <out>/gate/target). Exits 0 when it completes, whatever it measured.
 set -u
 SKIP_GATE=0; SKIP_SWEEPS=0; OUT=
 for a in "$@"; do
@@ -24,6 +24,8 @@ export CARGO_TARGET_DIR=$OUT/target
 export TMPDIR=$OUT/tmp
 mkdir -p "$TMPDIR"
 lim() { perl -e 'alarm shift; exec @ARGV or die "exec: $!"' "$@"; }
+# Delete retrace's leaked trace files, only ever inside the kit's own private TMPDIR (under <out>).
+leak() { case "$TMPDIR" in "$OUT"/*) find "$TMPDIR" -maxdepth 1 -name 'retrace-*' -type f -delete 2>/dev/null ;; esac; }
 sec() { printf '\n# %s\n' "$1"; }
 CACHE_DIR=/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld
 CACHE=$CACHE_DIR/dyld_shared_cache_arm64e
@@ -46,7 +48,7 @@ u64hex() { od -An -t x8 -j "$2" -N 8 "$1" 2>/dev/null | tr -d ' '; }
   sec lldb; lldb --version 2>&1 | head -2
   sec "homebrew (formulae the tests use)"
   brew --version 2>/dev/null | head -1; brew list --versions jq node python@3.10 python@3.13 python@3.14 xz 2>/dev/null
-  sec /usr/lib/dyld; dyldinfo=$(lipo -detailed_info /usr/lib/dyld 2>/dev/null | head -0); dwarfdump --uuid /usr/lib/dyld 2>&1; shasum -a 256 /usr/lib/dyld
+  sec /usr/lib/dyld; dwarfdump --uuid /usr/lib/dyld 2>&1; shasum -a 256 /usr/lib/dyld
   sec "shared cache files"; ls -l "$CACHE_DIR"/dyld_shared_cache_arm64e* 2>&1
   sec "shared cache header (hex via od)"
   echo "uuid(0x58) $(od -An -t x1 -j 88 -N 16 "$CACHE" 2>/dev/null | tr -d ' \n')"
@@ -71,9 +73,9 @@ B=$OUT/baseline; P=$B/progs
 mkdir -p "$B/traces" "$P"
 for n in crashy hello_dyn; do clang -arch arm64 -o "$P/$n" "$ROOT/crates/retrace-guest/c/$n.c" 2>>"$B/build.err"; done
 SUM=$B/summary.txt; : > "$SUM"
-G=$(xcrun -f git)
-cleanenv() { lim 300 env -i PATH=/usr/bin:/bin HOME="${HOME:-/}" "$@"; }
-{ echo "# $(sw_vers -productVersion) $(sw_vers -buildVersion)"; echo "# retrace: $R"; shasum -a 256 "$R"; } >> "$SUM"
+G=$(xcrun -f git 2>/dev/null)
+cleanenv() { lim 300 env -i PATH=/usr/bin:/bin HOME="${HOME:-/}" TMPDIR="$TMPDIR" "$@"; }
+{ echo "# $(sw_vers -productVersion) $(sw_vers -buildVersion)"; echo "# retrace: ${R#"$OUT"/}"; echo "$(shasum -a 256 < "$R" | cut -d" " -f1)  ${R#"$OUT"/}"; } >> "$SUM"
 run() {
   local n=$1; shift; local t=$B/traces/$n.retrace
   # stdin is /dev/null for all three: an inherited stdin can be a socket (an agent's or an IDE's shell), and node's
@@ -90,13 +92,14 @@ run crashy    "$P/crashy"
 run hello_dyn "$P/hello_dyn"
 run echo      /bin/echo hi
 run ls        /bin/ls /usr/bin
-run git       "$G" --version
+if [ -n "$G" ]; then run git "$G" --version; else echo "git       SKIPPED (xcrun -f git found nothing)" >> "$SUM"; fi
 run jq        /opt/homebrew/bin/jq -n '[range(0;100000)] | add'
 run python    /opt/homebrew/bin/python3 -c 'print(1)'
 run node      /opt/homebrew/bin/node -e 'console.log(1)'
 lim 300 "$R" debug "$B/traces/crashy.retrace" < /dev/null --script 'continue; where; regs; reverse-stepi; where; reverse-continue; where' \
   > "$B/crashy.debug.out" 2> "$B/crashy.debug.err"
 echo "debug     exit=$?" >> "$SUM"
+leak
 
 # ---- gate ----
 GT=
@@ -113,6 +116,12 @@ if [ "$SKIP_GATE" = 0 ]; then
     local t0 t1 rc; t0=$(date +%s)
     "$@" < /dev/null > "$GD/logs/$name.log" 2>&1; rc=$?
     t1=$(date +%s)
+    leak
+    if [ "$rc" = 142 ]; then
+      pkill -f "$GD/target/aarch64-apple-darwin/debug/deps/"
+      pkill -f "$GD/target/aarch64-apple-darwin/debug/retrace-signed-"
+      echo "$name: the alarm fired (a hang); the kit's leftover test processes killed" >> "$GD/chunks.txt"
+    fi
     echo "$name exit=$rc" >> "$GD/summary.txt"
     echo "$name start=$(date -r "$t0" '+%H:%M:%S') end=$(date -r "$t1" '+%H:%M:%S') secs=$((t1 - t0)) load_end=$(sysctl -n vm.loadavg)" >> "$GD/chunks.txt"
     return 0
@@ -142,10 +151,12 @@ tal() { grep -a '^TALLY' "$1" | tr '\n' ' '; }
 SWL=
 if [ "$SKIP_SWEEPS" = 0 ]; then
   SD=$OUT/sweeps; mkdir -p "$SD"
-  HDR="binary=$R commit=$(git rev-parse --short HEAD) sha256=$BINSHA date=$(date '+%Y-%m-%d %H:%M:%S %Z')"
+  HDR="binary=${R#"$OUT"/} commit=$(git rev-parse --short HEAD) sha256=$BINSHA date=$(date '+%Y-%m-%d %H:%M:%S %Z')"
   { echo "$HDR"; RETRACE_SWEEP_LIST=tools/firstcontact-sweep.txt RETRACE_SWEEP_STDERR=1 sh tools/apple-sweep.sh "$R"; echo "SWEEP_EXIT=$?"; } > "$SD/tier2.log" 2>&1
+  leak
   grep -a '^TALLY' "$SD/tier2.log" > "$SD/tier2.tally"
   { echo "$HDR"; sh tools/apple-sweep.sh "$R"; echo "SWEEP_EXIT=$?"; } > "$SD/apple.log" 2>&1
+  leak
   grep -a '^TALLY' "$SD/apple.log" > "$SD/apple.tally"
   SWL="tier2: $(tal "$SD/tier2.log") bug-lines=$(bugs "$SD/tier2.log")
 apple: $(tal "$SD/apple.log") bug-lines=$(bugs "$SD/apple.log")"
