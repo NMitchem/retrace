@@ -12,7 +12,7 @@ crates/retrace-box/src/lib.rs	guest_thread_kport	Threads	M46: a box-spawned thre
 crates/retrace-box/src/lib.rs	guest_ulock_wait	Threads	guest_ulock_wait: unmeasured operation w
 crates/retrace-box/src/lib.rs	guest_ulock_wake	Threads	guest_ulock_wake: unmeasured operation w
 crates/retrace-box/src/lib.rs	guest_vm_map_masked	Memory	M47: unmeasured mach_vm_map mask
-crates/retrace-box/src/lib.rs	guest_vm_reallocate	Memory	M57: mach_vm_reallocate FIXED destinatio
+crates/retrace-box/src/lib.rs	guest_vm_reallocate	Memory	M57: mach_vm_reallocate over a MAP_JIT r
 crates/retrace-box/src/lib.rs	guest_vm_remap	Memory	vm_remap: size
 crates/retrace-box/src/lib.rs	guest_vm_remap	Memory	vm_remap: source page
 crates/retrace-box/src/lib.rs	guest_vm_remap	Memory	vm_remap: source page

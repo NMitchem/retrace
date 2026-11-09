@@ -300,7 +300,7 @@ pub fn decode_vm_realloc(buf: &[u8]) -> Result<VmReallocReq, String> {
         mask: u64_at(buf, 64), options: u32_at(buf, 72), flags: u32_at(buf, 76) })
 }
 
-/// KERN_SUCCESS reply for 4829 (msgh_id 4929): header(24) + NDR(8) + RetCode(4) + dst(8) + trailer(8) = 52,
+/// KERN_SUCCESS reply for 4829 (msgh_id 4929): header(24) + NDR(8) + RetCode(4) + dst(8) = 44 (msgh_size), + trailer(8) = 52 in the buffer,
 /// the 4811 shape. An error is `encode_mig_error` as for every other box-side service.
 pub fn encode_vm_realloc_reply(reply_port: u32, dst: u64) -> Vec<u8> {
     let mut out = Vec::with_capacity(52);

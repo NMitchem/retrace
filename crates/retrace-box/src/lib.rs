@@ -3070,32 +3070,46 @@ impl Box_ {
         0
     }
 
-    /// M57 Task 7 (t0 native, `native-reallocate-rule-27.2.txt`): `mach_vm_reallocate` (4829), a box-side
-    /// service, never forwarded. Returns the new address or the `kern_return_t`. Shrink or an unaligned
-    /// `src` is 4, an unreadable `src` is 1. ANYWHERE grows in place iff `[src+src_size, src+dst_size)`
-    /// holds no backing and no reservation (`range_is_free`); otherwise it places as `guest_vm_map_masked`
-    /// does for `mach_vm_map` (same code, hint `dst_in`, `mask`), copies the head, leaves the tail zero and
-    /// unmaps `src` through `guest_munmap`. FIXED honours `dst_in` (`fixed_answer` unless OVERWRITE).
+    /// M57 Task 7 (t0 native, `native-reallocate-rule-27.2.txt` and `-edges-`): `mach_vm_reallocate` (4829),
+    /// a box-side service, never forwarded. Returns the new address or the `kern_return_t`.
+    /// Answers, in order: `src_size` 0, an unaligned `src` or `dst_size`, `dst_size < src_size` and
+    /// `src + dst_size` wrapping are 4; `dst_size` at or past `IPA_LIMIT` is 3 (checked before any host
+    /// allocation); FIXED without OVERWRITE goes through `fixed_answer` (3 over the still-mapped source);
+    /// FIXED|OVERWRITE overlapping the source is 1; an unreadable or partly backed `src` is 1.
+    /// `dst_size == src_size` is 0, in place. ANYWHERE grows in place iff the tail holds no backing and no
+    /// reservation (`range_is_free`); otherwise it places as `guest_vm_map_masked` does for `mach_vm_map`
+    /// (same code, hint `dst_in`, `mask`), copies the head (a host-side copy of the bytes read from the
+    /// guest), leaves the tail zero and unmaps `src` through `guest_munmap`. `options` is ignored (native
+    /// accepts 1). Native rounds an unaligned `src_size` up; so does this.
+    ///
+    /// Named limit: native places a 1 TiB request (`dst_size` 1 << 40, a 1 TiB VA) and answers 0; the box's
+    /// IPA is `IPA_LIMIT` (1 TiB), so it answers 3 for any `dst_size` it cannot hold.
     /// A pure function of guest state, so replay recomputes it and only the reply is recorded.
     pub fn guest_vm_reallocate(&mut self, src: u64, src_size: u64, dst_in: u64, dst_size: u64, mask: u64, flags: u64) -> Result<u64, u64> {
         let g = GRANULE as u64;
-        let up = |x: u64| x.saturating_add(g - 1) & !(g - 1);
-        if src & (g - 1) != 0 || dst_size < src_size { return Err(4); }
-        let (ssz, dsz) = (up(src_size), up(dst_size));
-        if let Err(m) = self.jit.refuse_overlap(src, dsz, "mach_vm_reallocate") { panic!("{m}"); }
+        let anywhere = flags & retrace_arch::VM_FLAGS_ANYWHERE != 0;
+        if src_size == 0 || src & (g - 1) != 0 || dst_size & (g - 1) != 0 || dst_size < src_size
+            || src.checked_add(dst_size).is_none() { return Err(4); }
+        if dst_size >= IPA_LIMIT { return Err(retrace_arch::KERN_NO_SPACE); }
+        let (ssz, dsz) = ((src_size + g - 1) & !(g - 1), dst_size);
+        if !anywhere {
+            if flags & retrace_arch::VM_FLAGS_OVERWRITE == 0 { self.fixed_answer(dst_in, dsz)?; }
+            else if dst_in < src + ssz && src < dst_in.saturating_add(dsz) { return Err(retrace_arch::KERN_INVALID_ADDRESS); }
+        }
+        if self.jit.refuse_overlap(src, dsz, "mach_vm_reallocate").is_err() {
+            retrace_arch::refuse!(Memory, "M57: mach_vm_reallocate over a MAP_JIT range: unmodelled (Ruling T6-c)");
+        }
         let Some(bytes) = usize::try_from(src_size).ok().and_then(|n| self.read_va_checked(src, n)) else {
             return Err(retrace_arch::KERN_INVALID_ADDRESS);
         };
-        if dsz == ssz && flags & retrace_arch::VM_FLAGS_ANYWHERE != 0 { return Ok(src); }
-        if flags & retrace_arch::VM_FLAGS_ANYWHERE != 0 && self.range_is_free(src + ssz, dsz - ssz) {
+        if anywhere && dsz == ssz { return Ok(src); }
+        if anywhere && self.range_is_free(src + ssz, dsz - ssz) {
             self.guest_vm_map_masked(src + ssz, dsz - ssz, 0, retrace_arch::VM_FLAGS_OVERWRITE, false)?;
             // The grown tail may sit at the bump cursor, above the window `float_cursor_past` floats
-            // through; `range_is_free` bounded it by `IPA_LIMIT`, so floating past it is always sound.
+            // through (its COMMPAGE2 ceiling is below the heap the guest actually uses); `range_is_free`
+            // bounded the tail by `IPA_LIMIT`, so floating past it is sound.
             self.mmap_next = self.mmap_next.max(src + dsz);
             return Ok(src);
-        }
-        if flags & retrace_arch::VM_FLAGS_ANYWHERE == 0 && dst_in < src + ssz && src < dst_in.saturating_add(dsz) {
-            retrace_arch::refuse!(Memory, "M57: mach_vm_reallocate FIXED destination overlaps its source: unmeasured");
         }
         let dst = self.guest_vm_map_masked(dst_in, dsz, mask, flags, false)?;
         self.write_va_committing(dst, &bytes).expect("a fresh mapping admits its own head");

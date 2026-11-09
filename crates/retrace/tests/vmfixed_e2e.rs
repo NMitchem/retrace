@@ -81,14 +81,17 @@ fn mach_vm_copy_copies_the_bytes_and_answers_natives_codes_without_recording_the
 
 #[test]
 fn mach_vm_reallocate_follows_native_and_records_only_its_reply() {
-    for case in ["inplace", "blocked", "shrink", "unaligned", "unmapped", "fixed", "zero_dst"] {
+    for case in ["inplace", "blocked", "shrink", "unaligned", "unmapped", "fixed", "zero_dst", "reservation_after", "inplace_then_mmap", "equal", "huge", "wrap", "odd_dst_size", "fixed_overlap", "fixed_overwrite_overlap", "zero_src"] {
         let (out, r) = as_native_run(retrace_guest::VMREALLOC_DYN, &[case]);
-        assert!(out.starts_with(&format!("{case} kr=")), "{case}: {out}");
+        assert!(out.starts_with(&format!("{case} kr=")) || case == "inplace_then_mmap", "{case}: {out}");
         match case {
-            "shrink" | "unaligned" => assert!(out.contains("kr=4 "), "{out}"),
-            "unmapped" => assert!(out.contains("kr=1 "), "{out}"),
+            "shrink" | "unaligned" | "wrap" | "odd_dst_size" | "zero_src" => assert!(out.contains("kr=4 "), "{out}"),
+            "huge" | "fixed_overlap" => assert!(out.contains("kr=3 "), "{out}"),
+            "unmapped" | "fixed_overwrite_overlap" => assert!(out.contains("kr=1 "), "{out}"),
             "inplace" => assert!(out.contains("kr=0 moved=0 head=") && out.contains("tail=0 srcgone=0"), "{out}"),
-            "blocked" | "fixed" => assert!(out.contains("kr=0 moved=1 ") && out.contains("tail=0 srcgone=1"), "{out}"),
+            "equal" => assert!(out.contains("kr=0 moved=0 "), "{out}"),
+            "inplace_then_mmap" => assert!(out.contains("mmap_overlap=0 new_intact=1"), "{out}"),
+            "blocked" | "fixed" | "reservation_after" => assert!(out.contains("kr=0 moved=1 ") && out.contains("tail=0 srcgone=1"), "{out}"),
             _ => assert!(out.contains("kr=0 "), "{out}"),
         }
         if case != "inplace" { continue; }
