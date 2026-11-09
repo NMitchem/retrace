@@ -1547,6 +1547,8 @@ pub const RLIMIT_POSIX_FLAG: u64 = 0x1000;
 
 /// BSD errno: an argument the kernel rejects (a MAP_FIXED address outside the address space).
 pub const EINVAL: u64 = 22;
+/// `ENOMEM`: no address space to place an anonymous mapping (M57 t8).
+pub const ENOMEM: u64 = 12;
 /// `<mach/vm_statistics.h>`: `mach_vm_map`/`mach_vm_allocate` flags. FIXED is the absence of ANYWHERE.
 pub const VM_FLAGS_ANYWHERE: u64 = 0x1;
 /// `VM_FLAGS_OVERWRITE`: a FIXED request replaces what it covers instead of answering `KERN_NO_SPACE` (M52 §3b).

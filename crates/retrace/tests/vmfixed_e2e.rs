@@ -133,3 +133,14 @@ fn a_remap_fixed_without_overwrite_over_occupied_memory_answers_kern_no_space() 
     assert!(out.contains("remap kr=3 target=intact\n"), "{out}");
     assert!(out.contains("remap-overwrite kr=0 target=aliased\n"), "{out}");
 }
+
+#[test]
+fn hint_zero_allocations_after_a_hinted_map_and_a_reservation_never_overlap_it() {
+    // M57 t8: the bump cursor used to hand out whatever lay at it. Native: no overlap, the pattern
+    // written into every page of every allocation survives a FIXED|OVERWRITE commit of the
+    // reservation's head.
+    let out = as_native(retrace_guest::VMFIXED_DYN, &["bump"]);
+    assert!(out.contains("reserve kr=0\n"), "the reservation must be accepted natively:\n{out}");
+    assert!(out.contains("commit kr=0\n"), "{out}");
+    assert!(out.contains("overlaps=0 corrupted=0\n"), "{out}");
+}

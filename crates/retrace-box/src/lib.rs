@@ -2907,7 +2907,9 @@ impl Box_ {
 
     /// Ruling T1-float-ceiling: float `mmap_next` past a FIXED range only when its granule-rounded end is at
     /// or below `COMMPAGE2_IPA`; the bump region ends below the box's high windows, so a cursor past them can
-    /// only produce a placement that fails.
+    /// only produce a placement that fails. M57 t8: since the IPA is 40 bits this is an optimisation only,
+    /// not the invariant it was at 36 bits ("everything at or above the cursor is free"): every bump
+    /// placement now goes through `first_fit`, which skips whatever lies at the cursor.
     fn float_cursor_past(&mut self, addr: u64, len: u64) {
         let g = GRANULE as u64;
         let end = addr.saturating_add(len).saturating_add(g - 1) & !(g - 1);
@@ -2978,7 +2980,15 @@ impl Box_ {
                 None => {
                     if exec { self.mmap_next = (self.mmap_next + (BLK - 1)) & !(BLK - 1); }
                     if mask != 0 { self.mmap_next = (self.mmap_next + m) & !m; }
-                    let a = self.mmap_next; self.mmap_next += rlen as u64; a
+                    // M57 t8: the bump is checked like a hinted placement; nothing fits => no space.
+                    match self.first_fit(self.mmap_next, rlen as u64, m) {
+                        Some(a) => { self.mmap_next = a + rlen as u64; a }
+                        None => {
+                            // SAFETY: `host` is the fresh `alloc_pages` result above, never published.
+                            unsafe { free_pages(host, rlen); }
+                            return Err(retrace_arch::KERN_NO_SPACE);
+                        }
+                    }
                 }
             }
         } else {
@@ -3032,12 +3042,11 @@ impl Box_ {
                 let m = mask | (GRANULE as u64 - 1);
                 self.mmap_next = (self.mmap_next + m) & !m;
             }
-            let end = self.mmap_next + rounded;
-            if end > IPA_LIMIT {
-                retrace_arch::refuse!(Memory, "guest_vm_reserve ANYWHERE overflowed {IPA_BITS}-bit IPA space: {end:#x}");
-            }
-            let a = self.mmap_next;
-            self.mmap_next = end;
+            // M57 t8: the bump is checked (backings, reservations, forbidden windows, the IPA limit);
+            // nothing fits => KERN_NO_SPACE, never a panic (this replaces the old overflow refuse).
+            let m = mask | (GRANULE as u64 - 1);
+            let a = self.first_fit(self.mmap_next, rounded, m).ok_or(retrace_arch::KERN_NO_SPACE)?;
+            self.mmap_next = a + rounded;
             a
         } else {
             // M52 §3b: the cursor floats past every FIXED reservation, not only one it sits inside,
@@ -3533,10 +3542,20 @@ impl Box_ {
             }
             self.float_cursor_past(addr, rlen as u64);
             addr
-        } else { self.mmap_next };
+        } else {
+            // M57 t8: the bump is checked; nothing fits => ENOMEM, with `host` released (we own it).
+            match self.first_fit(self.mmap_next, rlen as u64, GRANULE as u64 - 1) {
+                Some(a) => a,
+                None => {
+                    // SAFETY: `host` is this function's unpublished `rlen`-byte mapping.
+                    unsafe { free_pages(host, rlen); }
+                    return Err(retrace_arch::ENOMEM);
+                }
+            }
+        };
         self.vm.map(host, ipa, rlen, MemFlags::RWX).expect("hv_vm_map (mmap region)");
         self.backings.push(Backing { host, ipa, len: rlen });
-        if flags & Self::MAP_FIXED == 0 { self.mmap_next += rlen as u64; }
+        if flags & Self::MAP_FIXED == 0 { self.mmap_next = ipa + rlen as u64; }
         // M13: a PROT_NONE mmap is protected once its backing exists — which is why the invariant
         // "no-access => backed" costs nothing on this path.
         if prot == 0 { self.protect_none(ipa, rlen as u64); }
