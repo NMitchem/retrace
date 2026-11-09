@@ -43,3 +43,4 @@ crates/retrace-box/src/lib.rs	forward_and_diff	Syscalls	syscall
 crates/retrace-box/src/lib.rs	forward_and_diff	Syscalls	M55: socketpair of domain
 crates/retrace-box/src/lib.rs	fire_itimer	Signals	M55:
 crates/retrace-box/src/lib.rs	cache_wall	MacosVersion	macOS
+crates/retrace-box/src/lib.rs	place_worker_stack	Memory	M57: no address space left for a worker

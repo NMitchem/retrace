@@ -28,7 +28,7 @@ fn blend(addr: u64, diversity: u16) -> u64 {
 // slot IPA 0x1ec46e2e0. On 27.2 that slot is no longer an auth pointer and the test FPAC-faulted.
 // `first_da_addr_div_slot` parses the cache's own header + v5 slide info by hand, independently of
 // `cache.rs`, which keeps the assertion a real oracle rather than a restatement of the code under test.
-const CACHE: &str = "/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_arm64e";
+const CACHE: &str = retrace_box::DEFAULT_CACHE_PATH;
 
 fn rd<const N: usize>(f: &[u8], off: usize) -> [u8; N] {
     f[off..off + N].try_into().unwrap()

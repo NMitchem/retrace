@@ -706,7 +706,10 @@ impl Box_ {
         for q in 0..32 { self.vcpu.set_simd(simd::q(q), 0).unwrap(); }
         self.vcpu.set_reg(reg::FPCR, 0).unwrap();
         self.vcpu.set_reg(reg::FPSR, 0).unwrap();
-        let StagedImage { l2_host, next_l3, pac, .. } = st;
+        let StagedImage { l2_host, next_l3, pac, cache, .. } = st;
+        // M57 final review I1 (Ruling P18): the new image loads the host cache, so the window is its end, as
+        // `load_dynamic_env` sets it. One method on both sides, so symmetric by construction.
+        self.shared_region_end = { let (base, size) = cache.window(); crate::shared_region_end_for(base, size) };
         self.pac_enabled = pac;
         self.stack_top = DYN_STACK_TOP;
         self.stack_size = DYN_STACK_SIZE;

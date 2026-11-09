@@ -1915,7 +1915,7 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                 };
                 macro_rules! undo { () => { if let Some(t) = txn.take() { t.rollback(); } } }
                 // The kernel finds and checks the file first and copies the argument strings in after.
-                let resolved = match exec::resolve(&call, b.shared_region_end()) {
+                let resolved = match exec::resolve(&call, retrace_box::host_shared_region_end()) {
                     Ok(r) => r,
                     Err(ExecRefusal::Errno(e)) => { undo!(); append_refused(&mut w, &mut b, &mut count, num, args, e, true, thread)?; continue; }
                     Err(ExecRefusal::Wall(m)) => { undo!(); return Err(m) }

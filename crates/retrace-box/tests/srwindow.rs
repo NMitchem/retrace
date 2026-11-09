@@ -5,7 +5,7 @@ use retrace_guest::{parse_macho, slice_arm64e, CRASHY, DYLD_PATH};
 use retrace_trace::Event;
 use std::io::{Read, Seek, SeekFrom};
 
-const CACHE: &str = "/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_arm64e";
+const CACHE: &str = retrace_box::DEFAULT_CACHE_PATH;
 
 fn announce(line: &str) {
     use std::io::Write;

@@ -236,7 +236,7 @@ and a misaligned PC or stack pointer (SIGBUS, 138).
 
 retrace runs on macOS 26 and 27, at any point release. On another major every command ends at one line, `macOS <product> (<build>) is not supported: retrace runs on macOS 26 and 27`, with exit 4, before any VM exists.
 
-Every recording carries the macOS version, build and shared-cache UUID of the Mac that made it, and **a recording replays only on the macOS build that made it**. Replaying one on a Mac with a different shared cache is refused with `<trace> was recorded on macOS <product> (<build>) with a different shared cache`, exit 2. A recording made by an earlier retrace is refused by its format, as before.
+Every recording of a dynamic program carries the macOS version, build and shared-cache UUID of the Mac that made it, and **such a recording replays only on the macOS build that made it**. A static recording carries no UUID and is not pinned. Replaying one on a Mac with a different shared cache is refused with `<trace> was recorded on macOS <product> (<build>) with a different shared cache`, exit 2. A recording made by an earlier retrace is refused by its format, as before.
 
 retrace reads the dyld shared cache's own header to find its files, and checks each file against the subcache table there. A cache laid out in a way retrace has not met is refused, exit 4, with `has a shared cache retrace does not recognise: <why>`, naming the host's macOS version and build, rather than mis-read.
 

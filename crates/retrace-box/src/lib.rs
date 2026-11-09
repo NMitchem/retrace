@@ -2902,7 +2902,7 @@ impl Box_ {
     /// replace what they cover. A guest's FIXED request goes through `guest_vm_map_masked` with its flags.
     pub fn guest_vm_map(&mut self, addr: u64, size: u64, anywhere: bool, exec: bool) -> u64 {
         let flags = if anywhere { retrace_arch::VM_FLAGS_ANYWHERE } else { retrace_arch::VM_FLAGS_OVERWRITE };
-        self.guest_vm_map_masked(addr, size, 0, flags, exec).expect("ANYWHERE and FIXED|OVERWRITE never refuse")
+        self.guest_vm_map_masked(addr, size, 0, flags, exec).expect("FIXED|OVERWRITE never refuses; an ANYWHERE caller must use the _masked form")
     }
 
     /// Ruling T1-float-ceiling: float `mmap_next` past a FIXED range only when its granule-rounded end is at
@@ -2983,7 +2983,7 @@ impl Box_ {
                     // M57 t8: the bump is checked like a hinted placement; nothing fits => no space.
                     // An exec placement still starts on a fresh BLK block when the cursor is occupied.
                     let fm = if exec { m | (BLK - 1) } else { m };
-                    match self.first_fit(self.mmap_next, rlen as u64, fm) {
+                    match self.bump_fit(rlen as u64, fm) {
                         Some(a) => { self.mmap_next = a + rlen as u64; a }
                         None => {
                             // SAFETY: `host` is the fresh `alloc_pages` result above, never published.
@@ -3025,7 +3025,7 @@ impl Box_ {
     /// Deterministic: identical call sequence => identical returned address on replay.
     pub fn guest_vm_reserve(&mut self, addr: u64, size: u64, anywhere: bool) -> u64 {
         let flags = if anywhere { retrace_arch::VM_FLAGS_ANYWHERE } else { retrace_arch::VM_FLAGS_OVERWRITE };
-        self.guest_vm_reserve_masked(addr, size, 0, flags).expect("ANYWHERE and FIXED|OVERWRITE never refuse")
+        self.guest_vm_reserve_masked(addr, size, 0, flags).expect("FIXED|OVERWRITE never refuses; an ANYWHERE caller must use the _masked form")
     }
 
     /// `guest_vm_reserve` with `mach_vm_map`'s alignment `mask`, honoured on ANYWHERE as
@@ -3047,7 +3047,7 @@ impl Box_ {
             // M57 t8: the bump is checked (backings, reservations, forbidden windows, the IPA limit);
             // nothing fits => KERN_NO_SPACE, never a panic (this replaces the old overflow refuse).
             let m = mask | (GRANULE as u64 - 1);
-            let a = self.first_fit(self.mmap_next, rounded, m).ok_or(retrace_arch::KERN_NO_SPACE)?;
+            let a = self.bump_fit(rounded, m).ok_or(retrace_arch::KERN_NO_SPACE)?;
             self.mmap_next = a + rounded;
             a
         } else {
@@ -3272,6 +3272,13 @@ impl Box_ {
     /// aligned end of the extent that blocks the aligned address below it. At `m == GRANULE - 1`
     /// every candidate is what it was before the mask: the two window ends are page-aligned.
     /// Saturating, so a garbage hint near `u64::MAX` still finds no fit and falls back to the bump.
+    /// M57 final review M2: the bump placement. The kernel searches from the bottom of the area, so when
+    /// nothing fits from the cursor up, retry from `MMAP_BASE` before answering no-space. A pure function
+    /// of box state.
+    fn bump_fit(&self, len: u64, m: u64) -> Option<u64> {
+        self.first_fit(self.mmap_next, len, m).or_else(|| self.first_fit(MMAP_BASE, len, m))
+    }
+
     fn first_fit(&self, hint: u64, len: u64, m: u64) -> Option<u64> {
         let g = GRANULE as u64;
         let round_up = |x: u64| x.saturating_add(m) & !m;
@@ -3547,7 +3554,7 @@ impl Box_ {
         } else {
             // M57 t8: the bump is checked; nothing fits => ENOMEM, with `host` released (we own it).
             let fm = if prot & Self::PROT_EXEC != 0 { BLK - 1 } else { GRANULE as u64 - 1 };
-            match self.first_fit(self.mmap_next, rlen as u64, fm) {
+            match self.bump_fit(rlen as u64, fm) {
                 Some(a) => a,
                 None => {
                     // SAFETY: `host` is this function's unpublished `rlen`-byte mapping.
@@ -8466,7 +8473,9 @@ impl Box_ {
         // Skip one granule so the guard page below `x2` lands in a hole no reservation covers.
         // Deterministic like everything else here: a fixed bump of the same cursor.
         self.mmap_next += GRANULE as u64;
-        let base = self.guest_vm_reserve(0, WQ_WORKER_STACK_SIZE + pthsize, true);
+        let Ok(base) = self.guest_vm_reserve_masked(0, WQ_WORKER_STACK_SIZE + pthsize, 0, retrace_arch::VM_FLAGS_ANYWHERE) else {
+            retrace_arch::refuse!(Memory, "M57: no address space left for a worker thread's stack (the guest's address space is exhausted)");
+        };
         let pthread = base + WQ_WORKER_STACK_SIZE;
         (base, pthread, pthread)
     }
@@ -9618,12 +9627,12 @@ impl Box_ {
         s
     }
 
-    /// Test-only diagnostic: the internal bookkeeping fields `checkpoint()`/`from_checkpoint()` must
-    /// round-trip that have no other observable accessor. Never used by production code.
-    #[doc(hidden)]
     /// The shared-region window's end (M57 §3b).
     pub fn shared_region_end(&self) -> u64 { self.shared_region_end }
 
+    /// Test-only diagnostic: the internal bookkeeping fields `checkpoint()`/`from_checkpoint()` must
+    /// round-trip that have no other observable accessor. Never used by production code.
+    #[doc(hidden)]
     pub fn dbg_internal_state(&self) -> String {
         format!("reservations={:?} mmap_next={:#x} bootstrap_port={:?} cache_installed={} last_far={:#x} synthetic_tsc={:#x} cache_refault_ipa={:#x} cache_refault_count={} pac_enabled={} kq={:?} gkq={:?} psynch={:?} jit={:?} sleep={:?} sems={:?} itimer={:?} shared_region_end={:#x}",
             self.reservations, self.mmap_next, self.bootstrap_port, self.cache.is_some(),
@@ -9816,6 +9825,13 @@ fn load_host_cache() -> CacheMeta {
 /// error is the text of why the header could not be read; this never walls or panics.
 pub fn host_cache_uuid() -> Result<[u8; 16], String> {
     cache::read_main_header(DEFAULT_CACHE_PATH).map(|h| h.uuid).map_err(|e| e.to_string())
+}
+
+/// The window end a dynamic image loaded on this host gets (M57 P18): what an exec into a dynamic image
+/// will set, for the pre-point-of-no-return layout check.
+pub fn host_shared_region_end() -> u64 {
+    let h = host_cache_header();
+    shared_region_end_for(h.base, h.size)
 }
 
 fn host_cache_header() -> cache::MainHeader {

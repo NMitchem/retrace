@@ -71,3 +71,18 @@ fn an_exec_bump_past_an_occupied_cursor_still_starts_on_a_block() {
     let a2 = b.guest_mmap(0, 1 << 20, 5, MAP_ANON_PRIVATE).unwrap();
     assert_eq!(a2 % BLK, 0, "exec mmap at {a2:#x} is not block aligned");
 }
+
+// M57 final review M2: with everything from the cursor to the IPA limit taken, a hint-0 ANYWHERE map
+// still succeeds below the cursor, as the kernel's bottom-up search does.
+#[test]
+fn a_bump_with_the_cursor_region_full_retries_from_the_base() {
+    let mut b = boxed();
+    // Float the cursor up, then fill everything from it to the IPA limit with one FIXED reservation.
+    let top = retrace_box::IPA_LIMIT;
+    let start = 0x40_0000_0000u64;
+    b.guest_vm_reserve_masked(start, 0x1000, 0, FIXED).expect("float the cursor");
+    let from = 0x41_0000_0000u64;
+    b.guest_vm_reserve_masked(from, top - from, 0, FIXED).expect("fill to the limit");
+    let a = b.guest_vm_map_masked(0, 4 << 20, 0, ANYWHERE, false).expect("room remains below the cursor");
+    assert!(a < start, "placed at {a:#x}, below the cursor");
+}
