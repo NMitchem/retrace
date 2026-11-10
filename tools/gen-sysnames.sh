@@ -2,6 +2,8 @@
 # M50: generate crates/retrace-arch/src/sysnames.rs from the macOS SDK's sys/syscall.h, so a wall
 # line names a syscall the way the SDK does. Run from the repository root after an SDK update;
 # `the_generated_syscall_names_match_the_sdk_header` fails until it is re-run.
+# Run it against the NEWEST supported SDK: the table must be a superset of every supported SDK's
+# (SDK 27.2 adds eight numbers to SDK 26's 458, none renamed), so an older SDK's names stay covered.
 set -eu
 H="$(xcrun --show-sdk-path)/usr/include/sys/syscall.h"
 {

@@ -249,6 +249,7 @@ mod tests {
     #[test]
     fn syscall_display_names_bsd_numbers_from_the_sdk_and_measured_mach_traps() {
         assert_eq!(syscall_display(95), "fsync (syscall 95)");
+        assert_eq!(syscall_display(148), "pipe2 (syscall 148)");
         assert_eq!(syscall_display(375), "kevent_id (syscall 375)");
         assert_eq!(syscall_display((-38i64) as u64), "semaphore_timedwait_trap (mach trap -38)");
         assert_eq!(syscall_display((-1000i64) as u64), "mach trap -1000");
@@ -268,6 +269,10 @@ mod tests {
             assert_eq!(crate::sysnames::syscall_name(num), Some(&f[1][4..]), "{line}");
             n += 1;
         }
-        assert_eq!(n, 458, "the SDK's SYS_ count moved: re-run tools/gen-sysnames.sh");
+        // The per-line check above is the guard: it fails on any SDK define the table lacks or names
+        // differently. The floor only proves the header was parsed. The table is generated from the
+        // newest supported SDK (27.2: 466 defines) and is a superset of 26's (458), so a 26 SDK must
+        // pass here too. No OS-version branch (R1).
+        assert!(n >= 458, "the parser found too few SYS_ defines ({n}): is the SDK header readable?");
     }
 }
