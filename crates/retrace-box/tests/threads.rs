@@ -1273,6 +1273,31 @@ fn workq_reqthreads_leaves_an_uncommittable_guard_page_below_each_worker_stack()
          worker 1's pthread struct", w2 - GRANULE);
 }
 
+/// M57 P19 (final re-review R1): the same guard, with the cursor OCCUPIED when the workers are placed.
+/// Since T8 a bump placement over an occupied cursor lands flush against the blocking extent's end, so
+/// the one-granule cursor bump no longer makes a hole; the granule below the stack would be that
+/// extent's last granule, which a reservation demand-commits. The stack search must find the granule
+/// free instead.
+#[test]
+fn workq_reqthreads_keeps_the_guard_page_when_the_cursor_is_occupied() {
+    const GRANULE: u64 = 0x4000;
+    const HINT: u64 = 0x77_0000_0000;
+    let mut b = tb();
+    // Float the cursor high with a hinted placement, then reserve over the cursor itself.
+    b.guest_vm_map_masked(HINT, 4 << 20, 0, retrace_arch::VM_FLAGS_ANYWHERE, false).unwrap();
+    let cur = HINT + (4 << 20);
+    b.guest_vm_reserve_masked(cur, 0x10_0000, 0, 0).expect("reserve over the cursor");
+    b.guest_bsdthread_register([0x1111, 0x2222, 0x3333, 0, 0, 0, 0, 0]);
+    b.guest_workq_kernreturn([0x20, 0x0, 0x2, 0x40008ff, 0x0, 0x20, 0, 0]);
+    let (w1, w2) = (b.threads().ctx_of(1).regs.x[2], b.threads().ctx_of(2).regs.x[2]);
+    assert!(b.commit_reserved_page(w1), "worker 1's stack must be inside a tracked reservation");
+    assert!(b.commit_reserved_page(w2), "worker 2's stack must be inside a tracked reservation");
+    assert!(!b.commit_reserved_page(w1 - GRANULE),
+        "worker 1's guard page at {:#x} must not be demand-committable with the cursor occupied", w1 - GRANULE);
+    assert!(!b.commit_reserved_page(w2 - GRANULE),
+        "worker 2's guard page at {:#x} must not be demand-committable with the cursor occupied", w2 - GRANULE);
+}
+
 /// The three fail-loud guards `guest_workq_reqthreads` added, pinned the way
 /// `workq_kernreturn_refuses_an_unmeasured_opcode_by_value` pins its own refuse-by-value posture:
 /// the panic must NAME the offending value, or it tells the next reader nothing.

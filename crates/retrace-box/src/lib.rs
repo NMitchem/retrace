@@ -8442,20 +8442,23 @@ impl Box_ {
     ///   *records* that address — it neither maps nor checks it — so if this page is to guard
     ///   anything, **the guard is retrace's, not libpthread's.**
     ///
-    /// **The one-granule bump is what makes the guard page real** (fix round 1, Important 1).
-    /// `guest_vm_reserve` hands out `mmap_next` and advances it CONTIGUOUSLY, so without the bump
+    /// **Finding the granule free is what makes the guard page real** (fix round 1, Important 1; M57 P19).
+    /// The stack is placed by `bump_fit` over one granule MORE than it needs and reserved at `a + GRANULE`,
+    /// so `[a, a + GRANULE)` was free when found and stays a hole. (Bumping the cursor by a granule, as
+    /// this once did, is not enough since M57 T8: over an occupied cursor `first_fit` lands flush against
+    /// the blocking extent.) Without it, a contiguous placement
     /// `[x2 - GRANULE, x2)` is the last page of whatever reservation precedes it — for the second
     /// worker of a `numthreads=2` request, that is the FIRST worker's pthread struct page, and
     /// `commit_reserved_page` would back it on first touch because it lies inside a tracked
     /// reservation. A worker-2 stack overrun would then corrupt worker 1's struct in silence. With
-    /// the bump the page falls in a hole no reservation covers, so `commit_reserved_page` returns
+    /// the hole the page falls in is one no reservation covers, so `commit_reserved_page` returns
     /// `false` for it and the access stays a stage-2 fault (since M49 F2, the guest's own SIGSEGV
     /// rather than a recorder error) — which is the whole point: an overrun that faults is a bug
     /// you can find.
     ///
     /// That hole is a gap, not a claim on the address space: nothing marks it forbidden, so a later
     /// ANYWHERE-with-hint placement (`first_fit`) could still fit a small mapping into it, after
-    /// which an overrun would land in that mapping instead. What the bump guarantees is the case
+    /// which an overrun would land in that mapping instead. What the free granule guarantees is the case
     /// that was actually silent — demand-commit — and `retrace-box/tests/threads.rs`'s
     /// `workq_reqthreads_leaves_an_uncommittable_guard_page_below_each_worker_stack` pins exactly
     /// that, refusal and non-vacuous positive control both.
@@ -8470,12 +8473,18 @@ impl Box_ {
     /// Deterministic: `guest_vm_reserve(.., anywhere)` hands out `mmap_next` and advances it, so
     /// an identical call sequence places an identical worker on record and on replay.
     fn place_worker_stack(&mut self, pthsize: u64) -> (u64, u64, u64) {
-        // Skip one granule so the guard page below `x2` lands in a hole no reservation covers.
-        // Deterministic like everything else here: a fixed bump of the same cursor.
-        self.mmap_next += GRANULE as u64;
-        let Ok(base) = self.guest_vm_reserve_masked(0, WQ_WORKER_STACK_SIZE + pthsize, 0, retrace_arch::VM_FLAGS_ANYWHERE) else {
+        // Find a free range one granule longer than the stack, and reserve only its top part: the granule
+        // below `x2` was free when found, so it is a hole no reservation covers. Pure function of box state.
+        let g = GRANULE as u64;
+        let len = WQ_WORKER_STACK_SIZE + pthsize;
+        let rounded = (len + g - 1) & !(g - 1);
+        let placed = self.bump_fit(g + rounded, g - 1)
+            .and_then(|a| self.guest_vm_reserve_masked(a + g, len, 0, 0).ok().map(|base| (a, base)));
+        let Some((a, base)) = placed else {
             retrace_arch::refuse!(Memory, "M57: no address space left for a worker thread's stack (the guest's address space is exhausted)");
         };
+        // The cursor ends past the stack, as every other bump placement leaves it.
+        self.mmap_next = a + g + rounded;
         let pthread = base + WQ_WORKER_STACK_SIZE;
         (base, pthread, pthread)
     }

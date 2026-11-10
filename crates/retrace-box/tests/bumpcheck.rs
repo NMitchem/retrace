@@ -77,11 +77,12 @@ fn an_exec_bump_past_an_occupied_cursor_still_starts_on_a_block() {
 #[test]
 fn a_bump_with_the_cursor_region_full_retries_from_the_base() {
     let mut b = boxed();
-    // Float the cursor up, then fill everything from it to the IPA limit with one FIXED reservation.
+    // Float the cursor with a hinted ANYWHERE map (which floats unconditionally), then fill everything
+    // from the cursor to the IPA limit with one FIXED reservation.
     let top = retrace_box::IPA_LIMIT;
     let start = 0x40_0000_0000u64;
-    b.guest_vm_reserve_masked(start, 0x1000, 0, FIXED).expect("float the cursor");
-    let from = 0x41_0000_0000u64;
+    b.guest_vm_map_masked(start, 4 << 20, 0, ANYWHERE, false).expect("float the cursor");
+    let from = start + (4 << 20);
     b.guest_vm_reserve_masked(from, top - from, 0, FIXED).expect("fill to the limit");
     let a = b.guest_vm_map_masked(0, 4 << 20, 0, ANYWHERE, false).expect("room remains below the cursor");
     assert!(a < start, "placed at {a:#x}, below the cursor");
