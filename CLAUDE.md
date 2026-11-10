@@ -9,7 +9,8 @@ single-vCPU Hypervisor.framework VM, records every syscall/trap plus the kernel'
 replays the run **bit-for-bit** from a snapshot — never re-executing a syscall, only re-applying
 recorded effects. The determinism oracle proves zero divergence between the two runs.
 
-Requires **macOS 26.x on Apple Silicon**. Runs non-root; SIP may stay enabled. Every binary that
+Requires **macOS 26 or 27 on Apple Silicon** (27.2 measured at M57; 26 kept by construction).
+Runs non-root; SIP may stay enabled. Every binary that
 touches `hv_*` needs the `com.apple.security.hypervisor` entitlement (ad-hoc signable — see
 Codesigning below).
 

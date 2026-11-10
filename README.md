@@ -119,19 +119,19 @@ behind it. These are the ones you'll hit first:
 
 ## Performance
 
-Median of 5 runs with `tools/bench.py`, Apple M4 Pro, release build. The figures on macOS 27.2 (26B123) are ⟪TBD:bench⟫; the table is the last measurement, on macOS 26.5.2, 2026-10-04:
+Median of 5 runs with `tools/bench.py`, Apple M4 Pro, release build, macOS 27.2 (26B123), 2026-11-10:
 
 | workload | native | record | replay | recorder RSS | trace |
 |---|---|---|---|---|---|
-| `/bin/echo hi` | 0.001 s | 0.20 s | 0.20 s | 104 MiB | 28 MiB |
-| `/bin/ls /usr/bin` | 0.004 s | 0.23 s | 0.24 s | 107 MiB | 33 MiB |
-| `jq` filtering a 5 MB JSON file | 0.08 s | 1.98 s | 2.05 s | 446 MiB | 286 MiB |
-| CPython `-c 'print(1)'` | 0.012 s | 0.60 s | 0.62 s | 214 MiB | 85 MiB |
-| CPython, a 30M-step loop | 0.95 s | 1.63 s | 1.64 s | 215 MiB | 85 MiB |
-| node `-e 'console.log(1)'` | 0.041 s | 3.45 s | 3.53 s | 733 MiB | 502 MiB |
+| `/bin/echo hi` | 0.002 s | 0.28 s | 0.28 s | 172 MiB | 37 MiB |
+| `/bin/ls /usr/bin` | 0.006 s | 0.33 s | 0.33 s | 175 MiB | 41 MiB |
+| `jq` filtering a 5 MB JSON file | 0.08 s | 1.12 s | 1.09 s | 599 MiB | 136 MiB |
+| CPython `-c 'print(1)'` | 0.017 s | 0.60 s | 0.59 s | 282 MiB | 78 MiB |
+| CPython, a 30M-step loop | 0.97 s | 1.66 s | 1.65 s | 284 MiB | 78 MiB |
+| node `-e 'console.log(1)'` | 0.050 s | 3.60 s | 3.62 s | 1006 MiB | 501 MiB |
 
-Building the VM and paging in the shared cache costs about 0.2 s at startup (0.6 s for CPython,
-3.4 s for node). After that, compute runs within about 10% of native, since the guest executes
+Building the VM and paging in the shared cache costs about 0.3 s at startup (0.6 s for CPython,
+3.6 s for node). After that, compute runs within about 11% of native, since the guest executes
 directly on the CPU. Syscalls that move a lot of memory are the slow case: each one is diffed and
 stored in the trace.
 
