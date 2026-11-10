@@ -234,7 +234,7 @@ and a misaligned PC or stack pointer (SIGBUS, 138).
 
 ## macOS version
 
-retrace runs on macOS 26 and 27, at any point release. On another major every command ends at one line, `macOS <product> (<build>) is not supported: retrace runs on macOS 26 and 27`, with exit 4, before any VM exists.
+retrace runs on macOS 26 and 27, at any point release; 27.2 and 26.5.2 are the measured builds, and other point releases are untested. On another major every command ends at one line, `macOS <product> (<build>) is not supported: retrace runs on macOS 26 and 27`, with exit 4, before any VM exists.
 
 Every recording of a dynamic program carries the macOS version, build and shared-cache UUID of the Mac that made it, and **such a recording replays only on the macOS build that made it**. A static recording carries no UUID and is not pinned. Replaying one on a Mac with a different shared cache is refused with `<trace> was recorded on macOS <product> (<build>) with a different shared cache`, exit 2. A recording made by an earlier retrace is refused by its format, as before.
 

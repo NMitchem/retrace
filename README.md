@@ -84,7 +84,8 @@ behind it. These are the ones you'll hit first:
 - macOS 26 or 27 on Apple Silicon only. retrace depends on measured behaviour of macOS internals (dyld,
   libpthread, libdispatch, the shared cache), so an OS update can break it; another major is refused until it is
   measured. macOS 27 is measured (27.2); macOS 26 was measured at 26.5.2 and is kept by construction, not
-  re-measured since. A recording replays only on the macOS build that made it.
+  re-measured since. Other point releases of 26 and 27 run but are untested. A recording replays only on the
+  macOS build that made it.
 - Threads run one at a time and switch only when one blocks or exits. That keeps the schedule
   replayable without recording it, but races that need preemption won't reproduce and parallel
   programs run serially. A thread that spins waiting for another one, without ever blocking, hangs
@@ -147,7 +148,7 @@ Until `v0.1.0` is tagged, the formula has no stable version: install with
 `brew install --HEAD nmitchem/retrace/retrace`.
 
 Homebrew builds retrace from source with the pinned Rust toolchain and signs it with the hypervisor
-entitlement. You need macOS 26 or 27 on Apple Silicon (27.2 and 26.5.2 are the measured builds) and the Command Line Tools for lldb
+entitlement. You need macOS 26 or 27 on Apple Silicon (27.2 and 26.5.2 are the measured builds; other point releases run but are untested) and the Command Line Tools for lldb
 (`xcode-select --install`). No root, no Apple developer account, and SIP can stay on.
 
 To build it yourself you need a Rust toolchain (`rust-toolchain.toml` pins the version):
