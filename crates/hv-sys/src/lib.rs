@@ -19,10 +19,31 @@ impl MemFlags {
         (HV_MEMORY_READ | HV_MEMORY_WRITE | HV_MEMORY_EXEC) as u64);
 }
 
+extern "C" { fn os_release(object: *mut std::ffi::c_void); }
+
+/// M57 §3c: the widest guest IPA this Mac's hypervisor allows, in bits. Needs no VM and no entitlement
+/// (measured on 27.2 unsigned: max 40, default 36).
+pub fn max_ipa_bits() -> Result<u32, HvError> {
+    let mut bits = 0u32;
+    check(unsafe { hv_vm_config_get_max_ipa_size(&mut bits) })?;
+    Ok(bits)
+}
+
 pub struct Vm(());
 impl Vm {
     pub fn create() -> Result<Vm, HvError> {
         check(unsafe { hv_vm_create(std::ptr::null_mut()) })?;
+        Ok(Vm(()))
+    }
+    /// A VM whose guest IPA is `bits` wide. The configuration object is released once creation is done, as
+    /// hv_vm_config.h asks ("should be released with os_release when no longer used").
+    pub fn create_with_ipa(bits: u32) -> Result<Vm, HvError> {
+        unsafe {
+            let cfg = hv_vm_config_create();
+            let r = check(hv_vm_config_set_ipa_size(cfg, bits)).and_then(|()| check(hv_vm_create(cfg)));
+            os_release(cfg as *mut std::ffi::c_void);
+            r?;
+        }
         Ok(Vm(()))
     }
     pub fn map(&self, host: *mut u8, ipa: u64, len: usize, flags: MemFlags) -> Result<(), HvError> {

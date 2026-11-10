@@ -81,8 +81,11 @@ script.
 [`docs/current-state.md`](docs/current-state.md#known-limits) has every limit and the measurement
 behind it. These are the ones you'll hit first:
 
-- macOS 26 on Apple Silicon only. retrace depends on measured behaviour of macOS 26 internals (dyld,
-  libpthread, libdispatch, the shared cache), so an OS update can break it.
+- macOS 26 or 27 on Apple Silicon only. retrace depends on measured behaviour of macOS internals (dyld,
+  libpthread, libdispatch, the shared cache), so an OS update can break it; another major is refused until it is
+  measured. macOS 27 is measured (27.2); macOS 26 was measured at 26.5.2 and is kept by construction, not
+  re-measured since. Other point releases of 26 and 27 run but are untested. A recording replays only on the
+  macOS build that made it.
 - Threads run one at a time and switch only when one blocks or exits. That keeps the schedule
   replayable without recording it, but races that need preemption won't reproduce and parallel
   programs run serially. A thread that spins waiting for another one, without ever blocking, hangs
@@ -117,19 +120,19 @@ behind it. These are the ones you'll hit first:
 
 ## Performance
 
-Median of 5 runs with `tools/bench.py`, Apple M4 Pro, macOS 26.5.2, release build, 2026-10-04:
+Median of 5 runs with `tools/bench.py`, Apple M4 Pro, release build, macOS 27.2 (26B123), 2026-11-10:
 
 | workload | native | record | replay | recorder RSS | trace |
 |---|---|---|---|---|---|
-| `/bin/echo hi` | 0.001 s | 0.20 s | 0.20 s | 104 MiB | 28 MiB |
-| `/bin/ls /usr/bin` | 0.004 s | 0.23 s | 0.24 s | 107 MiB | 33 MiB |
-| `jq` filtering a 5 MB JSON file | 0.08 s | 1.98 s | 2.05 s | 446 MiB | 286 MiB |
-| CPython `-c 'print(1)'` | 0.012 s | 0.60 s | 0.62 s | 214 MiB | 85 MiB |
-| CPython, a 30M-step loop | 0.95 s | 1.63 s | 1.64 s | 215 MiB | 85 MiB |
-| node `-e 'console.log(1)'` | 0.041 s | 3.45 s | 3.53 s | 733 MiB | 502 MiB |
+| `/bin/echo hi` | 0.002 s | 0.28 s | 0.28 s | 172 MiB | 37 MiB |
+| `/bin/ls /usr/bin` | 0.006 s | 0.33 s | 0.33 s | 175 MiB | 41 MiB |
+| `jq` filtering a 5 MB JSON file | 0.08 s | 1.12 s | 1.09 s | 599 MiB | 136 MiB |
+| CPython `-c 'print(1)'` | 0.017 s | 0.60 s | 0.59 s | 282 MiB | 78 MiB |
+| CPython, a 30M-step loop | 0.97 s | 1.66 s | 1.65 s | 284 MiB | 78 MiB |
+| node `-e 'console.log(1)'` | 0.050 s | 3.60 s | 3.62 s | 1006 MiB | 501 MiB |
 
-Building the VM and paging in the shared cache costs about 0.2 s at startup (0.6 s for CPython,
-3.4 s for node). After that, compute runs within about 10% of native, since the guest executes
+Building the VM and paging in the shared cache costs about 0.3 s at startup (0.6 s for CPython,
+3.6 s for node). After that, compute runs within about 11% of native, since the guest executes
 directly on the CPU. Syscalls that move a lot of memory are the slow case: each one is diffed and
 stored in the trace.
 
@@ -145,7 +148,7 @@ Until `v0.1.0` is tagged, the formula has no stable version: install with
 `brew install --HEAD nmitchem/retrace/retrace`.
 
 Homebrew builds retrace from source with the pinned Rust toolchain and signs it with the hypervisor
-entitlement. You need macOS 26 on Apple Silicon and the Command Line Tools for lldb
+entitlement. You need macOS 26 or 27 on Apple Silicon (27.2 and 26.5.2 are the measured builds; other point releases run but are untested) and the Command Line Tools for lldb
 (`xcode-select --install`). No root, no Apple developer account, and SIP can stay on.
 
 To build it yourself you need a Rust toolchain (`rust-toolchain.toml` pins the version):
@@ -221,7 +224,7 @@ The original design is in
 
 ## Contributing
 
-There's no CI: the tests need macOS 26 on Apple Silicon and a working `hv_vm_create`, which hosted
+There's no CI: the tests need macOS 26 or 27 on Apple Silicon and a working `hv_vm_create`, which hosted
 macOS runners (themselves VMs) don't provide. Run `just gate` locally and paste the counts;
 [`docs/current-state.md`](docs/current-state.md#testing) explains why it has to be chunked and why
 `--test-threads=1` is required.

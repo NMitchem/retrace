@@ -286,7 +286,7 @@ impl Symbols {
     /// empty `Symbols` that formats every address as bare hex.
     ///
     /// Image routing is a range check over the fixed IPA layout (M7). The shared-cache window
-    /// (`SHARED_REGION_START..SHARED_REGION_END`) is deliberately absent: cache images carry no
+    /// (`SHARED_REGION_START..` the box's `shared_region_end`) is deliberately absent: cache images carry no
     /// `LC_SYMTAB` in the mapped region, and the cache's local-symbol area lives in the on-disk cache
     /// file that `cache.rs` demand-pages but never stages into guest memory. Reading it would
     /// reintroduce the external-file dependency this design exists to avoid. That is the wall, and
@@ -366,12 +366,12 @@ impl Symbols {
 ///
 /// Presentation only, like the rest of this module: it runs once per crash, after the run, and
 /// nothing it returns reaches the trace.
-pub fn crash_site(mem: &[Region], pc: u64) -> String {
+pub fn crash_site(mem: &[Region], pc: u64, shared_region_end: u64) -> String {
     if let Some((name, off)) = Symbols::from_snapshot(mem).resolve(pc) {
         let name: String = name.chars().map(|c| if c.is_ascii_graphic() { c } else { '?' }).collect();
         return if off == 0 { name } else { format!("{name}+{off:#x}") };
     }
-    if (retrace_box::SHARED_REGION_START..retrace_box::SHARED_REGION_END).contains(&pc) {
+    if (retrace_box::SHARED_REGION_START..shared_region_end).contains(&pc) {
         return "a system library".to_owned();
     }
     String::new()
@@ -715,14 +715,18 @@ mod tests {
     #[test]
     fn a_crash_site_is_a_symbol_a_system_library_or_nothing() {
         // M51 §3c (C2): the closing line's place.
+        const MIN: u64 = retrace_box::SHARED_REGION_END_MIN;
         let base = retrace_box::EXE_BASE;
         let mem = Img::new(base, 0).sym(base + 0x460, "_main").sym(base + 0x500, "_caf\u{e9}").build();
-        assert_eq!(crash_site(&mem, base + 0x468), "_main+0x8");
-        assert_eq!(crash_site(&mem, base + 0x460), "_main", "at the symbol itself, no offset");
-        assert!(crash_site(&mem, base + 0x504).is_ascii(), "R7: the line is ASCII");
-        assert_eq!(crash_site(&mem, retrace_box::SHARED_REGION_START + 0x1234), "a system library",
+        assert_eq!(crash_site(&mem, base + 0x468, MIN), "_main+0x8");
+        assert_eq!(crash_site(&mem, base + 0x460, MIN), "_main", "at the symbol itself, no offset");
+        assert!(crash_site(&mem, base + 0x504, MIN).is_ascii(), "R7: the line is ASCII");
+        assert_eq!(crash_site(&mem, retrace_box::SHARED_REGION_START + 0x1234, MIN), "a system library",
                    "the cache's symbols are not in the recording");
-        assert_eq!(crash_site(&mem, 0x4000_dead_0000), "", "nothing claims it, so nothing is guessed");
+        // M57: a pc past the constant is the cache's only when the box's window reaches it.
+        assert_eq!(crash_site(&mem, 0x3_1000_0000, MIN), "");
+        assert_eq!(crash_site(&mem, 0x3_1000_0000, 0x3_4c00_0000), "a system library");
+        assert_eq!(crash_site(&mem, 0x4000_dead_0000, MIN), "", "nothing claims it, so nothing is guessed");
     }
 
     #[test]

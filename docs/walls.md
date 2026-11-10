@@ -232,6 +232,16 @@ Since M51 the traps a program uses to stop itself are recorded as crashes with n
 exit status: `brk` (Swift's and Rust's runtime checks, SIGTRAP, 133), `udf` and `hlt` (SIGILL, 132),
 and a misaligned PC or stack pointer (SIGBUS, 138).
 
+## macOS version
+
+retrace runs on macOS 26 and 27, at any point release; 27.2 and 26.5.2 are the measured builds, and other point releases are untested. On another major every command ends at one line, `macOS <product> (<build>) is not supported: retrace runs on macOS 26 and 27`, with exit 4, before any VM exists.
+
+Every recording of a dynamic program carries the macOS version, build and shared-cache UUID of the Mac that made it, and **such a recording replays only on the macOS build that made it**. A static recording carries no UUID and is not pinned. Replaying one on a Mac with a different shared cache is refused with `<trace> was recorded on macOS <product> (<build>) with a different shared cache`, exit 2. A recording made by an earlier retrace is refused by its format, as before.
+
+retrace reads the dyld shared cache's own header to find its files, and checks each file against the subcache table there. A cache laid out in a way retrace has not met is refused, exit 4, with `has a shared cache retrace does not recognise: <why>`, naming the host's macOS version and build, rather than mis-read.
+
+The guest's physical address space is 40 bits (1 TiB), because macOS 27's malloc reserves 24 GiB at a random address above 448 GiB. A Mac whose hypervisor allows fewer than 40 bits (`hv_vm_config_get_max_ipa_size`) is refused before any VM is made, exit 4, with `this Mac's hypervisor allows a <n>-bit guest address space and retrace needs 40 bits`. A guest that maps FIXED at or past 1 TiB still gets the wall or `EINVAL` it got at 64 GiB before.
+
 ## Incomplete recordings
 
 A recording that stopped at a wall, or whose recorder was killed, has no end: no exit, crash or

@@ -386,7 +386,8 @@ mod tests {
     #[test]
     fn the_on_disk_dylds_code_rewrites_exactly_its_getpid_pair() {
         // `load_dynamic` stages /usr/lib/dyld's exec segments the same way (X3). The plan-time probe:
-        // one pair, at vmaddr 0x4f68 (DYLD_BASE + 0x4f68 in the guest).
+        // one pair, at vmaddr 0x4f68 (DYLD_BASE + 0x4f68 in the guest) in 26.5.2's dyld, and at 0x51b4
+        // (20916) in 27.2's: the same three words at another offset. The words are pinned, the offset is not.
         let bytes = std::fs::read(retrace_guest::DYLD_PATH).unwrap();
         let dyld = retrace_guest::parse_macho(retrace_guest::slice_arm64e(&bytes));
         let mut hits = Vec::new();
@@ -396,6 +397,7 @@ mod tests {
             rewrite_code_pages(&mut words);
             hits.extend(changed(s.vaddr, &before, &words));
         }
-        assert_eq!(hits, vec![(0x4f68, GETPID.to_vec())]);
+        assert_eq!(hits.len(), 1, "the on-disk dyld has exactly one discarded-status getpid pair: {hits:#x?}");
+        assert_eq!(hits[0].1, GETPID.to_vec(), "and its words are the getpid pair's");
     }
 }

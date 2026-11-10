@@ -48,6 +48,7 @@ pub enum FileAction {
 }
 
 const ATTR_SIZE: usize = 0xf8;
+const ATTR_SIZES: [usize; 2] = [0xf8, 0x100];
 const ACT_STRIDE: usize = 1040;
 const ACT_MAX: usize = 4096;
 
@@ -112,8 +113,13 @@ pub fn decode_spawn(desc: &[u8], attr: Option<&[u8]>, actions: Option<&[u8]>) ->
     }
     let mut plan = SpawnPlan { flags: 0, sigmask: None, sigdefault: 0, actions: Vec::new(), binpref: (0, -1) };
     if let Some(a) = attr {
-        if q(0) != ATTR_SIZE as u64 || a.len() != ATTR_SIZE {
+        if !ATTR_SIZES.contains(&(q(0) as usize)) || a.len() as u64 != q(0) {
             return Err(spawn_wall(&format!("an attribute block of {} bytes", q(0))));
+        }
+        // M57 §3d: macOS 27's block is 0x100 bytes; `posix_spawnattr_init` leaves 0xf8..0x100 zero and every earlier offset
+        // is 26's (M54's attrdump on 27). A field retrace does not know is refused by its offset.
+        if let Some(off) = (ATTR_SIZE..a.len()).find(|&o| a[o] != 0) {
+            return Err(spawn_wall(&format!("an unmodelled attribute field at {off:#x} set")));
         }
         let flags = u16::from_le_bytes([a[0], a[1]]);
         for bit in 0..16 {
@@ -356,9 +362,9 @@ pub fn script_argv(line: &[u8], script_path: &[u8], argv: &[Vec<u8>]) -> Result<
 /// point of no return (`stage_map` asserts alignment and `hv_vm_map` fails on overlap, both panics past it). A segment
 /// must start on a 16 KiB granule; and none may overlap another (the exe at its own vmaddrs, dyld at
 /// `DYLD_BASE`), the box-owned low range `[0, DYN_STACK_TOP)` (trampoline, page tables, signing and TLBI stubs, TSD,
-/// stack), the two commpage granules, or the shared region, or end past the 36-bit IPA space. The nano band and
+/// stack), the two commpage granules, or the shared region, or end past the 40-bit IPA space. The nano band and
 /// the mmap area are not checked: they are the program's own reservations, made after the image.
-pub fn image_layout_refusal(exe: &Loaded, dyld: &Loaded) -> Option<String> {
+pub fn image_layout_refusal(exe: &Loaded, dyld: &Loaded, shared_region_end: u64) -> Option<String> {
     let g = GRANULE as u64;
     let mut spans: Vec<(u64, u64, String)> = Vec::new();
     for (who, l, slide) in [("the executable", exe, 0u64), ("the dynamic linker", dyld, DYLD_BASE)] {
@@ -368,15 +374,15 @@ pub fn image_layout_refusal(exe: &Loaded, dyld: &Loaded) -> Option<String> {
                 return Some(format!("{who} has a segment at {va:#x}, which is not 16 KiB-aligned (retrace maps whole 16 KiB granules)"));
             }
             let len = (s.memsz.max(s.data.len()).max(GRANULE) as u64).checked_next_multiple_of(g);
-            let Some(end) = len.and_then(|len| va.checked_add(len)).filter(|&e| e <= 1 << 36) else {
-                return Some(format!("{who} has a segment at {va:#x} past the 36-bit guest address space"));
+            let Some(end) = len.and_then(|len| va.checked_add(len)).filter(|&e| e <= crate::IPA_LIMIT) else {
+                return Some(format!("{who} has a segment at {va:#x} past the {}-bit guest address space", crate::IPA_BITS));
             };
             spans.push((va, end, format!("{who}'s segment at {va:#x}")));
         }
     }
     let fixed = [(0, DYN_STACK_TOP, "retrace's low range (trampoline, tables, stubs, TSD, stack)"),
                  (COMMPAGE2_IPA, COMMPAGE2_IPA + g, "the commpage"), (COMMPAGE_IPA, COMMPAGE_IPA + g, "the commpage"),
-                 (SHARED_REGION_START, SHARED_REGION_END, "the shared region")];
+                 (SHARED_REGION_START, shared_region_end, "the shared region")];
     for (i, (a, b, name)) in spans.iter().enumerate() {
         for (fa, fb, fname) in fixed {
             if *a < fb && fa < *b { return Some(format!("{name} overlaps {fname}")); }
@@ -700,7 +706,10 @@ impl Box_ {
         for q in 0..32 { self.vcpu.set_simd(simd::q(q), 0).unwrap(); }
         self.vcpu.set_reg(reg::FPCR, 0).unwrap();
         self.vcpu.set_reg(reg::FPSR, 0).unwrap();
-        let StagedImage { l2_host, next_l3, pac, .. } = st;
+        let StagedImage { l2_host, next_l3, pac, cache, .. } = st;
+        // M57 final review I1 (Ruling P18): the new image loads the host cache, so the window is its end, as
+        // `load_dynamic_env` sets it. One method on both sides, so symmetric by construction.
+        self.shared_region_end = { let (base, size) = cache.window(); crate::shared_region_end_for(base, size) };
         self.pac_enabled = pac;
         self.stack_top = DYN_STACK_TOP;
         self.stack_size = DYN_STACK_SIZE;
@@ -816,16 +825,20 @@ mod tests {
     }
 
     /// A descriptor with `attr_size` 0xf8 and `file_actions_size` `fa`, extensions empty.
-    fn desc(fa: u64) -> Vec<u8> {
+    fn desc(fa: u64) -> Vec<u8> { desc_sized(fa, ATTR_SIZE as u64) }
+    /// A descriptor whose `attr_size` is `attr_size`, with `file_actions_size` `fa`.
+    fn desc_sized(fa: u64, attr_size: u64) -> Vec<u8> {
         let mut d = vec![0u8; 144];
-        d[0..8].copy_from_slice(&0xf8u64.to_le_bytes());
+        d[0..8].copy_from_slice(&attr_size.to_le_bytes());
         d[8..16].copy_from_slice(&0x1000u64.to_le_bytes());
         if fa != 0 { d[16..24].copy_from_slice(&fa.to_le_bytes()); d[24..32].copy_from_slice(&0x2000u64.to_le_bytes()); }
         d
     }
     /// `posix_spawnattr_init`'s bytes (t4 addendum A), with `flags`.
-    fn attr(flags: u16) -> Vec<u8> {
-        let mut a = vec![0u8; ATTR_SIZE];
+    fn attr(flags: u16) -> Vec<u8> { attr_sized(flags, ATTR_SIZE) }
+    /// `attr` over a block of `size` bytes; the bytes past 0xf8 are zero, as `posix_spawnattr_init` leaves them.
+    fn attr_sized(flags: u16, size: usize) -> Vec<u8> {
+        let mut a = vec![0u8; size];
         for (o, b) in a.iter_mut().enumerate().take(0xc0) { *b = attr_init_byte(o); }
         a[0..2].copy_from_slice(&flags.to_le_bytes());
         a
@@ -867,6 +880,37 @@ mod tests {
         a[0x10..0x14].copy_from_slice(&u32::MAX.to_le_bytes());
         a[0x70..0x74].copy_from_slice(&2i32.to_le_bytes());
         assert_eq!(decode_spawn(&desc(0), Some(&a), None).unwrap().binpref, (u32::MAX, 2));
+    }
+
+    // M57 §3d: macOS 27's 0x100-byte block, zero past 0xf8, decodes as 26's 0xf8 block does.
+    #[test]
+    fn a_0x100_block_with_a_zero_tail_decodes_like_the_0xf8_one() {
+        let mut a8 = attr(0x40);
+        a8[0x10..0x14].copy_from_slice(&0x0100_000cu32.to_le_bytes());
+        let mut a10 = attr_sized(0x40, 0x100);
+        a10[0x10..0x14].copy_from_slice(&0x0100_000cu32.to_le_bytes());
+        let p8 = decode_spawn(&desc(0), Some(&a8), None).expect("the 0xf8 block");
+        let p10 = decode_spawn(&desc_sized(0, 0x100), Some(&a10), None).expect("the 0x100 block");
+        assert_eq!(p10.flags, p8.flags, "flags");
+        assert_eq!(p10.binpref, p8.binpref, "binpref");
+        assert_eq!(p10.sigmask, p8.sigmask, "sigmask");
+        assert_eq!(p10.sigdefault, p8.sigdefault, "sigdefault");
+        assert_eq!(p10.actions, p8.actions, "actions");
+    }
+
+    #[test]
+    fn a_nonzero_byte_past_0xf8_is_refused_by_name() {
+        let mut a = attr_sized(0x40, 0x100);
+        a[0xf8] = 1;
+        assert_eq!(decode_spawn(&desc_sized(0, 0x100), Some(&a), None).unwrap_err(),
+                   "posix_spawn with an unmodelled attribute field at 0xf8 set (syscall 244)");
+        let mut a = attr_sized(0x40, 0x100);
+        a[0xff] = 1;
+        assert_eq!(decode_spawn(&desc_sized(0, 0x100), Some(&a), None).unwrap_err(),
+                   "posix_spawn with an unmodelled attribute field at 0xff set (syscall 244)");
+        let a = attr_sized(0x40, 0x108);
+        assert_eq!(decode_spawn(&desc_sized(0, 0x108), Some(&a), None).unwrap_err(),
+                   "posix_spawn with an attribute block of 264 bytes (syscall 244)");
     }
 
     #[test]
@@ -1037,18 +1081,18 @@ mod tests {
         let img = |segments| Loaded { segments, entry: 0, dylinker: None, cpusubtype: 0 };
         let ok_exe = img(vec![seg(EXE_BASE, 0x4000), seg(EXE_BASE + 0x4000, 0x4000)]);
         let ok_dyld = img(vec![seg(0, 0x8000)]);
-        assert_eq!(image_layout_refusal(&ok_exe, &ok_dyld), None);
-        let why = image_layout_refusal(&img(vec![seg(EXE_BASE, 0x4000), seg(EXE_BASE + 0x4000 + 0x1000, 0x1000)]), &ok_dyld).unwrap();
+        assert_eq!(image_layout_refusal(&ok_exe, &ok_dyld, SHARED_REGION_END_MIN), None);
+        let why = image_layout_refusal(&img(vec![seg(EXE_BASE, 0x4000), seg(EXE_BASE + 0x4000 + 0x1000, 0x1000)]), &ok_dyld, SHARED_REGION_END_MIN).unwrap();
         assert!(why.contains("not 16 KiB-aligned"), "{why}");
-        let why = image_layout_refusal(&img(vec![seg(EXE_BASE, 0x8000), seg(EXE_BASE + 0x4000, 0x4000)]), &ok_dyld).unwrap();
+        let why = image_layout_refusal(&img(vec![seg(EXE_BASE, 0x8000), seg(EXE_BASE + 0x4000, 0x4000)]), &ok_dyld, SHARED_REGION_END_MIN).unwrap();
         assert!(why.contains("overlaps"), "{why}");
-        let why = image_layout_refusal(&img(vec![seg(TRAMPOLINE_IPA, 0x4000)]), &ok_dyld).unwrap();
+        let why = image_layout_refusal(&img(vec![seg(TRAMPOLINE_IPA, 0x4000)]), &ok_dyld, SHARED_REGION_END_MIN).unwrap();
         assert!(why.contains("low range"), "{why}");
-        let why = image_layout_refusal(&img(vec![seg(COMMPAGE_IPA, 0x4000)]), &ok_dyld).unwrap();
+        let why = image_layout_refusal(&img(vec![seg(COMMPAGE_IPA, 0x4000)]), &ok_dyld, SHARED_REGION_END_MIN).unwrap();
         assert!(why.contains("commpage"), "{why}");
-        let why = image_layout_refusal(&ok_exe, &img(vec![seg(SHARED_REGION_START - DYLD_BASE, 0x4000)])).unwrap();
+        let why = image_layout_refusal(&ok_exe, &img(vec![seg(SHARED_REGION_START - DYLD_BASE, 0x4000)]), SHARED_REGION_END_MIN).unwrap();
         assert!(why.contains("shared region"), "{why}");
-        let why = image_layout_refusal(&img(vec![seg(DYLD_BASE, 0x4000)]), &ok_dyld).unwrap();
+        let why = image_layout_refusal(&img(vec![seg(DYLD_BASE, 0x4000)]), &ok_dyld, SHARED_REGION_END_MIN).unwrap();
         assert!(why.contains("dynamic linker's segment") && why.contains("overlaps"), "{why}");
     }
 }

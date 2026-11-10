@@ -19,14 +19,14 @@ pub const WALLS_URL: &str = "https://github.com/NMitchem/retrace/blob/main/docs/
 /// divergence detail can reach `debug`'s error line, and it should still say what happened.
 pub const WALL_MARKER: &str = "[retrace-wall:";
 
-/// The seven kinds of wall (spec §3b). Each names the `docs/walls.md` section its line links to.
+/// The eight kinds of wall (spec §3b). Each names the `docs/walls.md` section its line links to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WallCategory { Syscalls, MachMessages, ProcessCreation, Signals, Threads, Memory, Exceptions }
+pub enum WallCategory { Syscalls, MachMessages, ProcessCreation, Signals, Threads, Memory, Exceptions, MacosVersion }
 
 impl WallCategory {
-    pub const ALL: [WallCategory; 7] = [WallCategory::Syscalls, WallCategory::MachMessages,
+    pub const ALL: [WallCategory; 8] = [WallCategory::Syscalls, WallCategory::MachMessages,
         WallCategory::ProcessCreation, WallCategory::Signals, WallCategory::Threads, WallCategory::Memory,
-        WallCategory::Exceptions];
+        WallCategory::Exceptions, WallCategory::MacosVersion];
 
     /// The `docs/walls.md` anchor this category's line links to.
     pub fn anchor(self) -> &'static str {
@@ -38,6 +38,7 @@ impl WallCategory {
             WallCategory::Threads => "threads",
             WallCategory::Memory => "memory",
             WallCategory::Exceptions => "exceptions",
+            WallCategory::MacosVersion => "macos-version",
         }
     }
 
@@ -234,7 +235,7 @@ mod tests {
     fn every_category_has_a_distinct_anchor_that_parses_back_and_a_section_in_walls_md() {
         let anchors: Vec<&str> = WallCategory::ALL.iter().map(|c| c.anchor()).collect();
         assert_eq!(anchors, ["syscalls", "mach-messages", "process-creation", "signals", "threads", "memory",
-                             "exceptions"]);
+                             "exceptions", "macos-version"]);
         for c in WallCategory::ALL { assert_eq!(WallCategory::from_anchor(c.anchor()), Some(c)); }
         // GitHub derives a heading's anchor by lowercasing it and turning spaces into hyphens.
         let doc = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/walls.md")).unwrap();
@@ -248,6 +249,7 @@ mod tests {
     #[test]
     fn syscall_display_names_bsd_numbers_from_the_sdk_and_measured_mach_traps() {
         assert_eq!(syscall_display(95), "fsync (syscall 95)");
+        assert_eq!(syscall_display(148), "pipe2 (syscall 148)");
         assert_eq!(syscall_display(375), "kevent_id (syscall 375)");
         assert_eq!(syscall_display((-38i64) as u64), "semaphore_timedwait_trap (mach trap -38)");
         assert_eq!(syscall_display((-1000i64) as u64), "mach trap -1000");
@@ -267,6 +269,10 @@ mod tests {
             assert_eq!(crate::sysnames::syscall_name(num), Some(&f[1][4..]), "{line}");
             n += 1;
         }
-        assert_eq!(n, 458, "the SDK's SYS_ count moved: re-run tools/gen-sysnames.sh");
+        // The per-line check above is the guard: it fails on any SDK define the table lacks or names
+        // differently. The floor only proves the header was parsed. The table is generated from the
+        // newest supported SDK (27.2: 466 defines) and is a superset of 26's (458), so a 26 SDK must
+        // pass here too. No OS-version branch (R1).
+        assert!(n >= 458, "the parser found too few SYS_ defines ({n}): is the SDK header readable?");
     }
 }

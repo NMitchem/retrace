@@ -190,9 +190,9 @@ fn dyld_is_a_second_image_and_resolves() {
 #[ignore = "M19 wall, RE-MEASURED during M20 (see below): a shared-cache pc resolves to nothing \
 because the cache's __LINKEDIT pages are never FAULTED, not because they are unreachable. Measured \
 2026-08-27: the cache is 5.40 GiB, of which 1.37 GiB is .dyldlinkedit, and all of it lies inside \
-the guest's 6.00 GiB shared-region window [0x1_8000_0000, 0x3_0000_0000) and is already routed by \
-cache.rs's demand-pager (assert_covers_window requires main -> .01 -> ... -> .12.dyldlinkedit to be \
-contiguous). Nothing in the guest reads a symbol table at runtime, so those pages are never staged \
+the guest's shared-region window (since M57 the cache's own, read from its header, [0x1_8000_0000, \
+0x3_0000_0000) on that cache) and is already routed by cache.rs's demand-pager (since M57 the files \
+are checked against the header's subcache array, so gaps between them are allowed). Nothing in the guest reads a symbol table at runtime, so those pages are never staged \
 into an anon page and never captured by Box_::snapshot — which is why a cache symbol is not in the \
 trace, unlike the exe and dyld whose __LINKEDIT the guest's own loading does touch (M4/M5). \
 Clearing this owes a measurement of WHICH images a real recording executes in, then staging their \

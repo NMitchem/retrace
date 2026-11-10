@@ -12,6 +12,7 @@ crates/retrace-box/src/lib.rs	guest_thread_kport	Threads	M46: a box-spawned thre
 crates/retrace-box/src/lib.rs	guest_ulock_wait	Threads	guest_ulock_wait: unmeasured operation w
 crates/retrace-box/src/lib.rs	guest_ulock_wake	Threads	guest_ulock_wake: unmeasured operation w
 crates/retrace-box/src/lib.rs	guest_vm_map_masked	Memory	M47: unmeasured mach_vm_map mask
+crates/retrace-box/src/lib.rs	guest_vm_reallocate	Memory	M57: mach_vm_reallocate over a MAP_JIT r
 crates/retrace-box/src/lib.rs	guest_vm_remap	Memory	vm_remap: size
 crates/retrace-box/src/lib.rs	guest_vm_remap	Memory	vm_remap: source page
 crates/retrace-box/src/lib.rs	guest_vm_remap	Memory	vm_remap: source page
@@ -19,7 +20,6 @@ crates/retrace-box/src/lib.rs	guest_vm_remap	Memory	vm_remap: source page
 crates/retrace-box/src/lib.rs	guest_vm_remap	Memory	vm_remap: source pages differ in protect
 crates/retrace-box/src/lib.rs	guest_vm_remap	Memory	vm_remap: unaligned target
 crates/retrace-box/src/lib.rs	guest_vm_reserve_masked	Memory	M47: unmeasured mach_vm_map mask
-crates/retrace-box/src/lib.rs	guest_vm_reserve_masked	Memory	guest_vm_reserve ANYWHERE overflowed 36-
 crates/retrace-box/src/lib.rs	guest_workq_open	Threads	M18 Stage 2a: workq_open before bsdthrea
 crates/retrace-box/src/lib.rs	guest_workq_park	Threads	M18 Stage 2b: workq_kernreturn THREAD_RE
 crates/retrace-box/src/lib.rs	guest_workq_reqthreads	Threads	M18 Stage 2b: REQTHREADS for
@@ -42,3 +42,5 @@ crates/retrace-core/src/lib.rs	take_pending_delivery	Signals	signal
 crates/retrace-box/src/lib.rs	forward_and_diff	Syscalls	syscall
 crates/retrace-box/src/lib.rs	forward_and_diff	Syscalls	M55: socketpair of domain
 crates/retrace-box/src/lib.rs	fire_itimer	Signals	M55:
+crates/retrace-box/src/lib.rs	cache_wall	MacosVersion	macOS
+crates/retrace-box/src/lib.rs	place_worker_stack	Memory	M57: no address space left for a worker

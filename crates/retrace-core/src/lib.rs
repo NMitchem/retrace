@@ -11,7 +11,7 @@ use retrace_arch::{wall, Unsupported, WallCategory, SYS_EXIT};
 pub use retrace_box::thread::{BlockReason, ThreadState, ThreadCtx};
 pub use retrace_box::{Excl, SetBy};
 pub use retrace_box::EXE_BASE;
-pub use retrace_box::hypervisor_check;
+pub use retrace_box::{hypervisor_check, ipa_check, DEFAULT_CACHE_PATH};
 pub use retrace_box::Stream;
 pub use retrace_box::{start_args_bytes, START_ARGS_LIMIT};
 
@@ -112,9 +112,9 @@ pub fn closing_line(o: &Outcome) -> Option<String> {
 }
 
 /// The closing line's place for a crash at `pc`, from the final snapshot record appends after it.
-fn crash_site_of(final_snap: &Event, pc: u64) -> String {
+fn crash_site_of(final_snap: &Event, pc: u64, shared_region_end: u64) -> String {
     match final_snap {
-        Event::Snapshot { mem, .. } => symbols::crash_site(mem, pc),
+        Event::Snapshot { mem, .. } => symbols::crash_site(mem, pc, shared_region_end),
         _ => String::new(),
     }
 }
@@ -343,6 +343,7 @@ fn mach2_unreachable(b: &mut Box_, m: &machmsg::Msg2, route: &machmsg::Route) ->
         ServiceVmMap => machmsg::encode_vm_map_reply(0, 0).len(),
         ServiceVmRemap => machmsg::encode_vm_remap_reply(0, 0, 0, 0).len(),
         ServiceVmCopy => machmsg::encode_mig_error(0, 0, 0).len(),
+        ServiceVmRealloc => machmsg::encode_vm_realloc_reply(0, 0).len(),
         ServiceGetSpecialPort => machmsg::encode_get_special_port_reply(0, 0).len(),
         ServiceSetSpecialPort | ServicePortsRegister | StubMigReply(_) => machmsg::encode_mig_error(0, 0, 0).len(),
         ServiceClockGetTime => machmsg::encode_clock_get_time_reply(0, 0, 0).len(),
@@ -462,7 +463,10 @@ fn record_sigpipe(w: &mut Writer, b: &mut Box_, count: &mut usize, thread: u32, 
 }
 
 fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>) -> Result<RecordSummary, String> {
-    let mut w = Writer::create(trace_path).map_err(|e| format!("create trace: {e}"))?;
+    // M57 §3e: the real host, never the startup gate's override, so a recording never carries a stand-in.
+    let os = retrace_arch::host_os();
+    let host = retrace_trace::Host { product: os.product, build: os.build, cache_uuid: b.cache_uuid() };
+    let mut w = Writer::create_with_host(trace_path, &host).map_err(|e| format!("create trace: {e}"))?;
     let mut count = 0usize;
     // M54 C10: retrace's own 0/1/2, which the console slots map to, start without FD_CLOEXEC, as a process's
     // do natively, so `cloexec_on_host` reads only what the guest set. Before the opening snapshot; record only.
@@ -599,7 +603,7 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                     FaultAction::Crash { sig } => sig,
                 };
                 let final_snap = b.snapshot();
-                let site = crash_site_of(&final_snap, pc);
+                let site = crash_site_of(&final_snap, pc, b.shared_region_end());
                 w.append(&Event::Crash { pc, esr, far, sig, thread }).map_err(|e| format!("append crash: {e}"))?; count += 1;
                 w.append(&final_snap).map_err(|e| format!("append final snapshot: {e}"))?; count += 1;
                 outcome = Outcome::Crash { pc, esr, far, sig, site };
@@ -912,6 +916,21 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                         w.append(&Event::Syscall { num, args, ret: machmsg::MACH_MSG_SUCCESS, ret1: 0,
                             err: false, writes: writes.clone(), thread })
                             .map_err(|e| format!("append mach_msg2 vm_copy: {e}"))?; count += 1;
+                        b.apply_and_return(machmsg::MACH_MSG_SUCCESS, false, &writes);
+                    }
+                    machmsg::Route::ServiceVmRealloc => {
+                        // M57 t7: mach_vm_reallocate is recomputed, never recorded or forwarded.
+                        let buf = b.read_guest(m.data, m.send_size as usize);
+                        let q = machmsg::decode_vm_realloc(&buf)
+                            .map_err(|e| wall_or_bug(retrace_arch::in_context("mach_vm_reallocate (4829) decode", e)))?;
+                        let bytes = match b.guest_vm_reallocate(q.src, q.src_size, q.dst, q.dst_size, q.mask, q.flags as u64) {
+                            Ok(d) => machmsg::encode_vm_realloc_reply(m.reply_port, d),
+                            Err(kr) => machmsg::encode_mig_error(m.msgh_id, m.reply_port, kr as i32),
+                        };
+                        let writes = vec![Region { ipa: m.data, bytes }];
+                        w.append(&Event::Syscall { num, args, ret: machmsg::MACH_MSG_SUCCESS, ret1: 0,
+                            err: false, writes: writes.clone(), thread })
+                            .map_err(|e| format!("append mach_msg2 vm_reallocate: {e}"))?; count += 1;
                         b.apply_and_return(machmsg::MACH_MSG_SUCCESS, false, &writes);
                     }
                     machmsg::Route::ServiceVmRemap => {
@@ -1896,7 +1915,7 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                 };
                 macro_rules! undo { () => { if let Some(t) = txn.take() { t.rollback(); } } }
                 // The kernel finds and checks the file first and copies the argument strings in after.
-                let resolved = match exec::resolve(&call) {
+                let resolved = match exec::resolve(&call, retrace_box::host_shared_region_end()) {
                     Ok(r) => r,
                     Err(ExecRefusal::Errno(e)) => { undo!(); append_refused(&mut w, &mut b, &mut count, num, args, e, true, thread)?; continue; }
                     Err(ExecRefusal::Wall(m)) => { undo!(); return Err(m) }
@@ -2226,8 +2245,25 @@ pub enum Armed {
 #[derive(Clone)]
 pub struct DecodedTrace { events: Rc<[Event]>, truncated: bool }
 
+/// M57 §3e (R4): why `trace` cannot replay on this Mac, or None. Only a recording carrying a cache UUID is checked;
+/// a static one, a torn header, another format and an unreadable file give None and are left to `DecodedTrace::load`.
+pub fn host_refusal(trace: &Path) -> Option<String> {
+    let host = retrace_trace::Reader::host(trace).ok().flatten()?;
+    let recorded = host.cache_uuid?;
+    let base = format!(
+        "{} was recorded on macOS {} ({}) with a different shared cache; a recording replays only on the macOS build that made it",
+        trace.display(), host.product, host.build);
+    match retrace_box::host_cache_uuid() {
+        Ok(live) if live == recorded => None,
+        Ok(_) => Some(base),
+        Err(e) => Some(format!("{base} (this Mac's shared cache could not be read: {e})")),
+    }
+}
+
 impl DecodedTrace {
     pub fn load(trace_path: &Path) -> Result<Self, String> {
+        // M57 §3e backstop: a foreign cache is refused before anything is decoded or restored.
+        if let Some(why) = host_refusal(trace_path) { return Err(why); }
         let (events, truncated) = retrace_trace::Reader::open_checked(trace_path)
             .map_err(|e| format!("cannot open trace: {e}"))?;
         // M47: nothing kept because the header names ANOTHER format version means a different
@@ -3137,6 +3173,22 @@ impl ReplaySession {
                                         if writes.len() != 1 || writes[0].bytes != reply {
                                             return Err(Divergence { landmark: self.idx, pc,
                                                 detail: format!("mach_vm_copy reply mismatch: replay kr {kr}") });
+                                        }
+                                        self.b.apply_and_return(*ret, *err, writes);
+                                    }
+                                    machmsg::Route::ServiceVmRealloc => {
+                                        // Mirror of record's arm: same decode, same Box_ call, reply byte-compared.
+                                        let buf = self.b.read_guest(m.data, m.send_size as usize);
+                                        let q = machmsg::decode_vm_realloc(&buf).map_err(|e| Divergence {
+                                            landmark: self.idx, pc, detail: format!("replay vm_reallocate decode: {e}") })?;
+                                        let r = self.b.guest_vm_reallocate(q.src, q.src_size, q.dst, q.dst_size, q.mask, q.flags as u64);
+                                        let reply = match r {
+                                            Ok(d) => machmsg::encode_vm_realloc_reply(m.reply_port, d),
+                                            Err(kr) => machmsg::encode_mig_error(m.msgh_id, m.reply_port, kr as i32),
+                                        };
+                                        if writes.len() != 1 || writes[0].bytes != reply {
+                                            return Err(Divergence { landmark: self.idx, pc,
+                                                detail: format!("mach_vm_reallocate reply mismatch: replay {r:?}") });
                                         }
                                         self.b.apply_and_return(*ret, *err, writes);
                                     }
@@ -4357,7 +4409,7 @@ impl ReplaySession {
                                     if let Some(d) = self.b.diff_memory(final_mem) {
                                         return Err(Divergence { landmark: self.idx + 1, pc, detail: d });
                                     }
-                                    let site = symbols::crash_site(final_mem, pc);
+                                    let site = symbols::crash_site(final_mem, pc, self.b.shared_region_end());
                                     return Ok(Advance::Exited(replay_report(&mut self.console, &self.b,
                                         Outcome::Crash { pc, esr, far, sig, site })));
                                 }

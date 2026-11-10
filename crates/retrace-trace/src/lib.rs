@@ -90,7 +90,7 @@ pub enum Event {
     },
 }
 
-pub const TRACE_MAGIC: [u8;4] = *b"RT\x00\x11"; // "RT" + format version 0x0011. M55 bumped it because a write that returns `EPIPE` on a guest pipe or socket end raises SIGPIPE, so a pre-M55 recording's `EPIPE` would replay with a signal its recording never took. 0x0010 was M54's: M54 bumped it because a successful exec is an `Event::Exec` carrying the new image, and a pre-M54 recording's exec landmark is the M38 refusal. 0x000f was M53's: M53 bumped it because `readv`, `writev`, `preadv` and `pwritev` are translated (a console `writev` is a console write; a forwarded iovec lands as per-entry writes), so a pre-M53 recording of one holds an EFAULT or a wall where this retrace records the transfer. 0x000e was M52's: M52 bumped it because the synthetic clock moves 5 ticks per timebase read, not 0x2400, so a pre-M52 recording carries a clock whose meaning differs (the clock is regenerated, not recorded, but every recorded timeout, sleep deadline and `gettimeofday` out-parameter was computed against it). 0x000d was M51's: M51 bumped it because `Event::Crash` gained `sig` and J1 changes the ESR a recorded instruction abort carries, so a pre-M51 recording is refused whole. 0x000c was M49's: a translation fault's SignalDelivery frame carries SEGV_ACCERR and the store-exclusive rewrite changes the code bytes a snapshot holds, so a pre-M49 recording would replay into a false divergence. 0x000b was M47's, for `mach_vm_map`'s mask.
+pub const TRACE_MAGIC: [u8;4] = *b"RT\x00\x12"; // "RT" + format version 0x0012. M57 bumped it for two reasons. The header now carries a host record (the macOS product, build and shared-cache UUID) after the magic, which changes its layout, so a recording replays only on the macOS build that made it. And the guest address space is 40 bits, which moved retrace's L2 page-table array from IPA 0x8000 to `PT_L2_IPA`, so a snapshot's page-table bytes mean something different and a pre-M57 snapshot restored under the new layout would be wrong. 0x0011 was M55's: M55 bumped it because a write that returns `EPIPE` on a guest pipe or socket end raises SIGPIPE, so a pre-M55 recording's `EPIPE` would replay with a signal its recording never took. 0x0010 was M54's: M54 bumped it because a successful exec is an `Event::Exec` carrying the new image, and a pre-M54 recording's exec landmark is the M38 refusal. 0x000f was M53's: M53 bumped it because `readv`, `writev`, `preadv` and `pwritev` are translated (a console `writev` is a console write; a forwarded iovec lands as per-entry writes), so a pre-M53 recording of one holds an EFAULT or a wall where this retrace records the transfer. 0x000e was M52's: M52 bumped it because the synthetic clock moves 5 ticks per timebase read, not 0x2400, so a pre-M52 recording carries a clock whose meaning differs (the clock is regenerated, not recorded, but every recorded timeout, sleep deadline and `gettimeofday` out-parameter was computed against it). 0x000d was M51's: M51 bumped it because `Event::Crash` gained `sig` and J1 changes the ESR a recorded instruction abort carries, so a pre-M51 recording is refused whole. 0x000c was M49's: a translation fault's SignalDelivery frame carries SEGV_ACCERR and the store-exclusive rewrite changes the code bytes a snapshot holds, so a pre-M49 recording would replay into a false divergence. 0x000b was M47's, for `mach_vm_map`'s mask.
 
 // Minimal in-tree CRC32 (IEEE) — no external checksum dependency.
 fn crc32(data: &[u8]) -> u32 {
@@ -102,20 +102,55 @@ fn crc32(data: &[u8]) -> u32 {
     !crc
 }
 
+/// M57 §3e: the host that made a recording, written once after the magic as a framed record.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Host { pub product: String, pub build: String, pub cache_uuid: Option<[u8; 16]> }
+
+/// The longest host body a reader will believe.
+const HOST_BODY_MAX: usize = 4096;
+
+/// One record's frame: length, CRC32, body.
+fn frame(body: &[u8]) -> Vec<u8> {
+    let mut v = Vec::with_capacity(8 + body.len());
+    v.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    v.extend_from_slice(&crc32(body).to_le_bytes());
+    v.extend_from_slice(body);
+    v
+}
+
+/// The host frame of `buf` (magic already checked): the host and the offset just past the frame.
+fn host_frame(buf: &[u8]) -> Option<(Host, usize)> {
+    if buf.len() < 12 { return None; }
+    let len = u32::from_le_bytes(buf[4..8].try_into().unwrap()) as usize;
+    let crc = u32::from_le_bytes(buf[8..12].try_into().unwrap());
+    if len > HOST_BODY_MAX || 12 + len > buf.len() { return None; }
+    let body = &buf[12..12 + len];
+    if crc32(body) != crc { return None; }
+    let host = bincode::deserialize::<Host>(body).ok()?;
+    Some((host, 12 + len))
+}
+
+/// M57: where the events start in a whole trace file's bytes (12 + the host body's length), `None` for another
+/// magic or a torn host record.
+pub fn first_event_offset(bytes: &[u8]) -> Option<usize> {
+    if bytes.len() < 4 || bytes[0..4] != TRACE_MAGIC { return None; }
+    host_frame(bytes).map(|(_, off)| off)
+}
+
 pub struct Writer { inner: BufWriter<File> }
 impl Writer {
-    pub fn create<P: AsRef<Path>>(path: P) -> io::Result<Writer> {
+    pub fn create_with_host<P: AsRef<Path>>(path: P, host: &Host) -> io::Result<Writer> {
         let mut inner = BufWriter::new(File::create(path)?);
         inner.write_all(&TRACE_MAGIC)?;
+        inner.write_all(&frame(&bincode::serialize(host).expect("serialize host")))?;
         Ok(Writer { inner })
+    }
+    pub fn create<P: AsRef<Path>>(path: P) -> io::Result<Writer> {
+        Self::create_with_host(path, &Host::default())
     }
     pub fn append(&mut self, e: &Event) -> io::Result<()> {
         let body = bincode::serialize(e).expect("serialize event");
-        let len = body.len() as u32;
-        let crc = crc32(&body);
-        self.inner.write_all(&len.to_le_bytes())?;
-        self.inner.write_all(&crc.to_le_bytes())?;
-        self.inner.write_all(&body)?;
+        self.inner.write_all(&frame(&body))?;
         self.inner.flush()
     }
 }
@@ -137,8 +172,10 @@ impl Reader {
         if buf.len() < 4 || buf[0..4] != TRACE_MAGIC {
             return Ok((Vec::new(), true)); // wrong/absent magic: reject loudly, keep nothing
         }
+        let Some((_, mut off)) = host_frame(&buf) else {
+            return Ok((Vec::new(), true)); // torn host record: nothing after it can be trusted
+        };
         let mut out = Vec::new();
-        let mut off = 4usize;               // skip the 4-byte header
         let mut truncated = false;
         while off + 8 <= buf.len() {
             let len = u32::from_le_bytes(buf[off..off+4].try_into().unwrap()) as usize;
@@ -155,6 +192,13 @@ impl Reader {
         }
         if off != buf.len() { truncated = true; }
         Ok((out, truncated))
+    }
+    /// M57: the host record. `None` for another magic, a torn record or a body over 4096 bytes.
+    pub fn host<P: AsRef<Path>>(path: P) -> io::Result<Option<Host>> {
+        let mut buf = Vec::new();
+        File::open(path)?.take(12 + HOST_BODY_MAX as u64).read_to_end(&mut buf)?;
+        if buf.len() < 4 || buf[0..4] != TRACE_MAGIC { return Ok(None); }
+        Ok(host_frame(&buf).map(|(h, _)| h))
     }
     pub fn open<P: AsRef<Path>>(path: P) -> io::Result<Vec<Event>> {
         Ok(Self::open_checked(path)?.0)
@@ -365,7 +409,68 @@ mod tests {
         // M53: the iovec calls are translated (a console writev prints, a forwarded one lands its entries).
         // M54: a successful exec is an `Event::Exec` carrying the new image.
         // M55: a write's EPIPE on a guest end raises SIGPIPE, so a pre-M55 recording replays with a signal it never took.
-        assert_eq!(TRACE_MAGIC, *b"RT\x00\x11");
+        // M57: a host record follows the magic, and the 40-bit IPA moved the page tables a snapshot holds.
+        assert_eq!(TRACE_MAGIC, *b"RT\x00\x12");
+    }
+
+    fn host() -> Host { Host { product: "27.2".into(), build: "26B123".into(), cache_uuid: Some([0x11; 16]) } }
+
+    #[test]
+    fn the_host_record_has_this_byte_layout() {
+        let f = named_tempfile("hostlayout");
+        drop(Writer::create_with_host(&f, &host()).unwrap());
+        let bytes = std::fs::read(&f).unwrap();
+        let mut body = Vec::new();
+        body.extend_from_slice(&4u64.to_le_bytes()); body.extend_from_slice(b"27.2");
+        body.extend_from_slice(&6u64.to_le_bytes()); body.extend_from_slice(b"26B123");
+        body.push(1); body.extend_from_slice(&[0x11; 16]);
+        assert_eq!(body.len(), 43);
+        let mut want = b"RT\x00\x12".to_vec();
+        want.extend_from_slice(&43u32.to_le_bytes());
+        want.extend_from_slice(&crc32(&body).to_le_bytes());
+        want.extend_from_slice(&body);
+        assert_eq!(bytes, want);
+        std::fs::remove_file(&f).ok();
+    }
+
+    #[test]
+    fn the_host_record_round_trips_and_open_checked_skips_it() {
+        let f = named_tempfile("hostrt");
+        let mut w = Writer::create_with_host(&f, &host()).unwrap();
+        for e in sample() { w.append(&e).unwrap(); }
+        drop(w);
+        let (got, torn) = Reader::open_checked(&f).unwrap();
+        assert!(!torn);
+        assert_eq!(got, sample());
+        assert_eq!(Reader::host(&f).unwrap(), Some(host()));
+        let bytes = std::fs::read(&f).unwrap();
+        assert_eq!(first_event_offset(&bytes), Some(12 + 43));
+        std::fs::remove_file(&f).ok();
+    }
+
+    #[test]
+    fn a_torn_host_record_keeps_nothing() {
+        let f = named_tempfile("hosttorn");
+        let mut w = Writer::create_with_host(&f, &host()).unwrap();
+        for e in sample() { w.append(&e).unwrap(); }
+        drop(w);
+        let mut bytes = std::fs::read(&f).unwrap();
+        bytes[20] ^= 0xff;
+        std::fs::write(&f, &bytes).unwrap();
+        assert_eq!(Reader::open_checked(&f).unwrap(), (vec![], true));
+        assert_eq!(Reader::host(&f).unwrap(), None);
+        assert_eq!(first_event_offset(&bytes), None);
+        std::fs::remove_file(&f).ok();
+    }
+
+    #[test]
+    fn a_pre_m57_trace_is_refused_by_name() {
+        let f = named_tempfile("prem57");
+        std::fs::write(&f, b"RT\x00\x11rest-of-a-pre-M57-trace").unwrap();
+        let msg = Reader::format_skew(&f).unwrap().expect("skew");
+        assert!(msg.contains(r"RT\x00\x11") && msg.contains(r"RT\x00\x12"), "{msg}");
+        assert_eq!(Reader::host(&f).unwrap(), None);
+        std::fs::remove_file(&f).ok();
     }
 
     #[test]

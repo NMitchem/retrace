@@ -3,7 +3,7 @@
 //! translation fault at EL0, straight to EL2. It also covers the stage-1 map it resolves against
 //! (F3). Run under --test-threads=1 (one HVF VM per process).
 use retrace_arch::WallCategory;
-use retrace_box::{Box_, Stage2, Stop, PT_L3_BASE, TRAMPOLINE_IPA, TSD_IPA};
+use retrace_box::{Box_, Stage2, Stop, PT_L2_IPA, PT_L3_BASE, TRAMPOLINE_IPA, TSD_IPA};
 use retrace_guest::{parse_macho, HELLO, WILDSTORE};
 
 /// The address `asm/wildstore.s` stores 0x99 to.
@@ -72,7 +72,7 @@ fn a_stage2_abort_through_a_tagged_pointer_stays_loud() {
 #[test]
 fn stage_one_leaves_page_zero_and_retraces_tables_unmapped() {
     let b = boxed(HELLO);
-    for ipa in [0, 0x8000, 0xC000, PT_L3_BASE, 0x1ff_c000] {
+    for ipa in [0, 0x8000, 0xC000, PT_L2_IPA, PT_L2_IPA + 0x3_c000, PT_L3_BASE, 0x1ff_c000] {
         assert!(!b.ipa_is_el0_writable(ipa), "{ipa:#x} must have no stage-1 leaf");
     }
     assert_eq!(b.va_to_ipa(0x10), None, "a NULL-page VA does not translate");

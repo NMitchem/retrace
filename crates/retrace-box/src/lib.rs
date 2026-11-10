@@ -6,8 +6,8 @@ use retrace_trace::{Regs, Region};
 mod backings;
 use backings::Backings;
 mod cache;
-pub use cache::AuthSlot;
-use cache::{walk_page, CacheMeta, DEFAULT_CACHE_PATH};
+pub use cache::{AuthSlot, DEFAULT_CACHE_PATH};
+use cache::{walk_page, CacheMeta};
 
 mod sig;
 mod exec;
@@ -146,9 +146,9 @@ pub const PTR_WINDOW_CAP: usize = 64 * 1024;
 /// for random data and far likelier for the zero-heavy data a `.pyc` or a freshly zeroed page
 /// contains, and the consequence of a miss is a silently incomplete recording.
 pub const GUARD_BAND: usize = 64;
-// Bump-allocation base for guest_mmap / mach_vm allocations: 40 GiB. Within the 36-bit (64 GiB)
+// Bump-allocation base for guest_mmap / mach_vm allocations: 40 GiB. Within the 40-bit (1 TiB)
 // IPA space and ABOVE the loaded segments (~4-5 GiB), the demand-paged shared-cache window
-// [SHARED_REGION_START, SHARED_REGION_END), AND libmalloc's FIXED 24-GiB nano "pointer range"
+// [SHARED_REGION_START, Box_::shared_region_end), AND libmalloc's FIXED 24-GiB nano "pointer range"
 // reservation [NANO_BAND_START, NANO_BAND_END). The last is critical: libmalloc reserves that
 // band and then commits nano sub-ranges at EXACT addresses inside it, both with the ANYWHERE bit
 // CLEAR (`_nano_common_map_vm_space` in nano_malloc_common.c) — i.e. plain FIXED placement, not a
@@ -172,9 +172,18 @@ const GRANULE: usize = 0x4000; // 16 KiB default granule
 // regions' stage-1 attributes are pre-set to ATTR_CODE at load (see host_exec_regions) so a text
 // fault is a pure stage-2 translation fault and demand-paging needs no runtime promotion / TLBI.
 pub const SHARED_REGION_START: u64 = 0x1_8000_0000;
-pub const SHARED_REGION_END:   u64 = 0x3_0000_0000;
+/// The smallest end the window has (6 GiB past its start): macOS 26's whole cache fits inside it.
+/// The box's own end is `Box_::shared_region_end`, which is this or the host cache's end if that is
+/// past it (M57: macOS 27's cache ends at 0x3_4BB2_8000).
+pub const SHARED_REGION_END_MIN: u64 = 0x3_0000_0000;
+
+/// The window's end for a cache at `[base, base + size)`: the constant, or the cache's end rounded
+/// up to 32 MiB (the granule the box places things on) when that is past it.
+pub fn shared_region_end_for(base: u64, size: u64) -> u64 {
+    SHARED_REGION_END_MIN.max(base.saturating_add(size).next_multiple_of(0x200_0000))
+}
 // The kernel maps a read-only "commpage" of CPU capabilities / cached timing into every process
-// at this fixed high VA; dyld reads it during early init. It is within the 36-bit identity space
+// at this fixed high VA; dyld reads it during early init. It is within the guest IPA identity space
 // (block 2047, a default RW/non-exec data block) but not in the guest's stage-2, so load_dynamic
 // stages a FROZEN anon copy of the host commpage here (one granule). Freezing a copy — not the
 // live kernel page — makes record and replay read identical bytes; the copy is captured in the
@@ -217,7 +226,7 @@ pub const COMMPAGE2_IPA: u64 = 0x0000_000F_FFFF_4000;
 // staged region [TSD_REGION_BASE, TSD_REGION_BASE+TSD_REGION_SIZE): libpthread/libplatform touch
 // both positive TSD-key slots (`[tp,#+N]`) AND negative pthread-struct fields (`[tp,#-N]`, observed
 // as low as tp-0xE0), so the backing must span generously below and above tp. The whole region sits
-// in block 0's free area below the sign scratch (0x40000) and above PT_L2 (0x8000).
+// in block 0's free area below the sign scratch (0x40000) and above the stack (0x1C000).
 // TPIDR_EL0 is a SEPARATE register and is NOT a second TSD pointer: macOS 26 reads the guest's
 // current CPU number from TPIDR_EL0[11:0] and cluster number from TPIDR_EL0[>=12] (see the
 // set-sys call sites in load_dynamic/restore for the full rationale); it is set to 0 (cpu 0 /
@@ -257,30 +266,41 @@ extern "C" { fn mach_absolute_time() -> u64; }
 /// the one deliberate, documented exception. Replay has no stall watch and never calls it.
 fn host_ticks() -> u64 { unsafe { mach_absolute_time() } }
 
-pub const PT_L2_IPA:  u64 = 0x8000;           // L2 table (one level below the L1 TTBR0 target); one 16 KiB page = 2048 entries
+/// M57 §3c: the guest IPA width. 40 bits (1 TiB): macOS 27's xzone malloc reserves a 24 GiB range group at an address
+/// it draws from entropy above 0x70_0000_0000 and commits segments in it FIXED (native-xzm-vmlog.txt, M0 wall 3).
+pub const IPA_BITS: u32 = 40;
+pub const IPA_LIMIT: u64 = 1 << IPA_BITS;
+/// One L2 page per 64 GiB L1 slot, contiguous, so the existing `l2[ipa / BLK]` indexing reaches all of `IPA_LIMIT`.
+const L2_PAGES: usize = 1 << (IPA_BITS - 36);
+const L2_ENTRIES: usize = 2048 * L2_PAGES;
+/// The L2 array, at the base of the old L3 window (spec §3c).
+pub const PT_L2_IPA: u64 = 0x0080_0000;
+/// The single L2 page before M57. Nothing lives there now; it stays unmapped at stage 1, so the holes a guest can see are unchanged.
+const PT_L2_OLD_IPA: u64 = 0x8000;
 pub const PT_L1_IPA:  u64 = 0xC000;           // L1 table (TTBR0 target under the 47-bit VA); one
-                                              // 16 KiB page, only entry[0] valid (-> L2). Free
-                                              // block-0 page between L2 (0x8000) and the stack (0x1C000).
+                                              // 16 KiB page, L1[0..L2_PAGES] valid (-> L2 pages).
 // L3 tables live at 8 MiB..32 MiB inside block 0 (above the stack IPA at 0x1C000, below the
 // 32 MiB block boundary), so they're identity-covered by block 0's own L3 (block 0 is already
 // L3-promoted for the trampoline). ~1500 tables' worth of room; bump by GRANULE per promoted block.
-pub const PT_L3_BASE: u64 = 0x0080_0000;
+pub const PT_L3_BASE: u64 = PT_L2_IPA + (L2_PAGES * GRANULE) as u64;
 const PT_L3_CEIL: u64 = 0x0200_0000;          // 32 MiB block boundary
 // M49 F3 (spec §3d, R3): the IPA ranges stage 1 does not map: page 0 (a NULL access then takes the
 // stage-1 fault native takes, so a call through NULL is SIGSEGV, not a permission fault's SIGBUS),
-// retrace's L2 and L1 table pages (a guest store there used to rewrite retrace's own tables:
-// `faults-retrace.txt`, store @0x8000), and the L3 window. All three sit in block 0, whose L3 table
+// retrace's L2 array and L1 page (a guest store there used to rewrite retrace's own tables:
+// `faults-retrace.txt`, store @0x8000, then the single L2 page), the vacated old L2 page, and the L3 window. All sit in block 0, whose L3 table
 // `build_tables` creates for the trampoline. The hardware walker reads the tables by IPA, never
 // through stage 1, so unmapping them at stage 1 costs nothing (t0 M4). `range_is_free` keeps every
 // placement out of them, and `set_region_attr` refuses to map them again.
 const STAGE1_UNMAPPED: [(u64, u64); 3] =
-    [(0, TRAMPOLINE_IPA), (PT_L2_IPA, PT_L1_IPA + GRANULE as u64), (PT_L3_BASE, PT_L3_CEIL)];
+    [(0, TRAMPOLINE_IPA), (PT_L2_OLD_IPA, PT_L1_IPA + GRANULE as u64), (PT_L2_IPA, PT_L3_CEIL)];
 // arm64e data-pointer PAC placement: TBI0(bit37)+TBID0(bit51) match Apple's user TCR so a signed
 // DATA pointer's PAC lands in [54:47] with the top byte (incl. bit 63) preserved = 0. Without TBI
 // the 47-bit-VA PAC field spans [63:56]∪[54:47]; a re-signed class_data_bits pointer then sets
 // bit 63, which objc reads as FAST_IS_RW_POINTER (isRealized) → spurious already-realized →
 // validateAlreadyRealizedClass fatal. See docs/.../2026-07-14-retrace-m2-tbi-design.md.
-const TCR_EL1_V:  u64 = 0x8_0021_0080_B511;    // +TBI0+TBID0. T0SZ=17 (47-bit VA), TG0=16K, WBWA, inner-share, EPD1, IPS=36-bit
+/// TCR_EL1.IPS ([34:32]) for `IPA_BITS`: 0b001 is 36 bits, 0b010 is 40.
+const TCR_IPS: u64 = match IPA_BITS { 36 => 0b001, 40 => 0b010, _ => panic!("IPA_BITS must be 36 or 40") };
+const TCR_EL1_V:  u64 = 0x8_0020_0080_B511 | (TCR_IPS << 32);   // +TBI0+TBID0, T0SZ=17, TG0=16K, WBWA, inner-share, EPD1
 const MAIR_EL1_V: u64 = 0xFF;                 // attr0 = Normal WBWA
 // base 0x30d00800 + M(1) + C(4) + I(0x1000) + DZE(0x4000) + UCI(0x0400_0000). PAC is NOT in the
 // base: it is per-guest (see below). DZE(14) is SET so EL0 `DC ZVA` executes natively instead of
@@ -436,7 +456,7 @@ const PAC_KEYS: [(hv_sys::SysReg, u64); 10] = [
 // --- Guest signing oracle (M2-cache Task 4) ---
 // Two anon scratch pages, lazy-init'd on the first sign_slots/authenticate, at fixed reserved IPAs
 // in block 0's free area [TSD_end 0x34000, PT_L3_BASE 0x800000) — clear of trampoline (0x4000),
-// PT_L2 (0x8000), stack (0x1C000), TSD (0x30000), dyn stack (40 MiB), PT_L3 (0x800000+), segments (>=4GiB),
+// the stack (0x1C000), TSD (0x30000), dyn stack (40 MiB), the L2 array and PT_L3 (0x800000+), segments (>=4GiB),
 // mmap (>=16GiB), and the cache (>=6GiB). W^X: the STUB page is code (RO+exec, ATTR_CODE) — a fresh
 // IPA promoted via set_region_exec; the TABLE page is data (RW+non-exec, block 0's default
 // ATTR_DATA). Executing a writable page would HANG hv_vcpu_run (Apple-Silicon W^X). Both anon
@@ -743,6 +763,12 @@ pub struct Box_ {
     /// M52 §3i: the stall watch. Control-plane and record-only, so it is in no `BoxState`: only
     /// `watch_for_stalls` sets it, and replay never calls that.
     stall: Option<stall::StallWatch>,
+    /// M57 §3b: the shared-region window's end. A plain field, not derived from `self.cache`: replay's
+    /// `restore` starts with `cache: None`, so a derived value would differ between record and replay
+    /// before the pager is installed. Set at load from the `CacheMeta`, at restore from the host
+    /// cache's main header, carried in `BoxState`. Declared last: the field-order rule is about
+    /// `vcpu`, `vm` and `backings` only.
+    shared_region_end: u64,
     /// M48 §3c (K1): the guest's own kqueues and its pipes' byte counts. Box state, not trace state:
     /// record and replay rebuild it from the guest's own syscalls, and every rebuild path carries it
     /// (`BoxState`). Declared after `vcpu`/`vm`, so the drop order is unaffected.
@@ -1286,6 +1312,9 @@ pub struct BoxState {
     pub mmap_next: u64,
     pub bootstrap_port: Option<u32>,
     pub cache_installed: bool,
+    /// M57 §3b: the shared-region window's end. Carried because restore re-derives it from a file
+    /// and a mid-run capture must not need one.
+    pub shared_region_end: u64,
     pub last_far: u64,
     pub synthetic_tsc: u64,
     pub cache_refault_ipa: u64,
@@ -1536,12 +1565,24 @@ type Window = (u64, usize, Vec<u8>, Vec<u8>, usize);
 /// M53 §3e: `(ret, err, writes)` of a `poll` or `select` answer, the writes being `(guest VA, bytes)`.
 type PollAnswer = (u64, bool, Vec<(u64, Vec<u8>)>);
 
+/// M57 §3c: why this Mac cannot give a box its guest IPA, or None. Pure, for the unit test.
+pub fn ipa_refusal(max_bits: u32) -> Option<String> {
+    (max_bits < IPA_BITS).then(|| format!("this Mac's hypervisor allows a {max_bits}-bit guest address space and retrace needs {IPA_BITS} bits"))
+}
+/// The CLI asks before any VM exists (correction 8).
+pub fn ipa_check() -> Result<(), String> {
+    match hv_sys::max_ipa_bits() {
+        Ok(n) => ipa_refusal(n).map_or(Ok(()), Err),
+        Err(e) => Err(format!("hv_vm_config_get_max_ipa_size returned {:#x}", e.0)),
+    }
+}
+
 /// M50 (spec §3b, R2): whether this process may create a VM. The CLI asks before it loads a guest
 /// or opens a trace, so a missing `com.apple.security.hypervisor` entitlement is one line and exit
 /// 2, not a panic in `Vm::create().expect`. The VM is destroyed before this returns: one VM per
 /// process, and the caller's own comes next.
 pub fn hypervisor_check() -> Result<(), String> {
-    match Vm::create() {
+    match Vm::create_with_ipa(IPA_BITS) {
         Ok(vm) => { drop(vm); Ok(()) }
         Err(e) => Err(format!("hv_vm_create returned {:#x}{}", e.0,
             if e.0 == hv_sys::raw::HV_DENIED as u32 { " (HV_DENIED)" } else { "" })),
@@ -1598,7 +1639,7 @@ impl Box_ {
     }
 
     // W^X identity stage-1 map. Default: every 32 MiB L2 entry is a data BLOCK (RW, non-exec) —
-    // covers stack/data/heap/mmap-data and identity-covers the whole 36 GiB space. Each exec range
+    // covers stack/data/heap/mmap-data and identity-covers the whole guest IPA space. Each exec range
     // (ipa,len,attr) gets page-granularity pages with `attr` via `promote_and_set` (its covering
     // block(s) are promoted to an L3 table, identity-filled with ATTR_DATA, then exec pages
     // overwritten). Pushes the L2 + every L3 as backings; the caller stage-2-maps them. NEVER
@@ -1606,19 +1647,19 @@ impl Box_ {
     // edit the live L2 and continue the same L3 allocation window.
     fn build_tables(backings: &mut Backings, exec: &[(u64, u64, u64)]) -> (u64, *mut u8, u64) {
         assert!(exec.iter().all(|&(_, len, _)| len > 0), "exec ranges must be non-empty");
-        let (l2_host, l2_len) = alloc_pages(GRANULE);
-        let l2 = unsafe { std::slice::from_raw_parts_mut(l2_host as *mut u64, 2048) };
+        let (l2_host, l2_len) = alloc_pages(GRANULE * L2_PAGES);
+        let l2 = unsafe { std::slice::from_raw_parts_mut(l2_host as *mut u64, L2_ENTRIES) };
         for (i, e) in l2.iter_mut().enumerate() { *e = ((i as u64) * BLK) | ATTR_DATA | DESC_BLOCK; }
         backings.push(Backing { host: l2_host, ipa: PT_L2_IPA, len: l2_len });
 
         // 47-bit VA (T0SZ=17) is a 3-level walk: TTBR0 -> L1 -> L2 -> L3. Every mapped IPA is
-        // < 2^36 (one L1 entry spans 64 GiB), so only L1[0] is valid; it points at the L2 above.
+        // < IPA_LIMIT (one L1 entry spans 64 GiB), so L1[0..L2_PAGES] are valid; each points at its L2 page above.
         // The wider VA moves the hardware PAC signature to bits [54:47], above objc's 47-bit
         // ISA_MASK, so a plain-arm64 isa strip is lossless. alloc_pages returns zeroed anon pages,
-        // so L1[1..] are already invalid (a VA >= 2^36 faults).
+        // so L1[L2_PAGES..] are already invalid (a VA >= IPA_LIMIT faults).
         let (l1_host, l1_len) = alloc_pages(GRANULE);
         let l1 = unsafe { std::slice::from_raw_parts_mut(l1_host as *mut u64, 2048) };
-        l1[0] = PT_L2_IPA | DESC_TABLE;
+        for (i, e) in l1.iter_mut().take(L2_PAGES).enumerate() { *e = (PT_L2_IPA + (i * GRANULE) as u64) | DESC_TABLE; }
         backings.push(Backing { host: l1_host, ipa: PT_L1_IPA, len: l1_len });
 
         let mut next_l3 = PT_L3_BASE;
@@ -1675,7 +1716,7 @@ impl Box_ {
              (page 0, retrace's page tables, the L3 window)", ipa + len);
         let l2_host = self.l2_host;
         assert!(!l2_host.is_null(), "set_region_attr: no live L2 table (restore had no PT_L2 region)");
-        let l2 = unsafe { std::slice::from_raw_parts_mut(l2_host as *mut u64, 2048) };
+        let l2 = unsafe { std::slice::from_raw_parts_mut(l2_host as *mut u64, L2_ENTRIES) };
         let mut next_l3 = self.next_l3;
         let created = {
             let mut alloc_l3 = || {
@@ -1905,7 +1946,7 @@ impl Box_ {
         // backings, matching the field-order invariant on `pub struct Box_` above — never
         // backings first, which would munmap host pages while their stage-2 mapping is still live.
         let mut backings = Backings::new();
-        let vm = Vm::create().expect("hv_vm_create");
+        let vm = Vm::create_with_ipa(IPA_BITS).expect("hv_vm_create");
         let vcpu = Vcpu::create(&vm).expect("hv_vcpu_create");
         let map = |vm: &Vm, backings: &mut Backings, ipa: u64, src: &[u8], memsz: usize| {
             let (host, len) = alloc_pages(memsz.max(src.len()).max(GRANULE));
@@ -1951,7 +1992,7 @@ impl Box_ {
         vcpu.set_sys(sysreg::SP_EL0, STACK_TOP_IPA).unwrap();
         vcpu.set_reg(reg::CPSR, 0x0).unwrap();                  // EL0t
         vcpu.set_reg(reg::PC, loaded.entry).unwrap();
-        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default(), sleep: sleep::SleepModel::default(), sems: sema::Semaphores::default(), itimer: timer::RealTimer::default(), stall: None }
+        Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: STACK_TOP_IPA, stack_size: GRANULE as u64, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default(), sleep: sleep::SleepModel::default(), sems: sema::Semaphores::default(), itimer: timer::RealTimer::default(), stall: None, shared_region_end: SHARED_REGION_END_MIN }
     }
 
     pub fn sp(&self) -> u64 { self.vcpu.get_sys(sysreg::SP_EL0).unwrap() }
@@ -2011,7 +2052,7 @@ impl Box_ {
     /// replay, so both sides page identical bytes. Idempotent (a second #536 is a no-op).
     pub fn install_cache_pager(&mut self) {
         if self.cache.is_none() {
-            self.cache = Some(CacheMeta::load(DEFAULT_CACHE_PATH).expect("install_cache_pager: load dyld shared cache"));
+            self.cache = Some(load_host_cache());
         }
     }
 
@@ -2320,13 +2361,13 @@ impl Box_ {
 
     /// The live stage-1 leaf descriptor for `ipa`, walking the L2/L3 the box maintains: an L3 page
     /// descriptor where the block has been promoted, otherwise the L2 block descriptor itself.
-    /// `None` when there is no live L2, the IPA is outside the 36-bit space, or the promoted L3 is
+    /// `None` when there is no live L2, the IPA is outside the guest IPA space, or the promoted L3 is
     /// not among the tracked backings. Shared by the attribute observables below.
     fn leaf_desc(&self, ipa: u64) -> Option<u64> {
         if self.l2_host.is_null() { return None; }
         let bi = (ipa / BLK) as usize;
-        if bi >= 2048 { return None; }
-        let l2 = unsafe { std::slice::from_raw_parts(self.l2_host as *const u64, 2048) };
+        if bi >= L2_ENTRIES { return None; }
+        let l2 = unsafe { std::slice::from_raw_parts(self.l2_host as *const u64, L2_ENTRIES) };
         if l2[bi] & 0x3 == DESC_TABLE {
             let l3_ipa = l2[bi] & !(GRANULE as u64 - 1);
             let host = self.backings.iter().find(|b| b.ipa == l3_ipa).map(|b| b.host)?;
@@ -2655,7 +2696,7 @@ impl Box_ {
         // backings, matching the field-order invariant on `pub struct Box_` above — never
         // backings first, which would munmap host pages while their stage-2 mapping is still live.
         let mut backings = Backings::new();
-        let vm = Vm::create().expect("hv_vm_create");
+        let vm = Vm::create_with_ipa(IPA_BITS).expect("hv_vm_create");
         let vcpu = Vcpu::create(&vm).expect("hv_vcpu_create");
         let argv_b: Vec<Vec<u8>> = argv.iter().map(|a| a.clone().into_bytes()).collect();
         let mut before_tsd = |vm: &Vm, backings: &mut Backings| {
@@ -2677,7 +2718,8 @@ impl Box_ {
         Self::set_pac_keys(&vcpu);
         Self::start_sysregs(&vcpu, &st);
         let StagedImage { l2_host, next_l3, pac, cache: cache_meta, .. } = st;
-        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default(), sleep: sleep::SleepModel::default(), sems: sema::Semaphores::default(), itimer: timer::RealTimer::default(), stall: None };
+        let shared_region_end = { let (base, size) = cache_meta.window(); shared_region_end_for(base, size) };
+        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: Some(cache_meta), bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top: DYN_STACK_TOP, stack_size: DYN_STACK_SIZE, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default(), sleep: sleep::SleepModel::default(), sems: sema::Semaphores::default(), itimer: timer::RealTimer::default(), stall: None, shared_region_end };
         b.reserve_believed_stack();
         // M14: thread 0's context was zeroed above (the table exists before the vCPU does); overwrite
         // it with the real startup state just written to the vCPU so it reflects reality from the
@@ -2755,7 +2797,7 @@ impl Box_ {
         // re-faults forever. Pre-setting the real per-page attrs from the cache's OWN mappings (at
         // slide 0, exactly where page_in_cache maps them) closes that gap. `CacheMeta` is loaded here
         // and kept as the pager so #294/#536 need only confirm it.
-        let cache_meta = CacheMeta::load(DEFAULT_CACHE_PATH).expect("load_dynamic: load dyld shared cache");
+        let cache_meta = load_host_cache();
         let mut exec = vec![(TRAMPOLINE_IPA, 0x800u64, ATTR_TRAMP)];
         for s in &exe.segments  { if s.exec { exec.push((s.vaddr,             s.memsz as u64, ATTR_CODE)); } }
         for s in &dyld.segments { if s.exec { exec.push((s.vaddr + DYLD_BASE, s.memsz as u64, ATTR_CODE)); } }
@@ -2860,12 +2902,14 @@ impl Box_ {
     /// replace what they cover. A guest's FIXED request goes through `guest_vm_map_masked` with its flags.
     pub fn guest_vm_map(&mut self, addr: u64, size: u64, anywhere: bool, exec: bool) -> u64 {
         let flags = if anywhere { retrace_arch::VM_FLAGS_ANYWHERE } else { retrace_arch::VM_FLAGS_OVERWRITE };
-        self.guest_vm_map_masked(addr, size, 0, flags, exec).expect("ANYWHERE and FIXED|OVERWRITE never refuse")
+        self.guest_vm_map_masked(addr, size, 0, flags, exec).expect("FIXED|OVERWRITE never refuses; an ANYWHERE caller must use the _masked form")
     }
 
     /// Ruling T1-float-ceiling: float `mmap_next` past a FIXED range only when its granule-rounded end is at
     /// or below `COMMPAGE2_IPA`; the bump region ends below the box's high windows, so a cursor past them can
-    /// only produce a placement that fails.
+    /// only produce a placement that fails. M57 t8: since the IPA is 40 bits this is an optimisation only,
+    /// not the invariant it was at 36 bits ("everything at or above the cursor is free"): every bump
+    /// placement now goes through `first_fit`, which skips whatever lies at the cursor.
     fn float_cursor_past(&mut self, addr: u64, len: u64) {
         let g = GRANULE as u64;
         let end = addr.saturating_add(len).saturating_add(g - 1) & !(g - 1);
@@ -2876,14 +2920,14 @@ impl Box_ {
     /// Checked in this order, before anything is allocated. A start below 4 GiB is `KERN_INVALID_ADDRESS`
     /// (`__PAGEZERO` and the box's own low windows). The shared-region window, either commpage page, and
     /// any backing or reservation the page-rounded range overlaps are `KERN_NO_SPACE`; adjacency is free
-    /// (half-open intervals). Free is `Ok`; a range past the 36-bit IPA keeps `place_fixed`'s wall (R3).
+    /// (half-open intervals). Free is `Ok`; a range past the IPA keeps `place_fixed`'s wall (R3).
     fn fixed_answer(&self, addr: u64, size: u64) -> Result<(), u64> {
         let g = GRANULE as u64;
         let end = addr.saturating_add(size).saturating_add(g - 1) & !(g - 1);
         let (lo, hi) = (addr & !(g - 1), end.max(addr & !(g - 1)));
         if addr < 1 << 32 { return Err(retrace_arch::KERN_INVALID_ADDRESS); }
         let hits = |s: u64, e: u64| lo < e && s < hi;
-        if hits(SHARED_REGION_START, SHARED_REGION_END)
+        if hits(SHARED_REGION_START, self.shared_region_end)
             || hits(COMMPAGE_IPA, COMMPAGE_IPA + g) || hits(COMMPAGE2_IPA, COMMPAGE2_IPA + g)
             || self.backings.iter().any(|b| hits(b.ipa, b.ipa + b.len as u64))
             || self.reservations.iter().any(|&(s, l)| hits(s, s + l)) {
@@ -2916,7 +2960,7 @@ impl Box_ {
         let m = mask | (GRANULE as u64 - 1);
         let ipa = if anywhere {
             if mask >= 1 << 36 {
-                retrace_arch::refuse!(Memory, "M47: unmeasured mach_vm_map mask {mask:#x}: no measured guest passes one at or above the 36-bit IPA width, and rounding the bump cursor to it would wrap in a release build");
+                retrace_arch::refuse!(Memory, "M47: unmeasured mach_vm_map mask {mask:#x}: no measured guest passes a mask of 1 << 36 or more, and rounding the bump cursor to it would wrap in a release build");
             }
             // Kernel-faithful VM_FLAGS_ANYWHERE-with-hint: search FORWARD from a non-zero hint for
             // the first free gap, treating reservations as occupied (what vm_map_enter does). When
@@ -2936,7 +2980,17 @@ impl Box_ {
                 None => {
                     if exec { self.mmap_next = (self.mmap_next + (BLK - 1)) & !(BLK - 1); }
                     if mask != 0 { self.mmap_next = (self.mmap_next + m) & !m; }
-                    let a = self.mmap_next; self.mmap_next += rlen as u64; a
+                    // M57 t8: the bump is checked like a hinted placement; nothing fits => no space.
+                    // An exec placement still starts on a fresh BLK block when the cursor is occupied.
+                    let fm = if exec { m | (BLK - 1) } else { m };
+                    match self.bump_fit(rlen as u64, fm) {
+                        Some(a) => { self.mmap_next = a + rlen as u64; a }
+                        None => {
+                            // SAFETY: `host` is the fresh `alloc_pages` result above, never published.
+                            unsafe { free_pages(host, rlen); }
+                            return Err(retrace_arch::KERN_NO_SPACE);
+                        }
+                    }
                 }
             }
         } else {
@@ -2971,7 +3025,7 @@ impl Box_ {
     /// Deterministic: identical call sequence => identical returned address on replay.
     pub fn guest_vm_reserve(&mut self, addr: u64, size: u64, anywhere: bool) -> u64 {
         let flags = if anywhere { retrace_arch::VM_FLAGS_ANYWHERE } else { retrace_arch::VM_FLAGS_OVERWRITE };
-        self.guest_vm_reserve_masked(addr, size, 0, flags).expect("ANYWHERE and FIXED|OVERWRITE never refuse")
+        self.guest_vm_reserve_masked(addr, size, 0, flags).expect("FIXED|OVERWRITE never refuses; an ANYWHERE caller must use the _masked form")
     }
 
     /// `guest_vm_reserve` with `mach_vm_map`'s alignment `mask`, honoured on ANYWHERE as
@@ -2984,18 +3038,17 @@ impl Box_ {
         let rounded = (size + GRANULE as u64 - 1) & !(GRANULE as u64 - 1);
         let base = if anywhere {
             if mask >= 1 << 36 {
-                retrace_arch::refuse!(Memory, "M47: unmeasured mach_vm_map mask {mask:#x}: no measured guest passes one at or above the 36-bit IPA width, and rounding the bump cursor to it would wrap in a release build");
+                retrace_arch::refuse!(Memory, "M47: unmeasured mach_vm_map mask {mask:#x}: no measured guest passes a mask of 1 << 36 or more, and rounding the bump cursor to it would wrap in a release build");
             }
             if mask != 0 {
                 let m = mask | (GRANULE as u64 - 1);
                 self.mmap_next = (self.mmap_next + m) & !m;
             }
-            let end = self.mmap_next + rounded;
-            if end > (1u64 << 36) {
-                retrace_arch::refuse!(Memory, "guest_vm_reserve ANYWHERE overflowed 36-bit IPA space: {end:#x}");
-            }
-            let a = self.mmap_next;
-            self.mmap_next = end;
+            // M57 t8: the bump is checked (backings, reservations, forbidden windows, the IPA limit);
+            // nothing fits => KERN_NO_SPACE, never a panic (this replaces the old overflow refuse).
+            let m = mask | (GRANULE as u64 - 1);
+            let a = self.bump_fit(rounded, m).ok_or(retrace_arch::KERN_NO_SPACE)?;
+            self.mmap_next = a + rounded;
             a
         } else {
             // M52 §3b: the cursor floats past every FIXED reservation, not only one it sits inside,
@@ -3028,11 +3081,58 @@ impl Box_ {
         0
     }
 
+    /// M57 Task 7 (t0 native, `native-reallocate-rule-27.2.txt` and `-edges-`): `mach_vm_reallocate` (4829),
+    /// a box-side service, never forwarded. Returns the new address or the `kern_return_t`.
+    /// Answers, in order: `src_size` 0, an unaligned `src` or `dst_size`, `dst_size < src_size` and
+    /// `src + dst_size` wrapping are 4; `dst_size` at or past `IPA_LIMIT` is 3 (checked before any host
+    /// allocation); FIXED without OVERWRITE goes through `fixed_answer` (3 over the still-mapped source);
+    /// FIXED|OVERWRITE overlapping the source is 1; an unreadable or partly backed `src` is 1.
+    /// `dst_size == src_size` is 0, in place. ANYWHERE grows in place iff the tail holds no backing and no
+    /// reservation (`range_is_free`); otherwise it places as `guest_vm_map_masked` does for `mach_vm_map`
+    /// (same code, hint `dst_in`, `mask`), copies the head (a host-side copy of the bytes read from the
+    /// guest), leaves the tail zero and unmaps `src` through `guest_munmap`. `options` is ignored (native
+    /// accepts 1). Native rounds an unaligned `src_size` up; so does this.
+    ///
+    /// Named limit: native places a 1 TiB request (`dst_size` 1 << 40, a 1 TiB VA) and answers 0; the box's
+    /// IPA is `IPA_LIMIT` (1 TiB), so it answers 3 for any `dst_size` it cannot hold.
+    /// A pure function of guest state, so replay recomputes it and only the reply is recorded.
+    pub fn guest_vm_reallocate(&mut self, src: u64, src_size: u64, dst_in: u64, dst_size: u64, mask: u64, flags: u64) -> Result<u64, u64> {
+        let g = GRANULE as u64;
+        let anywhere = flags & retrace_arch::VM_FLAGS_ANYWHERE != 0;
+        if src_size == 0 || src & (g - 1) != 0 || dst_size & (g - 1) != 0 || dst_size < src_size
+            || src.checked_add(dst_size).is_none() { return Err(4); }
+        if dst_size >= IPA_LIMIT { return Err(retrace_arch::KERN_NO_SPACE); }
+        let (ssz, dsz) = ((src_size + g - 1) & !(g - 1), dst_size);
+        if !anywhere {
+            if flags & retrace_arch::VM_FLAGS_OVERWRITE == 0 { self.fixed_answer(dst_in, dsz)?; }
+            else if dst_in < src + ssz && src < dst_in.saturating_add(dsz) { return Err(retrace_arch::KERN_INVALID_ADDRESS); }
+        }
+        if self.jit.refuse_overlap(src, dsz, "mach_vm_reallocate").is_err() {
+            retrace_arch::refuse!(Memory, "M57: mach_vm_reallocate over a MAP_JIT range: unmodelled (Ruling T6-c)");
+        }
+        let Some(bytes) = usize::try_from(src_size).ok().and_then(|n| self.read_va_checked(src, n)) else {
+            return Err(retrace_arch::KERN_INVALID_ADDRESS);
+        };
+        if anywhere && dsz == ssz { return Ok(src); }
+        if anywhere && self.range_is_free(src + ssz, dsz - ssz) {
+            self.guest_vm_map_masked(src + ssz, dsz - ssz, 0, retrace_arch::VM_FLAGS_OVERWRITE, false)?;
+            // The grown tail may sit at the bump cursor, above the window `float_cursor_past` floats
+            // through (its COMMPAGE2 ceiling is below the heap the guest actually uses); `range_is_free`
+            // bounded the tail by `IPA_LIMIT`, so floating past it is sound.
+            self.mmap_next = self.mmap_next.max(src + dsz);
+            return Ok(src);
+        }
+        let dst = self.guest_vm_map_masked(dst_in, dsz, mask, flags, false)?;
+        self.write_va_committing(dst, &bytes).expect("a fresh mapping admits its own head");
+        self.guest_munmap(src, ssz);
+        Ok(dst)
+    }
+
     /// The live L3 descriptor for `va`'s page, or None if its 32 MiB block is still an
     /// unpromoted data BLOCK (no page-granular entry exists). Walks the live L2 like
     /// `promote_and_set` does, by host pointer, not through guest memory.
     fn l3_desc(&self, va: u64) -> Option<u64> {
-        let l2 = unsafe { std::slice::from_raw_parts(self.l2_host as *const u64, 2048) };
+        let l2 = unsafe { std::slice::from_raw_parts(self.l2_host as *const u64, L2_ENTRIES) };
         let l2e = l2[(va / BLK) as usize];
         if l2e & 0x3 != DESC_TABLE { return None; }
         let l3_ipa = l2e & !(GRANULE as u64 - 1);
@@ -3044,7 +3144,7 @@ impl Box_ {
     /// Overwrite the live L3 descriptor for `va`'s page. The block must already be promoted
     /// (callers `set_region_attr` first).
     fn write_l3_desc(&mut self, va: u64, desc: u64) {
-        let l2 = unsafe { std::slice::from_raw_parts(self.l2_host as *const u64, 2048) };
+        let l2 = unsafe { std::slice::from_raw_parts(self.l2_host as *const u64, L2_ENTRIES) };
         let l2e = l2[(va / BLK) as usize];
         assert!(l2e & 0x3 == DESC_TABLE, "write_l3_desc: {va:#x} is in an unpromoted block");
         let l3_ipa = l2e & !(GRANULE as u64 - 1);
@@ -3140,13 +3240,13 @@ impl Box_ {
     }
 
     /// Is `[ipa, ipa+len)` free of any tracked backing AND any PROT_NONE reservation, clear of the
-    /// shared-cache window, and within the 36-bit IPA space? A real `vm_map_entry` (a reservation)
+    /// shared-cache window, and within the guest IPA space? A real `vm_map_entry` (a reservation)
     /// occupies its VA on the kernel, so an ANYWHERE placement can never land inside one; excluding
     /// `reservations` here makes the emulated VM agree. (Used to decide ANYWHERE hint placement.)
     fn range_is_free(&self, ipa: u64, len: u64) -> bool {
         let end = ipa.saturating_add(len);
-        if end > (1u64 << 36) { return false; }                            // out of 36-bit IPA space
-        if ipa < SHARED_REGION_END && SHARED_REGION_START < end { return false; } // shared-cache window
+        if end > IPA_LIMIT { return false; }                            // out of the guest IPA space
+        if ipa < self.shared_region_end && SHARED_REGION_START < end { return false; } // shared-cache window
         // The VMM's lazily-mapped scratch pages: forbidden even while still absent from `backings`.
         if ipa < SCRATCH_RESERVED_END && SCRATCH_RESERVED_START < end { return false; }
         // M49 F3: stage 1 maps none of these, so a placement there would hand the guest memory it
@@ -3162,7 +3262,7 @@ impl Box_ {
     /// window (`range_is_free`). The optimal `a` is always either the hint itself or the page-rounded
     /// end of some occupied extent (slide right until clear stops exactly at an extent's end), so we
     /// test just those candidates in address order and take the first that fits — a deterministic
-    /// gap-edge first-fit. `None` if nothing fits below the 36-bit ceiling (caller falls back to the
+    /// gap-edge first-fit. `None` if nothing fits below the IPA ceiling (caller falls back to the
     /// bump allocator). Pure function of (hint, len, backings, reservations) — identical on record &
     /// replay, so a first-fit-placed returned address is recomputed identically and byte-checked by
     /// the replay oracle (no new mirror needed; symmetry is structural).
@@ -3172,6 +3272,13 @@ impl Box_ {
     /// aligned end of the extent that blocks the aligned address below it. At `m == GRANULE - 1`
     /// every candidate is what it was before the mask: the two window ends are page-aligned.
     /// Saturating, so a garbage hint near `u64::MAX` still finds no fit and falls back to the bump.
+    /// M57 final review M2: the bump placement. The kernel searches from the bottom of the area, so when
+    /// nothing fits from the cursor up, retry from `MMAP_BASE` before answering no-space. A pure function
+    /// of box state.
+    fn bump_fit(&self, len: u64, m: u64) -> Option<u64> {
+        self.first_fit(self.mmap_next, len, m).or_else(|| self.first_fit(MMAP_BASE, len, m))
+    }
+
     fn first_fit(&self, hint: u64, len: u64, m: u64) -> Option<u64> {
         let g = GRANULE as u64;
         let round_up = |x: u64| x.saturating_add(m) & !m;
@@ -3185,7 +3292,7 @@ impl Box_ {
             let end = round_up(s + l);
             if end > base { cands.push(end); }
         }
-        if round_up(SHARED_REGION_END) > base { cands.push(round_up(SHARED_REGION_END)); }
+        if round_up(self.shared_region_end) > base { cands.push(round_up(self.shared_region_end)); }
         if round_up(SCRATCH_RESERVED_END) > base { cands.push(round_up(SCRATCH_RESERVED_END)); }
         for &(_, e) in &STAGE1_UNMAPPED { if round_up(e) > base { cands.push(round_up(e)); } }
         cands.sort_unstable();
@@ -3231,7 +3338,7 @@ impl Box_ {
         // errno channel plumbed to its four call sites and no guest exercises it, so it fails loud
         // with a diagnosis instead of an opaque `HvError(0xfae94003)` recorder abort.
         if !Self::fixed_fits(addr, rlen) {
-            retrace_arch::refuse!(Memory, "FIXED map at {addr:#x}..{:#x} is not 16 KiB-aligned or lies outside the guest's 36-bit \
+            retrace_arch::refuse!(Memory, "FIXED map at {addr:#x}..{:#x} is not 16 KiB-aligned or lies outside the guest's {IPA_BITS}-bit \
                  IPA space", addr.saturating_add(rlen as u64));
         }
         // M48 §3f (Ruling T6-c): every FIXED path funnels through here, and none may land on a
@@ -3285,7 +3392,7 @@ impl Box_ {
     }
 
     /// Can the guest's address space hold a FIXED request for `[addr, addr+rlen)`? The guest IPA
-    /// space is 36-bit and the stage-1 tables are 16 KiB-granule, so a request that is misaligned,
+    /// space is 40-bit and the stage-1 tables are 16 KiB-granule, so a request that is misaligned,
     /// overflows, or ends above the ceiling is one the real kernel refuses with `EINVAL` — and one
     /// `hv_vm_map` refuses with `HV_BAD_ARGUMENT`, which retrace `expect`s on, converting a guest
     /// error into a recorder abort.
@@ -3299,7 +3406,7 @@ impl Box_ {
     /// identically, so the rejection needs no mirror (symmetry is structural).
     fn fixed_fits(addr: u64, rlen: usize) -> bool {
         addr & (GRANULE as u64 - 1) == 0
-            && addr.checked_add(rlen as u64).is_some_and(|end| end <= 1u64 << 36)
+            && addr.checked_add(rlen as u64).is_some_and(|end| end <= IPA_LIMIT)
     }
 
     /// Free every tracked backing that overlaps `[ipa, ipa+len)` (stage-2 unmap + release the anon
@@ -3444,10 +3551,21 @@ impl Box_ {
             }
             self.float_cursor_past(addr, rlen as u64);
             addr
-        } else { self.mmap_next };
+        } else {
+            // M57 t8: the bump is checked; nothing fits => ENOMEM, with `host` released (we own it).
+            let fm = if prot & Self::PROT_EXEC != 0 { BLK - 1 } else { GRANULE as u64 - 1 };
+            match self.bump_fit(rlen as u64, fm) {
+                Some(a) => a,
+                None => {
+                    // SAFETY: `host` is this function's unpublished `rlen`-byte mapping.
+                    unsafe { free_pages(host, rlen); }
+                    return Err(retrace_arch::ENOMEM);
+                }
+            }
+        };
         self.vm.map(host, ipa, rlen, MemFlags::RWX).expect("hv_vm_map (mmap region)");
         self.backings.push(Backing { host, ipa, len: rlen });
-        if flags & Self::MAP_FIXED == 0 { self.mmap_next += rlen as u64; }
+        if flags & Self::MAP_FIXED == 0 { self.mmap_next = ipa + rlen as u64; }
         // M13: a PROT_NONE mmap is protected once its backing exists — which is why the invariant
         // "no-access => backed" costs nothing on this path.
         if prot == 0 { self.protect_none(ipa, rlen as u64); }
@@ -4197,7 +4315,7 @@ impl Box_ {
         // backings, matching the field-order invariant on `pub struct Box_` above — never
         // backings first, which would munmap host pages while their stage-2 mapping is still live.
         let mut backings = Backings::new();
-        let vm = Vm::create().expect("hv_vm_create");
+        let vm = Vm::create_with_ipa(IPA_BITS).expect("hv_vm_create");
         let vcpu = Vcpu::create(&vm).expect("hv_vcpu_create");
         for r in regions {
             let (host, len) = alloc_pages(r.bytes.len().max(GRANULE));
@@ -4261,6 +4379,9 @@ impl Box_ {
         // allocation window and mints IPAs matching the record run.
         let l2_host = backings.iter().find(|b| b.ipa == PT_L2_IPA).map(|b| b.host)
             .unwrap_or(std::ptr::null_mut());
+        if let Some(b) = backings.iter().find(|b| b.ipa == PT_L2_IPA) {
+            assert_eq!(b.len, L2_PAGES * GRANULE, "restore: the L2 array at {PT_L2_IPA:#x} is {} bytes, not {}", b.len, L2_PAGES * GRANULE);
+        }
         // Minor (a): the `next_l3` recovery below assumes every backing in the L3 window
         // [PT_L3_BASE, PT_L3_CEIL) is a single-GRANULE L3 table (that is the only thing load
         // ever allocates there). Pin that invariant so a stray non-table region in the window
@@ -4279,7 +4400,14 @@ impl Box_ {
         // correct for M21's believed-stack reservation, which `load_dynamic` makes at load time and
         // which has no landmark to rebuild from, precisely because M21 keeps it below the trace.
         // That one entry is re-established below.
-        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default(), sleep: sleep::SleepModel::default(), sems: sema::Semaphores::default(), itimer: timer::RealTimer::default(), stall: None };
+        // M57 §3b: gated as the TPIDRRO_EL0 set and reserve_believed_stack are: a static guest has no
+        // cache, so it keeps the constant. A dynamic one takes the host cache's end from the main
+        // header, the same bytes record's CacheMeta window came from.
+        let shared_region_end = if stack_top == DYN_STACK_TOP {
+            let h = host_cache_header();
+            shared_region_end_for(h.base, h.size)
+        } else { SHARED_REGION_END_MIN };
+        let mut b = Box_ { vm, vcpu, backings, reservations: Vec::new(), noaccess: Vec::new(), mmap_next: MMAP_BASE, bootstrap_port: None, l2_host, next_l3, last_far: 0, synthetic_tsc: SYNTH_TSC_START, cache_refault_ipa: 0, cache_refault_count: 0, cache: None, bps_armed: false, wps_armed: false, watch_ranges: Vec::new(), syscall_watch_hit: None, pac_enabled: pac, stack_top, stack_size, tlbi_stub_ready: false, fds: FdTable::new(), sigtable: SigTable::default(), threads: thread::ThreadTable::new(thread::ThreadCtx::zeroed()), thread_start_pc: None, wq_thread_pc: None, pthread_size: None, fall_throughs: 0, window_cap: PTR_WINDOW_CAP, canary_disturbances: 0, kq: kq::WorkqKqueue::default(), excl: None, gkq: gkq::GuestKqueues::default(), psynch: psynch::Psynch::default(), jit: jit::JitSet::default(), sleep: sleep::SleepModel::default(), sems: sema::Semaphores::default(), itimer: timer::RealTimer::default(), stall: None, shared_region_end };
         // M21 task 2.5: replay never runs `load_dynamic`, so the believed-stack reservation it makes
         // would not exist here and the first stack-growth fault would go unserviced and report as a
         // divergence — M21 would be record-only. Re-establish it, gated on the DYNAMIC geometry so a
@@ -5508,7 +5636,7 @@ impl Box_ {
     /// Below the trace: `run()` and `run_one_for_step()` both call it, on record and replay alike.
     fn native_abort_syndrome(&mut self, esr1: u64, far: u64) -> u64 {
         if (esr1 >> 26) & 0x3f != 0x20 || !(0x0c..=0x0f).contains(&(esr1 & 0x3f)) { return esr1; }
-        if (SHARED_REGION_START..SHARED_REGION_END).contains(&far) { return esr1; }
+        if (SHARED_REGION_START..self.shared_region_end).contains(&far) { return esr1; }
         let Some((ipa, Some(leaf))) = self.va_leaf(far) else { return esr1 };
         if self.host_span(ipa).is_some() || self.in_reservation(ipa) { return esr1; }
         if !excl::el0_writable(leaf) || leaf & UXN == 0 { return esr1; }
@@ -5906,7 +6034,7 @@ impl Box_ {
     /// construction rather than by that accident. M6.)
     ///
     /// The index shifts mirror `build_tables` exactly: TCR_EL1.T0SZ=17 (47-bit VA) + 16 KiB granule
-    /// is a 3-level walk of 2048-entry tables — L1 [46:36] (one entry per 64 GiB), L2 [35:25] (one
+    /// is a 3-level walk of 2048-entry tables — L1 [46:36] (one entry per 64 GiB; L1[0..16] are tables), L2 [35:25] (one
     /// per `BLK` = 32 MiB), L3 [24:14] (one per `GRANULE`). With a 16 KiB granule a BLOCK descriptor
     /// is architecturally permitted only at L2, so L1 must be a table.
     ///
@@ -7991,7 +8119,7 @@ impl Box_ {
         }
         // `page_in_cache` only for a page nothing backs yet: on a backed page it counts a refault.
         if self.host_span(ipa).is_some() || self.commit_reserved_page(ipa)
-            || ((SHARED_REGION_START..SHARED_REGION_END).contains(&ipa) && self.page_in_cache(ipa)) {
+            || ((SHARED_REGION_START..self.shared_region_end).contains(&ipa) && self.page_in_cache(ipa)) {
             Ok(())
         } else {
             Err(retrace_arch::EFAULT)
@@ -8274,7 +8402,7 @@ impl Box_ {
         // DYN_STACK_BOTTOM, PT_L3_CEIL never vary at runtime), so clippy's assertions_on_constants
         // rightly refuses a plain assert! here — const { assert!(..) } is the existing convention
         // this file already uses for the same situation (see stack_geometry_tests's DYN_STACK_TOP
-        // <= 1 << 36 check), and it is strictly stronger: a layout mistake fails the BUILD, not a
+        // <= IPA_LIMIT check), and it is strictly stronger: a layout mistake fails the BUILD, not a
         // test run or a live load.
         //
         // The window deliberately starts exactly ONE GRANULE above GUARD_PAGE_IPA, not AT it: that
@@ -8314,20 +8442,23 @@ impl Box_ {
     ///   *records* that address — it neither maps nor checks it — so if this page is to guard
     ///   anything, **the guard is retrace's, not libpthread's.**
     ///
-    /// **The one-granule bump is what makes the guard page real** (fix round 1, Important 1).
-    /// `guest_vm_reserve` hands out `mmap_next` and advances it CONTIGUOUSLY, so without the bump
+    /// **Finding the granule free is what makes the guard page real** (fix round 1, Important 1; M57 P19).
+    /// The stack is placed by `bump_fit` over one granule MORE than it needs and reserved at `a + GRANULE`,
+    /// so `[a, a + GRANULE)` was free when found and stays a hole. (Bumping the cursor by a granule, as
+    /// this once did, is not enough since M57 T8: over an occupied cursor `first_fit` lands flush against
+    /// the blocking extent.) Without it, a contiguous placement
     /// `[x2 - GRANULE, x2)` is the last page of whatever reservation precedes it — for the second
     /// worker of a `numthreads=2` request, that is the FIRST worker's pthread struct page, and
     /// `commit_reserved_page` would back it on first touch because it lies inside a tracked
     /// reservation. A worker-2 stack overrun would then corrupt worker 1's struct in silence. With
-    /// the bump the page falls in a hole no reservation covers, so `commit_reserved_page` returns
+    /// the hole the page falls in is one no reservation covers, so `commit_reserved_page` returns
     /// `false` for it and the access stays a stage-2 fault (since M49 F2, the guest's own SIGSEGV
     /// rather than a recorder error) — which is the whole point: an overrun that faults is a bug
     /// you can find.
     ///
     /// That hole is a gap, not a claim on the address space: nothing marks it forbidden, so a later
     /// ANYWHERE-with-hint placement (`first_fit`) could still fit a small mapping into it, after
-    /// which an overrun would land in that mapping instead. What the bump guarantees is the case
+    /// which an overrun would land in that mapping instead. What the free granule guarantees is the case
     /// that was actually silent — demand-commit — and `retrace-box/tests/threads.rs`'s
     /// `workq_reqthreads_leaves_an_uncommittable_guard_page_below_each_worker_stack` pins exactly
     /// that, refusal and non-vacuous positive control both.
@@ -8342,10 +8473,18 @@ impl Box_ {
     /// Deterministic: `guest_vm_reserve(.., anywhere)` hands out `mmap_next` and advances it, so
     /// an identical call sequence places an identical worker on record and on replay.
     fn place_worker_stack(&mut self, pthsize: u64) -> (u64, u64, u64) {
-        // Skip one granule so the guard page below `x2` lands in a hole no reservation covers.
-        // Deterministic like everything else here: a fixed bump of the same cursor.
-        self.mmap_next += GRANULE as u64;
-        let base = self.guest_vm_reserve(0, WQ_WORKER_STACK_SIZE + pthsize, true);
+        // Find a free range one granule longer than the stack, and reserve only its top part: the granule
+        // below `x2` was free when found, so it is a hole no reservation covers. Pure function of box state.
+        let g = GRANULE as u64;
+        let len = WQ_WORKER_STACK_SIZE + pthsize;
+        let rounded = (len + g - 1) & !(g - 1);
+        let placed = self.bump_fit(g + rounded, g - 1)
+            .and_then(|a| self.guest_vm_reserve_masked(a + g, len, 0, 0).ok().map(|base| (a, base)));
+        let Some((a, base)) = placed else {
+            retrace_arch::refuse!(Memory, "M57: no address space left for a worker thread's stack (the guest's address space is exhausted)");
+        };
+        // The cursor ends past the stack, as every other bump placement leaves it.
+        self.mmap_next = a + g + rounded;
         let pthread = base + WQ_WORKER_STACK_SIZE;
         (base, pthread, pthread)
     }
@@ -9106,6 +9245,9 @@ impl Box_ {
         self.sync_jit_view();
     }
 
+    /// M57 §3e: the UUID of the shared cache this dynamic guest loaded, `None` for a static one.
+    pub fn cache_uuid(&self) -> Option<[u8; 16]> { self.cache.as_ref().map(|c| c.uuid()) }
+
     /// Capture all backings + architectural registers as an Event::Snapshot.
     pub fn snapshot(&self) -> retrace_trace::Event {
         let mut mem = Vec::new();
@@ -9202,7 +9344,7 @@ impl Box_ {
     }
 
     /// Bring-up diagnostic: walk the guest AArch64 frame-pointer chain from x29, returning up to
-    /// `max` return addresses (PAC bits stripped by masking to the 36-bit IPA space). Return
+    /// `max` return addresses (PAC bits stripped by masking to the guest IPA space). Return
     /// addresses are `pacibsp`-signed on the stack; masking recovers the raw VA (dyld ~0x1_4000_0000).
     pub fn dbg_backtrace(&self, max: usize) -> String {
         let mut s = String::new();
@@ -9212,7 +9354,7 @@ impl Box_ {
         for _ in 0..max {
             if fp == 0 || self.host_span(fp).is_none() || fp & 0x7 != 0 { break; }
             let saved_fp = self.read_u64(fp);
-            let ret = self.read_u64(fp + 8) & 0x0000_000F_FFFF_FFFF; // strip PAC bits
+            let ret = self.read_u64(fp + 8) & (IPA_LIMIT - 1); // strip PAC bits
             if ret == 0 { break; }
             s += &format!("  ret {ret:#x}\n");
             if saved_fp <= fp { break; } // stacks grow down; fp must increase up the chain
@@ -9321,6 +9463,7 @@ impl Box_ {
             mmap_next: self.mmap_next,
             bootstrap_port: self.bootstrap_port,
             cache_installed: self.cache.is_some(),
+            shared_region_end: self.shared_region_end,
             last_far: self.last_far,
             synthetic_tsc: self.synthetic_tsc,
             cache_refault_ipa: self.cache_refault_ipa,
@@ -9355,7 +9498,7 @@ impl Box_ {
         // backings, matching the field-order invariant on `pub struct Box_` above — never
         // backings first, which would munmap host pages while their stage-2 mapping is still live.
         let mut backings = Backings::new();
-        let vm = Vm::create().expect("hv_vm_create");
+        let vm = Vm::create_with_ipa(IPA_BITS).expect("hv_vm_create");
         let vcpu = Vcpu::create(&vm).expect("hv_vcpu_create");
         for r in &state.mem {
             let (host, len) = alloc_pages(r.bytes.len().max(GRANULE));
@@ -9395,6 +9538,9 @@ impl Box_ {
         for (i, &v) in state.fp.iter().enumerate() { vcpu.set_simd(simd::q(i as u32), v).unwrap(); }
         let l2_host = backings.iter().find(|b| b.ipa == PT_L2_IPA).map(|b| b.host)
             .unwrap_or(std::ptr::null_mut());
+        if let Some(b) = backings.iter().find(|b| b.ipa == PT_L2_IPA) {
+            assert_eq!(b.len, L2_PAGES * GRANULE, "from_checkpoint: the L2 array at {PT_L2_IPA:#x} is {} bytes, not {}", b.len, L2_PAGES * GRANULE);
+        }
         for b in backings.iter().filter(|b| b.ipa >= PT_L3_BASE && b.ipa < PT_L3_CEIL) {
             assert_eq!(b.len, GRANULE,
                 "from_checkpoint: backing at L3-window ipa {:#x} has len {} != GRANULE", b.ipa, b.len);
@@ -9463,6 +9609,7 @@ impl Box_ {
             kq: state.kq.clone(),
             excl: state.excl.clone(),
             stall: None,
+            shared_region_end: state.shared_region_end,
             gkq: state.gkq.clone(),
             psynch: state.psynch.clone(),
             jit: state.jit.clone(),
@@ -9489,14 +9636,17 @@ impl Box_ {
         s
     }
 
+    /// The shared-region window's end (M57 §3b).
+    pub fn shared_region_end(&self) -> u64 { self.shared_region_end }
+
     /// Test-only diagnostic: the internal bookkeeping fields `checkpoint()`/`from_checkpoint()` must
     /// round-trip that have no other observable accessor. Never used by production code.
     #[doc(hidden)]
     pub fn dbg_internal_state(&self) -> String {
-        format!("reservations={:?} mmap_next={:#x} bootstrap_port={:?} cache_installed={} last_far={:#x} synthetic_tsc={:#x} cache_refault_ipa={:#x} cache_refault_count={} pac_enabled={} kq={:?} gkq={:?} psynch={:?} jit={:?} sleep={:?} sems={:?} itimer={:?}",
+        format!("reservations={:?} mmap_next={:#x} bootstrap_port={:?} cache_installed={} last_far={:#x} synthetic_tsc={:#x} cache_refault_ipa={:#x} cache_refault_count={} pac_enabled={} kq={:?} gkq={:?} psynch={:?} jit={:?} sleep={:?} sems={:?} itimer={:?} shared_region_end={:#x}",
             self.reservations, self.mmap_next, self.bootstrap_port, self.cache.is_some(),
             self.last_far, self.synthetic_tsc, self.cache_refault_ipa, self.cache_refault_count,
-            self.pac_enabled, self.kq, self.gkq, self.psynch, self.jit, self.sleep, self.sems, self.itimer)
+            self.pac_enabled, self.kq, self.gkq, self.psynch, self.jit, self.sleep, self.sems, self.itimer, self.shared_region_end)
     }
 
     /// Test-only (M46): the workqueue kqueue, for `checkpointparity.rs` and the box-level manager
@@ -9663,6 +9813,40 @@ fn format_seen_entry(tid: usize, kport: Option<u32>, exited: bool) -> String {
     };
     format!("(tid={tid}, kport={kport}{})", if exited { ", exited" } else { "" })
 }
+
+/// M57 §3a: a shared cache retrace cannot read. A layout is a wall in `macos-version`, naming the host, because a
+/// valid cache from an OS build retrace has not met trips it; an I/O error on a file that exists is a bug.
+fn cache_wall(e: cache::CacheError) -> ! {
+    match e {
+        cache::CacheError::Layout(why) => {
+            let os = retrace_arch::host_os();
+            retrace_arch::refuse!(MacosVersion, "macOS {} ({}) has a shared cache retrace does not recognise: {why}", os.product, os.build)
+        }
+        cache::CacheError::Io(e) => panic!("read the dyld shared cache {DEFAULT_CACHE_PATH}: {e}"),
+    }
+}
+
+fn load_host_cache() -> CacheMeta {
+    CacheMeta::load(DEFAULT_CACHE_PATH).unwrap_or_else(|e| cache_wall(e))
+}
+
+/// M57 §3e: this Mac's shared cache UUID (the main header's bytes 0x58..0x68), for the replay-side host pin. An
+/// error is the text of why the header could not be read; this never walls or panics.
+pub fn host_cache_uuid() -> Result<[u8; 16], String> {
+    cache::read_main_header(DEFAULT_CACHE_PATH).map(|h| h.uuid).map_err(|e| e.to_string())
+}
+
+/// The window end a dynamic image loaded on this host gets (M57 P18): what an exec into a dynamic image
+/// will set, for the pre-point-of-no-return layout check.
+pub fn host_shared_region_end() -> u64 {
+    let h = host_cache_header();
+    shared_region_end_for(h.base, h.size)
+}
+
+fn host_cache_header() -> cache::MainHeader {
+    cache::read_main_header(DEFAULT_CACHE_PATH).unwrap_or_else(|e| cache_wall(e))
+}
+
 
 #[cfg(test)]
 mod thread_of_port_diagnostic_tests {
@@ -9860,7 +10044,7 @@ mod stack_geometry_tests {
         assert!(guard + GRANULE as u64 <= DYN_STACK_TOP - DYN_STACK_SIZE,
             "guard page {guard:#x} overlaps the stack backing [{:#x}, {DYN_STACK_TOP:#x}) — it must \
              sit BELOW the stack it guards", DYN_STACK_TOP - DYN_STACK_SIZE);
-        const { assert!(DYN_STACK_TOP <= 1 << 36, "the stack must fit in the 36-bit guest IPA space") };
+        const { assert!(DYN_STACK_TOP <= IPA_LIMIT, "the stack must fit in the guest IPA space") };
     }
 
     // M21. The believed-stack window is derived, not typed — this pins the arithmetic both ways so
@@ -9937,5 +10121,49 @@ mod workq_feature_word_tests {
         // Bit 7 is deliberately clear — it is the scope lever, not an accident.
         assert_ne!(w & (1 << 6), 0, "bit 6 must be set when bit 7 is clear, else .cold.4");
         assert_eq!(w & (1 << 7), 0, "bit 7 must stay CLEAR to keep the workloop worker out of scope");
+    }
+}
+
+#[cfg(test)]
+mod cache_wall_tests {
+    use super::*;
+
+    #[test]
+    fn a_cache_layout_error_is_the_macos_version_wall() {
+        let r = std::panic::catch_unwind(|| cache_wall(cache::CacheError::Layout("x".into())));
+        let p = r.unwrap_err();
+        let w = retrace_arch::Unsupported::from_panic(p.as_ref()).expect("a wall");
+        let os = retrace_arch::host_os();
+        assert_eq!(w.category, retrace_arch::WallCategory::MacosVersion);
+        assert_eq!(w.what, format!("macOS {} ({}) has a shared cache retrace does not recognise: x", os.product, os.build));
+        let r = std::panic::catch_unwind(|| cache_wall(cache::CacheError::Io(std::io::Error::other("boom"))));
+        let p = r.unwrap_err();
+        assert!(retrace_arch::Unsupported::from_panic(p.as_ref()).is_none());
+    }
+}
+
+#[cfg(test)]
+mod shared_region_tests {
+    use super::*;
+
+    #[test]
+    fn shared_region_end_is_the_constant_or_the_caches_end_rounded_to_32_mib() {
+        assert_eq!(shared_region_end_for(0x1_8000_0000, 0x1_cbb2_8000), 0x3_4c00_0000, "27.2's window");
+        assert_eq!(shared_region_end_for(0x1_8000_0000, 0x1_5a00_0000), 0x3_0000_0000, "26-shaped, 5.40 GiB");
+        assert_eq!(shared_region_end_for(0x1_8000_0000, 0x1_8000_0000), 0x3_0000_0000, "ends at the constant");
+        assert_eq!(shared_region_end_for(0x1_8000_0000, 0x1_8000_4000), 0x3_0200_0000);
+    }
+}
+
+#[cfg(test)]
+mod ipa_tests {
+    use super::*;
+
+    #[test]
+    fn the_ipa_refusal_names_the_width_and_needs_40_bits() {
+        assert_eq!(ipa_refusal(36).as_deref(),
+            Some(format!("this Mac's hypervisor allows a 36-bit guest address space and retrace needs {IPA_BITS} bits").as_str()));
+        assert_eq!(ipa_refusal(IPA_BITS), None);
+        assert_eq!(ipa_refusal(IPA_BITS + 2), None);
     }
 }

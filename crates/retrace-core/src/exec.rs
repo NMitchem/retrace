@@ -96,8 +96,8 @@ fn dylinker_slice(path: &str, name: &str) -> Result<Vec<u8>, ExecRefusal> {
 /// Resolve `call.path` as the kernel would, against the cwd, and check the file (spec 3e). Every error is
 /// an errno the program is answered, or a wall by value; nothing here runs past the point of no return.
 /// The order is the kernel's: the file first, the argument strings after (`ExecCall::args_refusal`).
-pub fn resolve(call: &ExecCall) -> Result<Resolved, ExecRefusal> {
-    let mut r = resolve_file(&call.path, call, true)?;
+pub fn resolve(call: &ExecCall, shared_region_end: u64) -> Result<Resolved, ExecRefusal> {
+    let mut r = resolve_file(&call.path, call, true, shared_region_end)?;
     if !r.script.is_empty() && call.args_refusal.is_none() {
         // Ruling T5-b (inferred): the limits apply to the final vector, which the kernel copies into the image.
         let argv = script_argv(&r.script, &call.path, &call.argv).expect("resolve_file checked the line");
@@ -109,7 +109,7 @@ pub fn resolve(call: &ExecCall) -> Result<Resolved, ExecRefusal> {
 
 /// `resolve` for one path. A `#!` file (`allow_script`) resolves its interpreter through this same function,
 /// once: an interpreter that is itself a script is ENOEXEC, as natively (t0 M2, t5 addendum C).
-fn resolve_file(path_bytes: &[u8], call: &ExecCall, allow_script: bool) -> Result<Resolved, ExecRefusal> {
+fn resolve_file(path_bytes: &[u8], call: &ExecCall, allow_script: bool, shared_region_end: u64) -> Result<Resolved, ExecRefusal> {
     let path = OsStr::from_bytes(path_bytes);
     // Not `File::open` first: opening a FIFO blocks until a writer comes, and exec of one is EACCES.
     let md = std::fs::metadata(path).map_err(|e| errno_of(&e))?;
@@ -129,7 +129,7 @@ fn resolve_file(path_bytes: &[u8], call: &ExecCall, allow_script: bool) -> Resul
         };
         let line = bytes[..nl].to_vec();
         let words = script_argv(&line, path_bytes, &[]).map_err(ExecRefusal::Errno)?;
-        let mut inner = resolve_file(&words[0], call, false)?;
+        let mut inner = resolve_file(&words[0], call, false, shared_region_end)?;
         inner.script = line;
         return Ok(inner);
     }
@@ -182,7 +182,7 @@ fn resolve_file(path_bytes: &[u8], call: &ExecCall, allow_script: bool) -> Resul
     let dylinker = dylinker_slice(dyld, cname(call))?;
     // M6: segments `stage_image` cannot place are refused here, before the point of no return.
     let dl = retrace_guest::try_parse_macho(&dylinker).expect("dylinker_slice parsed it");
-    if let Some(why) = retrace_box::image_layout_refusal(&loaded, &dl) {
+    if let Some(why) = retrace_box::image_layout_refusal(&loaded, &dl, shared_region_end) {
         return Err(wall(format!("{} of an image whose {why}", cname(call))));
     }
     Ok(Resolved { image: slice.to_vec(), script: Vec::new(), dylinker })
@@ -232,12 +232,12 @@ mod tests {
     #[test]
     fn a_missing_path_is_enoent_and_a_directory_is_eacces() {
         let d = scratch("missing");
-        assert_eq!(errno(resolve(&call(d.join("nope").to_str().unwrap()))), 2, "ENOENT");
-        assert_eq!(errno(resolve(&call(d.to_str().unwrap()))), 13, "a directory is EACCES, as measured natively");
+        assert_eq!(errno(resolve(&call(d.join("nope").to_str().unwrap()), retrace_box::SHARED_REGION_END_MIN)), 2, "ENOENT");
+        assert_eq!(errno(resolve(&call(d.to_str().unwrap()), retrace_box::SHARED_REGION_END_MIN)), 13, "a directory is EACCES, as measured natively");
         // A path component that is a file: ENOTDIR.
         let f = d.join("f");
         std::fs::write(&f, b"x").unwrap();
-        assert_eq!(errno(resolve(&call(d.join("f/x").to_str().unwrap()))), 20, "ENOTDIR");
+        assert_eq!(errno(resolve(&call(d.join("f/x").to_str().unwrap()), retrace_box::SHARED_REGION_END_MIN)), 20, "ENOTDIR");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -247,22 +247,22 @@ mod tests {
         let noexec = d.join("noexec");
         std::fs::write(&noexec, b"x\n").unwrap();
         mode(&noexec, 0o644);
-        assert_eq!(errno(resolve(&call(noexec.to_str().unwrap()))), 13, "EACCES");
+        assert_eq!(errno(resolve(&call(noexec.to_str().unwrap()), retrace_box::SHARED_REGION_END_MIN)), 13, "EACCES");
         let garbage = d.join("garbage");
         std::fs::write(&garbage, b"not a mach-o\n").unwrap();
         mode(&garbage, 0o755);
-        assert_eq!(errno(resolve(&call(garbage.to_str().unwrap()))), 8, "ENOEXEC");
+        assert_eq!(errno(resolve(&call(garbage.to_str().unwrap()), retrace_box::SHARED_REGION_END_MIN)), 8, "ENOEXEC");
         // An empty file with the execute bit, and a Mach-O object or library (not MH_EXECUTE): ENOEXEC.
         let empty = d.join("empty");
         std::fs::write(&empty, b"").unwrap();
         mode(&empty, 0o755);
-        assert_eq!(errno(resolve(&call(empty.to_str().unwrap()))), 8, "an empty file");
+        assert_eq!(errno(resolve(&call(empty.to_str().unwrap()), retrace_box::SHARED_REGION_END_MIN)), 8, "an empty file");
         let mut dylib = std::fs::read(retrace_guest::EXEC_TARGET_DYN).unwrap();
         dylib[12..16].copy_from_slice(&6u32.to_le_bytes()); // MH_DYLIB
         let lib = d.join("lib.dylib");
         std::fs::write(&lib, &dylib).unwrap();
         mode(&lib, 0o755);
-        assert_eq!(errno(resolve(&call(lib.to_str().unwrap()))), 8, "a dylib is not an executable");
+        assert_eq!(errno(resolve(&call(lib.to_str().unwrap()), retrace_box::SHARED_REGION_END_MIN)), 8, "a dylib is not an executable");
         // A script whose interpreter is itself a script (nested) is ENOEXEC; one with no newline, too.
         let inner = d.join("inner");
         std::fs::write(&inner, b"#!/bin/echo hi\n").unwrap();
@@ -270,11 +270,11 @@ mod tests {
         let nested = d.join("nested");
         std::fs::write(&nested, format!("#!{}\n", inner.display())).unwrap();
         mode(&nested, 0o755);
-        assert_eq!(errno(resolve(&call(nested.to_str().unwrap()))), 8, "a nested script");
+        assert_eq!(errno(resolve(&call(nested.to_str().unwrap()), retrace_box::SHARED_REGION_END_MIN)), 8, "a nested script");
         let nonl = d.join("nonl");
         std::fs::write(&nonl, format!("#!{}", retrace_guest::EXEC_TARGET_DYN)).unwrap();
         mode(&nonl, 0o755);
-        assert_eq!(errno(resolve(&call(nonl.to_str().unwrap()))), 8, "a script whose only line has no newline");
+        assert_eq!(errno(resolve(&call(nonl.to_str().unwrap()), retrace_box::SHARED_REGION_END_MIN)), 8, "a script whose only line has no newline");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -284,7 +284,7 @@ mod tests {
         let short = d.join("short");
         std::fs::write(&short, [0xcf, 0xfa, 0xed, 0xfe, 0x0c, 0x00, 0x00, 0x01, 0x02, 0x00]).unwrap();
         mode(&short, 0o755);
-        assert_eq!(errno(resolve(&call(short.to_str().unwrap()))), 8, "a 10-byte thin Mach-O");
+        assert_eq!(errno(resolve(&call(short.to_str().unwrap()), retrace_box::SHARED_REGION_END_MIN)), 8, "a 10-byte thin Mach-O");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -320,14 +320,14 @@ mod tests {
         let both = d.join("both");
         std::fs::write(&both, fat(&[(0, &plain), (2, &e)])).unwrap();
         mode(&both, 0o755);
-        let r = resolve(&call(both.to_str().unwrap())).expect("a fat file with both slices");
+        let r = resolve(&call(both.to_str().unwrap()), retrace_box::SHARED_REGION_END_MIN).expect("a fat file with both slices");
         assert_eq!(r.image, e, "the arm64e slice is preferred");
         assert!(r.script.is_empty());
         assert!(r.dylinker.len() > 1_000_000, "dyld's own selected slice travels with it");
         let only = d.join("only");
         std::fs::write(&only, fat(&[(0, &plain)])).unwrap();
         mode(&only, 0o755);
-        let r = resolve(&call(only.to_str().unwrap())).expect("a fat file with an arm64 slice only");
+        let r = resolve(&call(only.to_str().unwrap()), retrace_box::SHARED_REGION_END_MIN).expect("a fat file with an arm64 slice only");
         assert_eq!(r.image, plain, "else the arm64 slice");
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -338,7 +338,7 @@ mod tests {
         let s = d.join("s");
         std::fs::write(&s, format!("#!{} one\n", retrace_guest::EXEC_TARGET_DYN)).unwrap();
         mode(&s, 0o755);
-        let r = resolve(&call(s.to_str().unwrap())).expect("a script");
+        let r = resolve(&call(s.to_str().unwrap()), retrace_box::SHARED_REGION_END_MIN).expect("a script");
         assert_eq!(r.image, std::fs::read(retrace_guest::EXEC_TARGET_DYN).unwrap(), "the interpreter's slice");
         assert_eq!(r.script, format!("#!{} one", retrace_guest::EXEC_TARGET_DYN).into_bytes(), "the line, without its newline");
         let c = call(s.to_str().unwrap());
@@ -352,7 +352,7 @@ mod tests {
             let p = d.join(name);
             std::fs::write(&p, line).unwrap();
             mode(&p, 0o755);
-            assert_eq!(errno(resolve(&call(p.to_str().unwrap()))), want, "{name}");
+            assert_eq!(errno(resolve(&call(p.to_str().unwrap()), retrace_box::SHARED_REGION_END_MIN)), want, "{name}");
         }
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -368,7 +368,7 @@ mod tests {
         let s = d.join("s");
         std::fs::write(&s, format!("#!{}\n", interp.display())).unwrap();
         mode(&s, 0o755);
-        assert_eq!(errno(resolve(&call(s.to_str().unwrap()))), 13, "an interpreter without the execute bit is EACCES");
+        assert_eq!(errno(resolve(&call(s.to_str().unwrap()), retrace_box::SHARED_REGION_END_MIN)), 13, "an interpreter without the execute bit is EACCES");
         // A line of exactly 511 bytes (the `#!`, the interpreter, a comment tail) resolves; 512 is ENOEXEC.
         for (total, want) in [(511usize, 0u64), (512, 8)] {
             let head = format!("#!{} #", retrace_guest::EXEC_TARGET_DYN);
@@ -377,7 +377,7 @@ mod tests {
             let p = d.join(format!("l{total}"));
             std::fs::write(&p, format!("{line}\n")).unwrap();
             mode(&p, 0o755);
-            match (resolve(&call(p.to_str().unwrap())), want) {
+            match (resolve(&call(p.to_str().unwrap()), retrace_box::SHARED_REGION_END_MIN), want) {
                 (Ok(r), 0) => assert_eq!(r.script.len(), 511),
                 (r, w) if w != 0 => assert_eq!(errno(r), w, "a {total}-byte line"),
                 (r, _) => panic!("a {total}-byte line should resolve: {:?}", r.err().map(|e| format!("{e:?}"))),
@@ -394,7 +394,7 @@ mod tests {
         std::fs::copy(retrace_guest::EXEC_X86, &x86).unwrap();
         mode(&x86, 0o755);
         let mut c = call(x86.to_str().unwrap());
-        let text = |c: &ExecCall| match resolve(c) { Err(ExecRefusal::Wall(m)) => m, other => panic!("expected a wall: {:?}", other.err()) };
+        let text = |c: &ExecCall| match resolve(c, retrace_box::SHARED_REGION_END_MIN) { Err(ExecRefusal::Wall(m)) => m, other => panic!("expected a wall: {:?}", other.err()) };
         assert!(text(&c).contains("execve of an x86_64-only image"), "{}", text(&c));
         c.num = 244;
         assert!(text(&c).contains("posix_spawn of an x86_64-only image"), "{}", text(&c));
@@ -421,7 +421,7 @@ mod tests {
             let p = d.join(format!("bad{i}"));
             std::fs::write(&p, &bytes).unwrap();
             mode(&p, 0o755);
-            match resolve(&call(p.to_str().unwrap())) {
+            match resolve(&call(p.to_str().unwrap()), retrace_box::SHARED_REGION_END_MIN) {
                 Err(ExecRefusal::Wall(m)) => assert!(m.contains("load commands"), "{what}: {m}"),
                 other => panic!("{what}: expected a wall, got {:?}", other.err()),
             }

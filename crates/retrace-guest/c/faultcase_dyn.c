@@ -2,6 +2,7 @@
 // docs/sweep-evidence/2026-10-06-m49-static/faults.c's, plus four of the plan's.
 //
 //   faultcase_dyn <case> [h|a]
+//   storeat <addr> as a third argument: a store of 7 to that address (M57: retrace's own table pages)
 //   cases: null10 null0st unmapped garbage call0 low8000 low1g tsd
 //          thread1g (low1g's load on a second thread, main blocked in pthread_join)
 //          jump1g   (a call through a function pointer equal to 0x40000000)
@@ -105,6 +106,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(c, "garbage")) v = *(volatile long *)0x4000DEAD0000UL;
     else if (!strcmp(c, "call0")) { void (*volatile f)(void) = 0; f(); }
     else if (!strcmp(c, "low8000")) *(volatile long *)0x8000 = 7;
+    else if (!strcmp(c, "storeat")) *(volatile long *)strtoul(argv[3], 0, 0) = 7;   // M57: faultcase_dyn storeat h <addr>
     else if (!strcmp(c, "low1g")) v = *(volatile long *)0x40000000UL;
     else if (!strcmp(c, "tsd")) v = *(volatile long *)0x30000;
     else if (!strcmp(c, "thread1g")) {

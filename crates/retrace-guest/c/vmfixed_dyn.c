@@ -9,6 +9,7 @@
 #include <mach/mach_vm.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/mman.h>
 #include <string.h>
 
 #define PG 16384ull
@@ -76,6 +77,52 @@ int main(int argc, char **argv) {
                                              VM_INHERIT_DEFAULT);
             printf("remap%s kr=%d target=%s\n", ow ? "-overwrite" : "", kr, *m == 'S' ? "aliased" : *m == 'M' ? "intact" : "other");
         }
+    } else if (strcmp(mode, "bump") == 0) {
+        // M57 t8: a hinted map past the cursor, a FIXED PROT_NONE reservation above it, then hint-0
+        // allocations (Mach and BSD) that must never land in the reservation, with a pattern written
+        // into each and read back after a FIXED|OVERWRITE commit of the reservation's head.
+        mach_vm_address_t probe = window(4);
+        mach_vm_address_t hint = (probe + (1ull << 30)) & ~(PG - 1);
+        mach_vm_address_t h = hint;
+        kern_return_t kr = mach_vm_map(mach_task_self(), &h, 4ull << 20, 0, VM_FLAGS_ANYWHERE, MEMORY_OBJECT_NULL, 0,
+                                       FALSE, VM_PROT_DEFAULT, VM_PROT_ALL, VM_INHERIT_DEFAULT);
+        printf("hinted kr=%d\n", kr); 
+        // Native's neighbourhood varies run to run, so try a few gaps; the first free one is used.
+        mach_vm_address_t res = 0, rsz = 128ull << 20;
+        for (int k = 0; k < 8; k++) {
+            res = h + (4ull << 20) + (8ull << 20) + k * (16ull << 20);
+            mach_vm_address_t r = res;
+            kr = mach_vm_map(mach_task_self(), &r, rsz, 0, VM_FLAGS_FIXED, MEMORY_OBJECT_NULL, 0, FALSE,
+                             VM_PROT_NONE, VM_PROT_NONE, VM_INHERIT_DEFAULT);
+            if (kr == 0) break;
+        }
+        printf("reserve kr=%d\n", kr);
+        if (kr) return 0;
+        enum { N = 8 };
+        const unsigned long long SZ = 32ull << 20;
+        volatile char *p[N];
+        int overlaps = 0;
+        for (int i = 0; i < N; i++) {
+            mach_vm_address_t a = 0;
+            if (i & 1) {
+                void *m = mmap(NULL, SZ, PROT_READ | PROT_WRITE, MAP_ANON | MAP_PRIVATE, -1, 0);
+                if (m == MAP_FAILED) { printf("alloc %d failed\n", i); return 0; }
+                a = (mach_vm_address_t)m;
+            } else if (mach_vm_allocate(mach_task_self(), &a, SZ, VM_FLAGS_ANYWHERE)) { printf("alloc %d failed\n", i); return 0; }
+            int ov = a < res + rsz && res < a + SZ;
+            overlaps += ov;
+            printf("alloc %d overlap=%d\n", i, ov);
+            p[i] = (volatile char *)a;
+            for (unsigned long long o = 0; o < SZ; o += PG) p[i][o] = (char)(i + 1);
+        }
+        mach_vm_address_t c = res;
+        kr = mach_vm_allocate(mach_task_self(), &c, 16ull << 20, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE);
+        printf("commit kr=%d\n", kr);
+        if (kr == 0) memset((void *)res, 0x5a, 16ull << 20);
+        int bad = 0;
+        for (int i = 0; i < N; i++)
+            for (unsigned long long o = 0; o < SZ; o += PG) if (p[i][o] != (char)(i + 1)) bad++;
+        printf("overlaps=%d corrupted=%d\n", overlaps, bad);
     } else if (strcmp(mode, "windows") == 0) {
         // 0x300000000 is free natively and in the box; the rest are __PAGEZERO, the shared region and
         // the commpages. None is a wall under M52 §3b: native's code is the box's code.

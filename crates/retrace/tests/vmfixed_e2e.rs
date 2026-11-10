@@ -80,16 +80,48 @@ fn mach_vm_copy_copies_the_bytes_and_answers_natives_codes_without_recording_the
 }
 
 #[test]
+fn mach_vm_reallocate_follows_native_and_records_only_its_reply() {
+    for case in ["inplace", "blocked", "shrink", "unaligned", "unmapped", "fixed", "zero_dst", "reservation_after", "inplace_then_mmap", "equal", "huge", "wrap", "odd_dst_size", "fixed_overlap", "fixed_overwrite_overlap", "zero_src"] {
+        let (out, r) = as_native_run(retrace_guest::VMREALLOC_DYN, &[case]);
+        assert!(out.starts_with(&format!("{case} kr=")) || case == "inplace_then_mmap", "{case}: {out}");
+        match case {
+            "shrink" | "unaligned" | "wrap" | "odd_dst_size" | "zero_src" => assert!(out.contains("kr=4 "), "{out}"),
+            "huge" | "fixed_overlap" => assert!(out.contains("kr=3 "), "{out}"),
+            "unmapped" | "fixed_overwrite_overlap" => assert!(out.contains("kr=1 "), "{out}"),
+            "inplace" => assert!(out.contains("kr=0 moved=0 head=") && out.contains("tail=0 srcgone=0"), "{out}"),
+            "equal" => assert!(out.contains("kr=0 moved=0 "), "{out}"),
+            "inplace_then_mmap" => assert!(out.contains("mmap_overlap=0 new_intact=1"), "{out}"),
+            "blocked" | "fixed" | "reservation_after" => assert!(out.contains("kr=0 moved=1 ") && out.contains("tail=0 srcgone=1"), "{out}"),
+            _ => assert!(out.contains("kr=0 "), "{out}"),
+        }
+        if case != "inplace" { continue; }
+        // Recomputed, never recorded: a 4829 landmark's only write is the 52-byte reply (msgh_id 4929).
+        let mut replies = 0;
+        for e in Reader::open(&r.trace).unwrap().iter() {
+            let Event::Syscall { writes, .. } = e else { continue };
+            let Some(w) = writes.iter().find(|w| w.bytes.len() == 52
+                && u32::from_le_bytes(w.bytes[20..24].try_into().unwrap()) == 4929) else { continue };
+            replies += 1;
+            assert_eq!(writes.len(), 1, "a 4829 landmark records the reply only, got {} regions", writes.len());
+            assert_eq!(w.bytes.len(), 52);
+        }
+        assert!(replies >= 1, "the inplace recording holds a 4829 landmark");
+    }
+}
+
+#[test]
 fn a_fixed_request_into_retraces_own_windows_answers_as_native_does() {
     // No window is a wall under M52 §3b (ruling T0-M2): a start below 4 GiB is KERN_INVALID_ADDRESS, the
     // shared region and the commpages are KERN_NO_SPACE, so the plan's "a window ruled a wall ends the
-    // recording" clause has no row. 0x300000000 is free natively and in the box (the nano band starts
-    // at 0x400000000).
+    // recording" clause has no row. 0x300000000 follows native (M57 t7a): 26 answered 0 (the nano band
+    // starts at 0x400000000), 27.2 answers 3 (M0-4: FIXED is refused over [0x1_8000_0000, 0x70_0000_0000)).
+    // as_native compares retrace with native, which on 26 is 0.
     let out = as_native(retrace_guest::VMFIXED_DYN, &["windows"]);
     for (addr, kr) in [("0x4000", 1), ("0x8000", 1), ("0x40000", 1), ("0x800000", 1), ("0x180000000", 3),
-                       ("0x2ffffc000", 3), ("0xfffffc000", 3), ("0x300000000", 0)] {
+                       ("0x2ffffc000", 3), ("0xfffffc000", 3)] {
         assert!(out.contains(&format!("window {addr} kr={kr}\n")), "{addr}:\n{out}");
     }
+    assert!(out.contains("window 0x300000000 kr=0\n") || out.contains("window 0x300000000 kr=3\n"), "{out}");
 }
 
 #[test]
@@ -100,4 +132,25 @@ fn a_remap_fixed_without_overwrite_over_occupied_memory_answers_kern_no_space() 
     let out = as_native(retrace_guest::VMFIXED_DYN, &["remap"]);
     assert!(out.contains("remap kr=3 target=intact\n"), "{out}");
     assert!(out.contains("remap-overwrite kr=0 target=aliased\n"), "{out}");
+}
+
+#[test]
+fn hint_zero_allocations_after_a_hinted_map_and_a_reservation_never_overlap_it() {
+    // M57 t8: the bump cursor used to hand out whatever lay at it. Native: no overlap, the pattern
+    // written into every page of every allocation survives a FIXED|OVERWRITE commit of the
+    // reservation's head.
+    // Ruling P16: the expected stdout is the kernel's guarantee, known by construction, so record and
+    // both replays are held to it. Native's neighbourhood varies (its FIXED reservation can find all
+    // eight gaps occupied and print `reserve kr=3`), so native is a sanity check only: it must exit 0,
+    // and its stdout is compared only when it printed `reserve kr=0`. A native loop cannot fail this row.
+    let mut expected = String::from("hinted kr=0\nreserve kr=0\n");
+    for i in 0..8 { expected.push_str(&format!("alloc {i} overlap=0\n")); }
+    expected.push_str("commit kr=0\noverlaps=0 corrupted=0\n");
+    let guest = retrace_guest::VMFIXED_DYN;
+    let native = util::run_bounded(guest, &["bump"], &[], 30);
+    assert_eq!(native.code, Some(0), "native: {}", native.stderr);
+    if String::from_utf8_lossy(&native.stdout).contains("reserve kr=0\n") {
+        assert_eq!(String::from_utf8_lossy(&native.stdout), expected, "native");
+    }
+    util::assert_rung_records_and_replays(guest, &["bump"], expected.as_bytes());
 }
