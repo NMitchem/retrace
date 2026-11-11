@@ -12,16 +12,19 @@ fn read(rel: &str) -> String {
     fs::read_to_string(root().join(rel)).unwrap_or_else(|e| panic!("cannot read {rel}: {e}"))
 }
 
-/// The text inside code spans and fenced blocks.
+/// The text inside code spans and fenced blocks. A block fenced as `markdown` (the README's copy of the snippet) is
+/// Markdown text, so only its code spans count, as in the snippet's own file.
 fn code_text(md: &str) -> String {
     let mut out = String::new();
     let mut fenced = false;
+    let mut prose = false;
     for line in md.lines() {
-        if line.trim_start().starts_with("```") {
+        if let Some(info) = line.trim_start().strip_prefix("```") {
             fenced = !fenced;
+            prose = fenced && matches!(info.trim(), "markdown" | "md");
             continue;
         }
-        if fenced {
+        if fenced && !prose {
             out.push_str(line);
             out.push('\n');
         } else {

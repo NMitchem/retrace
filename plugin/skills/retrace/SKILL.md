@@ -72,9 +72,16 @@ Where did it stop, and with what call stack (file and line):
 retrace lldb target/retrace/ledger-1a2b3c4d5e6f7a8b.retrace -- --batch -o 'breakpoint set -n rust_panic' -o 'process continue' -o 'bt'
 ```
 
-For a C program, break on the failing function or `abort`; for a crash, `process continue` alone
-stops at the fault. `bt` prints each frame with its file and line, and `frame select N` followed by
-`frame variable` shows that frame's locals at the failure.
+For a C program, break on the failing function or `abort`. `bt` prints each frame with its file and
+line, and `frame select N` followed by `frame variable` shows that frame's locals at the failure.
+
+For a crash, `process continue` alone stops at the fault, and every command after it goes in a `-k`
+flag instead of `-o`. Once the program stops on a crash, lldb's batch mode drops the remaining `-o`
+commands and still exits 0; `-k` commands run after a crash:
+
+```sh
+retrace lldb crash.retrace -- --batch -o 'process continue' -k 'bt' -k 'watchpoint set expression -w write -s 8 -- <address>' -k 'process continue -R' -k 'bt'
+```
 
 Who last wrote this value. Stop at the failure, put a write watchpoint on the value's address, and
 run backwards. The watchpoint stops at the instruction that stored to it, and `bt` there names the
@@ -89,8 +96,12 @@ watchpoint's stop is not the one you want, `bt` shows who made it.
 
 ### The address of a Rust value
 
-A Rust local has no stable name in the debugger, so print its address from the test and record again.
-The recording is deterministic, so the same address holds in the replay:
+When the failure is an `assert_eq!`, the backtrace at `rust_panic` already has it: the
+`core::panicking::assert_failed` frame shows `left=0x…`, the address of the assertion's left side.
+For a variable or a field, that is the value's own address, so watch it in the same recording.
+
+Otherwise a Rust local has no stable name in the debugger, so print its address from the test and
+record again. The recording is deterministic, so the same address holds in the replay:
 
 ```rust
 eprintln!("{:p}", &account.balance);
@@ -134,8 +145,9 @@ retrace: unsupported: posix_spawn of a child process (syscall 244) - see https:/
 
 The line names what the program did and links the section of `docs/walls.md` that explains it. That is
 retrace's limit, not a fault in the program: stop and debug by other means, or change the program
-so it does not do that under test. The recording up to the wall stays on disk and can still be
-replayed and queried to that point.
+so it does not do that under test. The recording up to the wall stays on disk: `retrace replay`
+runs it to the wall and exits 4, but `retrace lldb` and `retrace debug` refuse it with exit 5, because
+debugging up to a wall is not supported.
 
 ## Clean up
 
