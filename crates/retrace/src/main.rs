@@ -14,7 +14,7 @@ mod lldbcmd;
 /// Where the bug banner sends a report (M50 §3b).
 const ISSUES_URL: &str = "https://github.com/NMitchem/retrace/issues";
 const USAGE: &str = "usage: retrace <record [-o <trace>] <program> [<args>...] | replay <trace> \
-                     | lldb <trace> [--exe <path>] [-- <lldb args>...] | debug <trace> --script '...' \
+                     | lldb <trace> [--exe <path>] [-- <lldb args>...] | debug <trace> [--json] [--script '...'] \
                      | gdbserver <trace> [--port <n>] [--exe <path>]>";
 const RECORD_USAGE: &str = "usage: retrace record [-o <trace>] <program> [<args>...]";
 /// The text of `--help`, and of `retrace` with no command.
@@ -25,7 +25,8 @@ fn help() -> String {
                                               the program's basename plus .retrace in the working directory
   replay <trace>                              replay a recording, bit for bit
   lldb <trace> [--exe <path>] [-- <lldb args>...]   debug a recording in lldb, with reverse commands
-  debug <trace> --script '<cmds>'             run debugger commands over a recording
+  debug <trace> [--json] [--script '<cmds>']  run debugger commands over a recording; with no script it runs
+                                              `summary`: how the run ended, each panic with its backtrace
   gdbserver <trace> [--port <n>] [--exe <path>]   serve a recording to a gdb-remote client
 
   retrace --version    print the version
@@ -425,10 +426,14 @@ fn finish(fall_throughs: u64, outcome: &retrace_core::Outcome) -> i32 {
 /// `--script` with no value is a usage error (exit 2), validated before any file I/O or VM work.
 fn debug_cmd(a: &[String]) -> i32 {
     let json = a.iter().skip(3).any(|s| s == "--json");
-    let script = a.iter().position(|s| s == "--script").and_then(|i| a.get(i + 1));
-    let (Some(trace), Some(script)) = (a.get(2).filter(|t| *t != "--json" && *t != "--script"), script) else {
-        return bad_input("usage: retrace debug <trace> [--json] --script '<cmds>'");
+    let script = match a.iter().position(|s| s == "--script") {
+        None => Some("summary"),
+        Some(i) => a.get(i + 1).map(String::as_str),
     };
+    let (Some(trace), Some(script)) = (a.get(2).filter(|t| *t != "--json" && *t != "--script"), script) else {
+        return bad_input("usage: retrace debug <trace> [--json] [--script '<cmds>']");
+    };
+    if let Err(e) = check_recording(trace) { return bad_input(&e); }
     if let Err(code) = vm_preflight() { return code; }
     if let Err(code) = host_pin(trace) { return code; }
     let mode = if json { debug::Mode::Json } else { debug::Mode::Text };

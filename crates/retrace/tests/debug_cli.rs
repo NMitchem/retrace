@@ -290,8 +290,7 @@ fn regs_of_out_of_range_thread_is_a_usage_error_not_a_panic() {
 
 #[test]
 fn debug_arg_errors_are_usage_not_panics() {
-    for args in [vec!["debug"], vec!["debug", "/nonexistent-but-unread.bin"],
-                 vec!["debug", "/tmp/x.bin", "--script"]] {
+    for args in [vec!["debug"], vec!["debug", "/tmp/x.bin", "--script"]] {
         let out = std::process::Command::new(util::bin()).args(&args)
             .output().expect("spawn");
         assert_eq!(out.status.code(), Some(2), "usage exit for {args:?}: {}",
@@ -299,6 +298,14 @@ fn debug_arg_errors_are_usage_not_panics() {
         assert!(String::from_utf8_lossy(&out.stderr).contains("usage"),
             "usage text for {args:?}");
     }
+}
+
+#[test]
+fn debug_of_a_missing_trace_is_bad_input() {
+    // With no script `debug <trace>` runs `summary`; a trace that cannot be read is bad input, before any VM work.
+    let out = std::process::Command::new(util::bin()).args(["debug", "/nonexistent-but-unread.bin"]).output().expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("cannot read"), "{}", String::from_utf8_lossy(&out.stderr));
 }
 
 fn json_lines(s: &str) -> Vec<serde_json::Value> {
@@ -341,9 +348,19 @@ fn json_mode_error_is_a_json_line_and_exit_5() {
 }
 
 #[test]
-#[ignore = "M58 B6 wires summary"]
 fn json_mode_escapes_program_text() {
-    // B6 wires `summary`, which carries the program's own stderr text; the escaping itself is unit-tested in json.rs.
+    // The shell's printf writes a quote, a backslash and a control byte to stderr; `summary --json` must carry them
+    // as one valid line and give them back unchanged.
+    let want = "q\"b\\c\u{1}d";
+    let (rec, trace) = util::record_dynamic_args("/bin/sh", &["-c", "printf 'q\"b\\\\c\\001d\\n' >&2"]);
+    assert_eq!(rec.code, 0, "record: {}", rec.stderr);
+    let out = std::process::Command::new(util::bin())
+        .args(["debug", trace.to_str().unwrap(), "--json"]).output().expect("spawn");
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    let objs = json_lines(&String::from_utf8(out.stdout).unwrap());
+    assert_eq!(objs.len(), 1);
+    let tail = objs[0]["stderr_tail"].as_str().expect("stderr_tail");
+    assert!(tail.contains(want), "the program's characters survive the round trip: {tail:?}");
 }
 
 #[test]

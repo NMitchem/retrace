@@ -47,6 +47,8 @@ pub enum Cmd {
     Goto(usize, u64),
     /// M58 B5: the last write to `len` bytes at an address or symbol, before the cursor.
     LastWrite(Operand, u64),
+    /// M58 B6: how the run ended and every Rust panic, from the recording's start.
+    Summary,
 }
 
 /// The non-empty, trimmed command segments of a script, in order. `break;;continue;` → the two
@@ -184,6 +186,7 @@ fn parse_one(seg: &str) -> Result<Cmd, String> {
             Ok(Cmd::Watch(addr, len, thread))
         }
         "unwatch"         => { one_operand(verb, &ops)?; Ok(Cmd::Unwatch(parse_addr(ops[0])?)) }
+        "summary"         => expect_none(Cmd::Summary, &ops),
         "continue"        => expect_none(Cmd::Continue, &ops),
         "reverse-continue"=> expect_none(Cmd::ReverseContinue, &ops),
         "stepi"           => { at_most_one(verb, &ops)?; Ok(Cmd::Stepi(parse_count(ops.first().copied())?)) }
@@ -643,6 +646,7 @@ impl<'a> Exec<'a> {
             Cmd::Bt(tid)          => self.cmd_bt(*tid, out).map(|_| ()),
             Cmd::Goto(n, k)       => self.cmd_goto(*n, *k, out),
             Cmd::LastWrite(op, l) => self.cmd_last_write(op, *l, out).map(|_| ()),
+            Cmd::Summary          => self.cmd_summary(out).map(|_| ()),
         }
     }
 
@@ -1670,6 +1674,180 @@ impl<'a> Exec<'a> {
     }
 }
 
+/// M58 B6: a hit of `summary`'s scans.
+struct SumHit { pos: (usize, u64), thread: u32, x1: u64, x2: u64, text: Vec<String>, frames: J }
+
+const SUMMARY_PANIC_CAP: usize = 16;
+const SUMMARY_TAIL_LINES: usize = 20;
+
+impl Exec<'_> {
+    /// The executable's addresses whose readable name (hash dropped) `pred` accepts, ascending. A raw name must
+    /// contain `needle` first, so no name is demangled that cannot match.
+    fn exe_addrs(&self, needle: &str, pred: impl Fn(&str) -> bool) -> Vec<u64> {
+        let mut v: Vec<u64> = match self.syms_at(1).exe() {
+            Some(t) => t.iter().filter(|(_, raw)| raw.contains(needle))
+                .filter(|(_, raw)| pred(&self.readable_at(1, raw))).map(|(a, _)| a).collect(),
+            None => Vec::new(),
+        };
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
+    /// From the recording's start, `continue` with only `addrs` armed until the terminal. `cap` bounds the hits kept:
+    /// one more than `cap` ends the scan early (`truncated`), and the run goes on to the terminal with nothing armed.
+    /// With `frames`, each hit carries its backtrace. The terminal's report comes back with the hits.
+    fn scan_hits(&mut self, addrs: &[u64], cap: usize, frames: bool) -> Result<(Vec<SumHit>, bool, ReplayReport), String> {
+        self.reseek(1, 0)?;
+        self.breakpoints = addrs.to_vec();
+        let mut hits = Vec::new();
+        let mut truncated = false;
+        let mut sink = std::io::sink();
+        for _ in 0..(cap + 1) * 4 + 64 {
+            match self.cmd_continue(&mut sink)? {
+                Halt::Break => {
+                    if hits.len() == cap {
+                        truncated = true;
+                        self.breakpoints.clear();
+                        continue;
+                    }
+                    let thread = self.sess().current_thread();
+                    let (x1, x2) = self.sess().thread_ctx(thread as usize).map_or((0, 0), |c| (c.regs.x[1], c.regs.x[2]));
+                    let (text, fr) = if frames {
+                        let mut buf = Vec::new();
+                        let f = self.cmd_bt(None, &mut buf)?;
+                        let text = String::from_utf8_lossy(&buf).lines().filter(|l| l.starts_with('#')).map(str::to_string).collect();
+                        (text, f.into_iter().find(|(k, _)| *k == "frames").map_or(J::Arr(Vec::new()), |(_, v)| v))
+                    } else { (Vec::new(), J::Null) };
+                    hits.push(SumHit { pos: (self.n, self.k), thread, x1, x2, text, frames: fr });
+                }
+                Halt::Exec { .. } => {}
+                Halt::Terminal(r) => return Ok((hits, truncated, r)),
+                h => return Err(format!("summary: unexpected stop {h:?}")),
+            }
+        }
+        Err("summary: the scan did not reach the end of the recording".into())
+    }
+
+    /// M58 B6: how the run ended and every Rust panic, from the recording's start. The user's breakpoints and
+    /// watches are set aside for it and come back; the cursor is left at the recording's end.
+    pub(crate) fn cmd_summary<W: Write>(&mut self, out: &mut W) -> Result<Vec<(&'static str, J)>, String> {
+        let (bps, ws) = (std::mem::take(&mut self.breakpoints), std::mem::take(&mut self.watches));
+        let r = self.summary_inner(out);
+        self.breakpoints = bps;
+        self.watches = ws;
+        r
+    }
+
+    fn summary_inner<W: Write>(&mut self, out: &mut W) -> Result<Vec<(&'static str, J)>, String> {
+        let mut programs: Vec<String> = Vec::new();
+        for (i, (e, _)) in self.epochs.iter().enumerate() {
+            programs.push(if i == 0 { self.start_cands.first().cloned().unwrap_or_default() } else { String::from_utf8_lossy(&e.path).into_owned() });
+        }
+        if programs.is_empty() { programs.push(self.start_cands.first().cloned().unwrap_or_default()); }
+
+        let mut notes: Vec<String> = Vec::new();
+        let mut panic_at = self.exe_addrs("rust_panic", |r| r == "rust_panic" || r.ends_with("::rust_panic"));
+        if panic_at.len() > 6 {
+            notes.push(format!("{} rust_panic symbols; only the first 6 by address are armed", panic_at.len()));
+            panic_at.truncate(6);
+        }
+        let (mut panics, truncated, mut report) = self.scan_hits(&panic_at, SUMMARY_PANIC_CAP, true)?;
+        let mut asserts: Vec<Option<(u64, u64)>> = vec![None; panics.len()];
+        let mut assert_at = if panics.is_empty() { Vec::new() } else {
+            self.exe_addrs("assert_failed", |r| r == "core::panicking::assert_failed")
+        };
+        if assert_at.len() > 6 {
+            notes.push(format!("{} assert_failed symbols; only the first 6 by address are armed, so an assert_eq! on another type has no operands", assert_at.len()));
+            assert_at.truncate(6);
+        }
+        if !assert_at.is_empty() {
+            let (ahits, _, r) = self.scan_hits(&assert_at, 256, false)?;
+            report = r;
+            let mut used = vec![false; ahits.len()];
+            for (pi, p) in panics.iter().enumerate() {
+                if !p.text.iter().any(|l| l.contains(" in core::panicking::assert_failed")) { continue; }
+                // The latest unused assert_failed entry on this thread before the panic.
+                if let Some(ai) = (0..ahits.len()).rev().find(|&i| !used[i] && ahits[i].thread == p.thread && ahits[i].pos <= p.pos) {
+                    used[ai] = true;
+                    asserts[pi] = Some((ahits[ai].x1, ahits[ai].x2));
+                }
+            }
+        }
+        panics.truncate(SUMMARY_PANIC_CAP);
+
+        // The cursor is at the terminal.
+        let mut bt = Vec::new();
+        let frames = self.cmd_bt(None, &mut bt)?.into_iter().find(|(k, _)| *k == "frames").map_or(J::Arr(Vec::new()), |(_, v)| v);
+        let (kind, ended, extra): (&str, String, Vec<(&'static str, J)>) = match &report.outcome {
+            Outcome::Exit { code } => ("exit", format!("exited with {code}"), vec![("code", J::UInt(*code))]),
+            Outcome::Crash { sig, far, .. } => {
+                let name = retrace_arch::signal_name(*sig);
+                ("crash", format!("killed by {name}, fault at {far:#x}"), vec![("signal", J::Str(name)), ("fault_address", hex(*far))])
+            }
+            Outcome::Signal { sig } => {
+                let name = retrace_arch::signal_name(*sig);
+                ("signal", format!("killed by {name}"), vec![("signal", J::Str(name))])
+            }
+            o => return Err(format!("summary: the recording ends in {o:?}")),
+        };
+        let mut ending = vec![("kind", J::Str(kind.into()))];
+        ending.extend(extra);
+        ending.extend(self.state_fields().into_iter().filter(|(k, _)| *k != "source_note"));
+        ending.push(("frames", frames));
+
+        let tail_of = |b: &[u8]| -> Vec<String> {
+            let s = String::from_utf8_lossy(b).into_owned();
+            let all: Vec<&str> = s.lines().collect();
+            all[all.len().saturating_sub(SUMMARY_TAIL_LINES)..].iter().map(|l| l.to_string()).collect()
+        };
+        let (tail, out_tail) = (tail_of(&report.stderr), tail_of(&report.stdout));
+        let threads: Vec<(u32, String, bool)> = self.sess().thread_summaries().into_iter().map(|t| (t.tid, format!("{:?}", t.state), t.is_current)).collect();
+
+        let shown = if programs.iter().all(String::is_empty) { "(unknown)".to_string() } else { programs.join(" -> ") };
+        line(out, format_args!("program: {shown}"))?;
+        line(out, format_args!("ended: {ended}"))?;
+        for (p, a) in panics.iter().zip(&asserts) {
+            line(out, format_args!("panic on thread {} at ({}, {})", p.thread, p.pos.0, p.pos.1))?;
+            for l in &p.text { line(out, format_args!("  {l}"))?; }
+            if let Some((l, r)) = a { line(out, format_args!("  assert_eq! left operand at {l:#x}, right at {r:#x}"))?; }
+        }
+        if truncated { line(out, format_args!("(more than {SUMMARY_PANIC_CAP} panics; the rest are not listed)"))?; }
+        for n in &notes { line(out, format_args!("note: {n}"))?; }
+        // A libtest run prints a failing test's panic message on stdout (it captures the test's own stderr).
+        if !out_tail.is_empty() {
+            line(out, format_args!("stdout (last {SUMMARY_TAIL_LINES} lines):"))?;
+            for l in &out_tail { line(out, format_args!("  {l}"))?; }
+        }
+        line(out, format_args!("stderr (last {SUMMARY_TAIL_LINES} lines):"))?;
+        for l in &tail { line(out, format_args!("  {l}"))?; }
+        line(out, format_args!("threads:"))?;
+        for (t, s, cur) in &threads { line(out, format_args!("  {}thread {t}: {s}", if *cur { "* " } else { "  " }))?; }
+
+        let jpanics = panics.iter().zip(&asserts).map(|(p, a)| {
+            let mut o = vec![
+                ("position", J::Arr(vec![J::UInt(p.pos.0 as u64), J::UInt(p.pos.1)])),
+                ("thread", J::UInt(u64::from(p.thread))),
+                ("frames", p.frames.clone()),
+            ];
+            if let Some((l, r)) = a { o.push(("assert", J::Obj(vec![("left", hex(*l)), ("right", hex(*r))]))); }
+            J::Obj(o)
+        }).collect();
+        let mut v = vec![
+            ("programs", J::Arr(programs.into_iter().map(J::Str).collect())),
+            ("ending", J::Obj(ending)),
+            ("panics", J::Arr(jpanics)),
+            ("threads", J::Arr(threads.into_iter().map(|(t, s, cur)| J::Obj(vec![
+                ("thread", J::UInt(u64::from(t))), ("state", J::Str(s)), ("current", J::Bool(cur))])).collect())),
+            ("stderr_tail", J::Str(tail.join("\n"))),
+            ("stdout_tail", J::Str(out_tail.join("\n"))),
+            ("truncated", J::Bool(truncated)),
+        ];
+        if !notes.is_empty() { v.push(("notes", J::Arr(notes.into_iter().map(J::Str).collect()))); }
+        Ok(v)
+    }
+}
+
 /// Output mode of a script run (M58 B1).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Mode { Text, Json }
@@ -1746,6 +1924,7 @@ impl Exec<'_> {
     pub fn exec_structured(&mut self, cmd: &Cmd, out: &mut Vec<u8>) -> Result<Vec<(&'static str, J)>, String> {
         if let Cmd::Bt(tid) = cmd { return self.cmd_bt(*tid, out); }
         if let Cmd::LastWrite(op, len) = cmd { return self.cmd_last_write(op, *len, out); }
+        if let Cmd::Summary = cmd { return self.cmd_summary(out); }
         self.exec(cmd, out)?;
         Ok(Vec::new())
     }
