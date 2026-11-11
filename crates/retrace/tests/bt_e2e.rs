@@ -163,17 +163,17 @@ fn bt_of_a_blocked_thread() {
     let a = &blocked[..=i];
     let b = through(t, |t| names(t, "watchthread::main"), "lldb", &theirs);
     // Every frame lldb reports, in order, is a frame of retrace's. Frame 0 is a syscall stub with no frame record, and
-    // there retrace takes x30 as frame 1: the return into the caller that made the call (the cache function that
-    // called `__ulock_wait`, no symbol in the recording). lldb has no symbols for it either and goes straight to the
-    // record's caller, so retrace may carry extra frames, and only symbol-less ones.
+    // there retrace takes x30 as frame 1: the return into the caller that made the call (`_pthread_join`, in the
+    // shared cache). lldb has no image for the cache and goes straight to the record's caller, so retrace may carry
+    // one extra frame: a system library's (named from the host's copy of the cache) or a symbol-less one.
     let mut at = 0;
     let mut extra = Vec::new();
     for (pc, text) in a {
         if at < b.len() && *pc == b[at] { at += 1 } else { extra.push((*pc, text.clone())) }
     }
     assert_eq!(at, b.len(), "lldb's frames, in order, are retrace's frames; retrace:\n{mine}\nlldb: {b:x?}");
-    assert!(extra.len() <= 1 && extra.iter().all(|(_, t)| !t.contains(" in ")),
-        "retrace's extra frames are at most one with no symbol: {extra:x?}\n{mine}");
+    assert!(extra.len() <= 1 && extra.iter().all(|(_, t)| !t.contains(" in ") || t.ends_with(".dylib)")),
+        "retrace's extra frames are at most one, a system library's or with no symbol: {extra:x?}\n{mine}");
     // That one extra frame is the stub's caller: frame 1, the blocked thread's own saved x30 (PAC bits stripped).
     if let Some((pc, _)) = extra.first() {
         assert_eq!(blocked.get(1).map(|f| f.0), Some(*pc), "the extra frame is frame 1:\n{mine}");

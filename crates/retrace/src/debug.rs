@@ -45,8 +45,9 @@ pub enum Cmd {
     Bt(Option<u32>),
     /// M58 B5: move the cursor to position (n, k).
     Goto(usize, u64),
-    /// M58 B5: the last write to `len` bytes at an address or symbol, before the cursor.
-    LastWrite(Operand, u64),
+    /// M58 B5: the last write to `len` bytes at an address, symbol or global variable, before the cursor. `None`: 8 for
+    /// an address or symbol, the variable's size for a variable.
+    LastWrite(Operand, Option<u64>),
     /// M58 B6: how the run ended and every Rust panic, from the recording's start.
     Summary,
 }
@@ -83,6 +84,28 @@ fn parse_addr(tok: &str) -> Result<u64, String> {
 pub enum Operand {
     Addr(u64),
     Sym(String),
+}
+
+/// What names a pc: a function and the offset into it, and the system library it is in when it is not in the program.
+#[derive(Debug, Default)]
+struct PcName {
+    function: Option<String>,
+    offset: Option<u64>,
+    library: Option<String>,
+}
+
+impl PcName {
+    /// ` in name+0xoff`, then ` (library)` for a system library's function; ` in library` for a library address with
+    /// no name; empty for nothing.
+    fn text(&self) -> String {
+        let off = self.offset.unwrap_or(0);
+        match (&self.function, &self.library) {
+            (Some(f), None) => format!(" in {f}+{off:#x}"),
+            (Some(f), Some(l)) => format!(" in {f}+{off:#x} ({l})"),
+            (None, Some(l)) => format!(" in {l}"),
+            (None, None) => String::new(),
+        }
+    }
 }
 
 /// Classify a `break`/`delete` operand. **Total — never fails**, because an unknown name is not a
@@ -220,15 +243,15 @@ fn parse_one(seg: &str) -> Result<Cmd, String> {
         }
         "last-write"      => {
             if ops.is_empty() || ops.len() > 2 {
-                return Err(format!("`last-write` takes <addr|symbol> [len]; got {} operand(s)", ops.len()));
+                return Err(format!("`last-write` takes <addr|symbol|variable> [len]; got {} operand(s)", ops.len()));
             }
             let len = match ops.get(1) {
-                Some(l) => l.parse::<u64>().map_err(|_| format!("bad watch len: {l}"))?,
-                None => 8,
+                Some(l) => Some(l.parse::<u64>().map_err(|_| format!("bad watch len: {l}"))?),
+                None => None,
             };
-            check_watch_len(len)?;
+            if let Some(l) = len { check_watch_len(l)?; }
             let op = parse_operand(ops[0]);
-            if let Operand::Addr(a) = &op { check_watch_align(*a, len)?; }
+            if let Operand::Addr(a) = &op { check_watch_align(*a, len.unwrap_or(8))?; }
             Ok(Cmd::LastWrite(op, len))
         }
         "x"               => {
@@ -510,7 +533,19 @@ impl<'a> Exec<'a> {
         match self.syms_at(n).resolve(addr) {
             Some((raw, 0)) => format!("  in {}", self.readable_at(n, raw)),
             Some((raw, off)) => format!("  in {}+{off:#x}", self.readable_at(n, raw)),
-            None => String::new(),
+            None => retrace_core::symbols::system_symbol(addr).map_or_else(String::new, |s| format!("  in {}", s.describe())),
+        }
+    }
+
+    /// What names `pc` in the epoch at `n`: the program's own symbol (readable), else a system library's function
+    /// and the library, for a pc in the shared cache. `offset` is into the function, and is `None` with it.
+    fn pc_name(&self, n: usize, pc: u64) -> PcName {
+        if let Some((raw, off)) = self.syms_at(n).resolve(pc) {
+            return PcName { function: Some(self.readable_at(n, raw)), offset: Some(off), library: None };
+        }
+        match retrace_core::symbols::system_symbol(pc) {
+            Some(s) => PcName { offset: s.name.as_ref().map(|_| s.offset), function: s.name, library: Some(s.library) },
+            None => PcName::default(),
         }
     }
 
@@ -669,14 +704,19 @@ impl<'a> Exec<'a> {
     /// This does not contradict M19's "symbolication may never fail a session": there, a missing
     /// *name* costs nothing because the debugger is only printing. Here a missing *address* means
     /// there is no command to carry out.
+    /// Every address the symbol `name` has in the cursor's epoch, by its readable or raw name.
+    fn sym_hits(&self, name: &str) -> Vec<u64> {
+        match self.readables.get(self.epoch_of(self.n)) {
+            Some(r) => r.lookup(self.syms_at(self.n), name),
+            None => self.syms_at(self.n).addrs_of(name),
+        }
+    }
+
     fn addr_of(&self, op: &Operand) -> Result<u64, String> {
         match op {
             Operand::Addr(a) => Ok(*a),
             Operand::Sym(name) => {
-                let hits = match self.readables.get(self.epoch_of(self.n)) {
-                    Some(r) => r.lookup(self.syms_at(self.n), name),
-                    None => self.syms_at(self.n).addrs_of(name),
-                };
+                let hits = self.sym_hits(name);
                 match hits.len() {
                     0 => Err(format!("no symbol \"{name}\"")),
                     1 => Ok(hits[0]),
@@ -833,20 +873,22 @@ impl<'a> Exec<'a> {
         let (lines, note) = self.source_lines(&probes);
         let mut jf = Vec::new();
         for (i, f) in frames.iter().enumerate() {
-            let sym = self.syms_at(n).resolve(probes[i]).map(|(raw, off)| (self.readable_at(n, raw), off + (f.pc - probes[i])));
+            let mut name = self.pc_name(n, probes[i]);
+            name.offset = name.offset.map(|o| o + (f.pc - probes[i]));
             let loc = lines.get(i).cloned().flatten();
-            let mut text = format!("#{i} {:#x}", f.pc);
-            if let Some((name, off)) = &sym { text += &format!(" in {name}+{off:#x}"); }
+            let mut text = format!("#{i} {:#x}{}", f.pc, name.text());
             if let Some((file, l)) = &loc { text += &format!(" at {file}:{l}"); }
             line(out, format_args!("{text}"))?;
-            jf.push(J::Obj(vec![
+            let mut fields = vec![
                 ("index", J::UInt(i as u64)),
                 ("pc", hex(f.pc)),
-                ("function", sym.as_ref().map_or(J::Null, |(n, _)| J::Str(n.clone()))),
-                ("offset", sym.as_ref().map_or(J::Null, |(_, o)| J::UInt(*o))),
+                ("function", name.function.as_ref().map_or(J::Null, |n| J::Str(n.clone()))),
+                ("offset", name.offset.map_or(J::Null, J::UInt)),
                 ("file", loc.as_ref().map_or(J::Null, |(f, _)| J::Str(f.clone()))),
                 ("line", loc.as_ref().map_or(J::Null, |(_, l)| J::UInt(u64::from(*l)))),
-            ]));
+            ];
+            if let Some(lib) = name.library { fields.push(("library", J::Str(lib))); }
+            jf.push(J::Obj(fields));
         }
         let mut v = vec![("frames", J::Arr(jf))];
         if let Some(nt) = note {
@@ -886,8 +928,66 @@ impl<'a> Exec<'a> {
     /// M58 B5: who wrote `len` bytes at `op` last, before the cursor. It arms a temporary unscoped watch (with the
     /// user's other watches and breakpoints off, so only this write can stop it), runs `reverse-continue`, and
     /// reads its `Halt`. Whatever happens the user's breakpoints and watches come back.
-    fn cmd_last_write<W: Write>(&mut self, op: &Operand, len: u64, out: &mut W) -> Result<Vec<(&'static str, J)>, String> {
-        let addr = self.addr_of(op)?;
+    /// The address and length `last-write` watches. An address or a symbol is taken as given, 8 bytes unless a length
+    /// is. A name no symbol has is looked up as a global variable, whose size is the length unless one is given.
+    fn last_write_target(&self, op: &Operand, len: Option<u64>) -> Result<(u64, u64), String> {
+        if let Operand::Sym(name) = op {
+            if self.sym_hits(name).is_empty() {
+                let (addr, size) = self.variable(name)?;
+                let len = match len {
+                    Some(l) => l,
+                    None if matches!(size, 1 | 2 | 4 | 8) => size,
+                    None => return Err(format!("`{name}` is {size} bytes, and last-write watches 1, 2, 4 or 8: name one of \
+                                                its fields, or give a length (`last-write {name} 8` watches its first 8)")),
+                };
+                return Ok((addr, len));
+            }
+        }
+        Ok((self.addr_of(op)?, len.unwrap_or(8)))
+    }
+
+    /// The address and size of a global variable, or of a field or element of one (`app.insert`, `table[3]`,
+    /// `ns::count`), read from the cursor's program's debug info: lldb evaluates `&(expr)` and `sizeof(expr)` on the
+    /// binary without running it. The program runs at its own file addresses, so lldb's address is the recording's.
+    fn variable(&self, expr: &str) -> Result<(u64, u64), String> {
+        let expr = expr.strip_prefix('&').unwrap_or(expr);
+        let plain = !expr.is_empty() && expr.chars().all(|c| c.is_ascii_alphanumeric() || "_.[]:".contains(c));
+        if !plain {
+            return Err(format!("no symbol \"{expr}\", and last-write looks up only a global variable or a field or \
+                                element of one (`app.insert`, `table[3]`); for anything else give an address"));
+        }
+        let cannot = |why: String| format!("no symbol \"{expr}\", and it cannot be looked up as a variable: {why}");
+        let image = self.epoch_image().map_err(|e| cannot(if e.is_empty() { "the program's path is not in the recording".into() }
+                                                          else { e.trim_start_matches("retrace: ").to_string() }))?;
+        let lldb = crate::lldbcmd::lldb_usable().map_err(cannot)?;
+        let arch = std::fs::read(&image).ok().and_then(|b| crate::source::arch_of(&b)).unwrap_or("arm64");
+        let mut cmd = std::process::Command::new(lldb);
+        cmd.args(["-x", "-b", "-a", arch,
+                  "-o", &format!("p/x (unsigned long long)&({expr})"),
+                  "-o", &format!("p/u (unsigned long long)sizeof({expr})"), "--"]).arg(&image);
+        let res = match crate::tool::run(&mut cmd, None, crate::tool::ATOS_SECS) {
+            Ok(r) => r,
+            Err(crate::tool::ToolError::TimedOut) => return Err(cannot(format!("lldb timed out after {} s", crate::tool::ATOS_SECS))),
+            Err(e) => return Err(cannot(format!("lldb did not run: {e:?}"))),
+        };
+        let text = format!("{}{}", String::from_utf8_lossy(&res.stdout), String::from_utf8_lossy(&res.stderr));
+        let vals: Vec<&str> = text.lines()
+            .filter_map(|l| l.trim().strip_prefix("(unsigned long long) "))
+            .map(|v| v.rsplit(" = ").next().unwrap_or(v).trim())
+            .collect();
+        if let [a, n, ..] = vals[..] {
+            let addr = u64::from_str_radix(a.trim_start_matches("0x"), 16).map_err(|_| cannot(format!("lldb printed {a}")))?;
+            let size = n.parse::<u64>().map_err(|_| cannot(format!("lldb printed {n}")))?;
+            return Ok((addr, size));
+        }
+        let why = text.lines().find_map(|l| l.split_once("error: ").map(|(_, e)| e.trim().to_string()))
+            .unwrap_or_else(|| "lldb printed no value".into());
+        Err(cannot(why))
+    }
+
+    fn cmd_last_write<W: Write>(&mut self, op: &Operand, len: Option<u64>, out: &mut W) -> Result<Vec<(&'static str, J)>, String> {
+        let (addr, len) = self.last_write_target(op, len)?;
+        check_watch_len(len)?;
         check_watch_align(addr, len)?;
         if self.watches.len() >= 4 {
             return Err("last-write needs a free watchpoint slot; 4 are armed (hardware limit: DBGWVR0-3)".into());
@@ -897,14 +997,29 @@ impl<'a> Exec<'a> {
         }
         let at = (self.n, self.k, self.phase);
         let (bps, ws) = (std::mem::take(&mut self.breakpoints), std::mem::take(&mut self.watches));
+        // Nothing comes before the start of the recording, so from there the search runs back from its end.
+        let from_end = (self.n, self.k) == (1, 0);
+        let rep = self.last_write_from(addr, len, at, from_end, out);
+        self.breakpoints = bps;
+        self.watches = ws;
+        rep
+    }
+
+    fn last_write_from<W: Write>(&mut self, addr: u64, len: u64, at: (usize, u64, Phase), from_end: bool, out: &mut W)
+        -> Result<Vec<(&'static str, J)>, String> {
+        if from_end {
+            line(out, format_args!("at the start of the recording: searching back from its end"))?;
+            self.cmd_continue(&mut std::io::sink())?;
+        }
         self.watches = vec![(addr, len, None)];
         let halt = self.cmd_reverse_continue(&mut std::io::sink());
         // The report steps the writer once, so it too runs with the user's breakpoints and watches still off.
         self.watches.clear();
-        let rep = self.last_write_report(halt, addr, len, at, out);
-        self.breakpoints = bps;
-        self.watches = ws;
-        rep
+        let none = matches!(halt, Ok(Halt::NoEarlierHit));
+        let rep = self.last_write_report(halt, addr, len, at, out)?;
+        // Nothing in the whole recording wrote it: the cursor goes back to the start, where it was.
+        if from_end && none { self.recover(at)?; }
+        Ok(rep)
     }
 
     fn last_write_report<W: Write>(&mut self, halt: Result<Halt, String>, addr: u64, len: u64, at: (usize, u64, Phase), out: &mut W)
@@ -936,11 +1051,10 @@ impl<'a> Exec<'a> {
                 };
                 self.reseek(n, k)?;
                 self.phase = Phase::Watch;
-                let sym = self.syms_at(n).resolve(pc).map(|(raw, off)| (self.readable_at(n, raw), off));
+                let name = self.pc_name(n, pc);
                 let (lines, _) = self.source_lines(&[pc]);
                 let loc = lines.into_iter().next().flatten();
-                let mut text = format!("last write to {addr:#x} ({len} bytes): store at {pc:#x}");
-                if let Some((name, off)) = &sym { text += &format!(" in {name}+{off:#x}"); }
+                let mut text = format!("last write to {addr:#x} ({len} bytes): store at {pc:#x}{}", name.text());
                 if let Some((file, l)) = &loc { text += &format!(" at {file}:{l}"); }
                 text += &format!(" on thread {thread}, ({n}, {k})");
                 line(out, format_args!("{text}"))?;
@@ -1110,7 +1224,7 @@ impl<'a> Exec<'a> {
             // presented as one. Calling a SIGABRT a fault is the same lie that got Event::Crash
             // reuse rejected in the spec, and the debug output would carry it forever.
             Outcome::Signal { sig } => line(out, format_args!("guest terminated by signal {sig}"))?,
-            Outcome::Refused(_) | Outcome::Incomplete(_) => unreachable!("M50 R5: a debugger opens only a complete recording, and replay never refuses one"),
+            Outcome::Refused(_) | Outcome::Incomplete(_) => unreachable!("a debugger opens only a complete recording, and replay never refuses one"),
         }
         let t = self.sess().landmark();
         let kf = self.probe_window_len(t)?; // drops the live session (one VM per process)
@@ -1473,7 +1587,7 @@ impl<'a> Exec<'a> {
                     Outcome::Exit { code } => format!("the guest exited (code {code}) on thread {by}"),
                     Outcome::Crash { pc, esr, far, .. } => format!("thread {by} crashed: pc={pc:#x} far={far:#x} esr={esr:#x}"),
                     Outcome::Signal { sig } => format!("the guest was terminated by signal {sig} on thread {by}"),
-                    Outcome::Refused(_) | Outcome::Incomplete(_) => unreachable!("M50 R5: a debugger opens only a complete recording, and replay never refuses one"),
+                    Outcome::Refused(_) | Outcome::Incomplete(_) => unreachable!("a debugger opens only a complete recording, and replay never refuses one"),
                 };
                 Halt::Refused(format!("the recording ended ({what}) before thread {} ran{}",
                     t + 1, if again { " again" } else { "" }))
@@ -2001,32 +2115,39 @@ impl Exec<'_> {
         let Some(pc) = pc else {
             return (vec![("pc", J::Null), ("function", J::Null), ("offset", J::Null), ("file", J::Null), ("line", J::Null)], None);
         };
-        let (function, offset) = match self.syms_at(self.n).resolve(pc) {
-            Some((raw, off)) => (J::Str(self.readable_at(self.n, raw)), J::UInt(off)),
-            None => (J::Null, J::Null),
-        };
+        let name = self.pc_name(self.n, pc);
         let (lines, note) = self.source_lines(&[pc]);
         let (file, line) = match lines.into_iter().next().flatten() {
             Some((f, l)) => (J::Str(f), J::UInt(u64::from(l))),
             None => (J::Null, J::Null),
         };
-        (vec![("pc", hex(pc)), ("function", function), ("offset", offset), ("file", file), ("line", line)], note)
+        let mut v = vec![("pc", hex(pc)), ("function", name.function.map_or(J::Null, J::Str)),
+                         ("offset", name.offset.map_or(J::Null, J::UInt)), ("file", file), ("line", line)];
+        if let Some(lib) = name.library { v.push(("library", J::Str(lib))); }
+        (v, note)
     }
 
     /// M58 B3: `(file, line)` per pc in the cursor's epoch, plus the note explaining an absence. The epoch's
     /// `SourceMap` is built on the first call that reaches it, from the image `resolve_image` trusts (the
     /// recorded `LC_UUID`; candidates are the recorded path, then the trace's directory). At most one note
     /// comes back per call, and only when a pc inside the executable got no line.
+    /// The cursor's program on disk: the first candidate path whose file has the recorded `LC_UUID` (the recorded
+    /// path, then the trace's directory). `Err` is the one line explaining why none does, or empty with no candidate.
+    fn epoch_image(&self) -> Result<String, String> {
+        let e = self.epoch_index();
+        let cands: Vec<String> = if e == 0 { self.start_cands.clone() }
+            else { self.epochs.get(e).map(|(ep, _)| String::from_utf8_lossy(&ep.path).into_owned()).into_iter().collect() };
+        let trace_dir = match self.trace.parent() { Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(), _ => std::path::PathBuf::from(".") };
+        crate::image::resolve_for_source(&cands, &trace_dir, crate::image::recorded_uuid(self.sess()))
+    }
+
     pub(crate) fn source_lines(&self, pcs: &[u64]) -> (Vec<Option<(String, u32)>>, Option<String>) {
         let e = self.epoch_index();
         let mut maps = self.sources.borrow_mut();
         let Some(slot) = maps.get_mut(e) else { return (vec![None; pcs.len()], None) };
         if slot.is_none() {
-            let cands: Vec<String> = if e == 0 { self.start_cands.clone() }
-                else { self.epochs.get(e).map(|(ep, _)| String::from_utf8_lossy(&ep.path).into_owned()).into_iter().collect() };
-            let trace_dir = match self.trace.parent() { Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(), _ => std::path::PathBuf::from(".") };
             let want = crate::image::recorded_uuid(self.sess());
-            let image = crate::image::resolve_for_source(&cands, &trace_dir, want);
+            let image = self.epoch_image();
             let text_end = self.syms_at(self.n).exe().map_or(0, |t| t.text_end());
             *slot = Some(crate::source::SourceMap::new(image, want, text_end));
         }
@@ -2095,9 +2216,10 @@ mod tests {
 
     #[test]
     fn last_write_parses_len_and_alignment() {
-        assert_eq!(parse_script("last-write 0x1000").unwrap(), vec![Cmd::LastWrite(Operand::Addr(0x1000), 8)]);
-        assert_eq!(parse_script("last-write 0x1004 4").unwrap(), vec![Cmd::LastWrite(Operand::Addr(0x1004), 4)]);
-        assert_eq!(parse_script("last-write rust_panic 1").unwrap(), vec![Cmd::LastWrite(Operand::Sym("rust_panic".into()), 1)]);
+        assert_eq!(parse_script("last-write 0x1000").unwrap(), vec![Cmd::LastWrite(Operand::Addr(0x1000), None)]);
+        assert_eq!(parse_script("last-write 0x1004 4").unwrap(), vec![Cmd::LastWrite(Operand::Addr(0x1004), Some(4))]);
+        assert_eq!(parse_script("last-write rust_panic 1").unwrap(), vec![Cmd::LastWrite(Operand::Sym("rust_panic".into()), Some(1))]);
+        assert_eq!(parse_script("last-write app.insert").unwrap(), vec![Cmd::LastWrite(Operand::Sym("app.insert".into()), None)]);
         assert!(parse_script("last-write 0x1000 3").is_err(), "bad len");
         assert!(parse_script("last-write 0x1004").is_err(), "8-byte misaligned");
         assert!(parse_script("last-write").is_err() && parse_script("last-write 0x1000 8 8").is_err());

@@ -151,19 +151,38 @@ fn kernel_write_is_a_syscall() {
 
 #[test]
 fn none_before_leaves_the_cursor() {
+    // One instruction in, so the search runs back from here and not from the end (see the next test).
     let (rec, trace) = util::record(retrace_guest::BIGREAD);
     assert_eq!(rec.code, 0, "{}", rec.stderr);
     let buf = format!("{:#x}", bigread_buf());
-    let (code, out, err) = run(trace.to_str().unwrap(), &format!("where; last-write {buf}; where"), true);
+    let (code, out, err) = run(trace.to_str().unwrap(), &format!("stepi 1; where; last-write {buf}; where"), true);
     assert_eq!(code, 0, "{err}");
     let objs = json_lines(&out);
-    let o = &objs[1];
+    let o = &objs[2];
     assert_eq!(o["found"], false, "{o}");
     assert_eq!(o["reason"], "start", "{o}");
-    assert_eq!(objs[0]["position"], o["position"]);
-    assert_eq!(objs[0]["position"], objs[2]["position"]);
-    let (_, text, _) = run(trace.to_str().unwrap(), &format!("last-write {buf}"), false);
+    assert_eq!(objs[1]["position"], o["position"]);
+    assert_eq!(objs[1]["position"], objs[3]["position"]);
+    let (_, text, _) = run(trace.to_str().unwrap(), &format!("stepi 1; last-write {buf}"), false);
     assert!(text.contains(&format!("no earlier write to {buf}: it holds what it held when the program started")), "{text}");
+}
+
+#[test]
+fn at_the_start_it_searches_back_from_the_end() {
+    // Nothing comes before the start of a recording, so `last-write` there runs back from its end and finds the
+    // `read` that fills the buffer, as it would after `summary` or a `goto` to the end.
+    let (rec, trace) = util::record(retrace_guest::BIGREAD);
+    assert_eq!(rec.code, 0, "{}", rec.stderr);
+    let buf = format!("{:#x}", bigread_buf());
+    let (code, text, err) = run(trace.to_str().unwrap(), &format!("last-write {buf}"), false);
+    assert_eq!(code, 0, "{err}");
+    assert!(text.contains("at the start of the recording: searching back from its end"), "{text}");
+    assert!(text.lines().any(|l| l.starts_with(&format!("last write to {buf}: syscall read (3) on thread 0, ("))), "{text}");
+    let (code, out, err) = run(trace.to_str().unwrap(), &format!("last-write {buf}"), true);
+    assert_eq!(code, 0, "{err}");
+    let o = last(&json_lines(&out)).clone();
+    assert_eq!(o["found"], true, "{o}");
+    assert_eq!(o["kind"], "syscall", "{o}");
 }
 
 #[test]

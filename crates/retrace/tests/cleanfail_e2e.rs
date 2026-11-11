@@ -322,7 +322,7 @@ fn a_rust_program_that_calls_chroot_stops_at_one_clean_line() {
 #[test]
 fn a_program_that_pauses_for_a_signal_stops_at_one_clean_line() {
     let line = assert_guest_wall(retrace_guest::CF_WALLS, &["pause"], "cf: pause\n",
-        "M14: DEADLOCK - every thread is blocked and nothing is left to wake one", "threads");
+        "DEADLOCK - every thread is blocked and nothing is left to wake one", "threads");
     assert!(line.contains("; thread 0 waits in sigsuspend for a signal nothing can send - see "), "{line}");
 }
 
@@ -331,7 +331,7 @@ fn a_program_that_pauses_for_a_signal_stops_at_one_clean_line() {
 #[test]
 fn a_socketpair_stops_at_one_clean_line() {
     assert_guest_wall(retrace_guest::CF_WALLS, &["socketpair"], "cf: socketpair\n",
-        "M55: socketpair of SOCK_DGRAM: only a stream pair is modelled", "syscalls");
+        "socketpair of SOCK_DGRAM: only a stream pair is modelled", "syscalls");
 }
 
 /// M55 t4 (spec §3g): a blocking read on an empty guest pipe that another thread would fill hung the
@@ -341,7 +341,7 @@ fn a_socketpair_stops_at_one_clean_line() {
 #[test]
 fn a_blocking_read_between_threads_stops_at_one_clean_line() {
     let line = assert_guest_wall(retrace_guest::BLOCKIO_DYN, &["pipe"], "start\n",
-        "M55: read on guest pipe fd 4 would wait for another thread to write", "threads");
+        "read on guest pipe fd 4 would wait for another thread to write", "threads");
     assert!(line.contains("blocking I/O between threads is not modelled"), "{line}");
 }
 
@@ -359,7 +359,7 @@ fn a_poll_on_a_file_stops_at_one_clean_line() {
 #[test]
 fn a_close_under_a_blocked_poll_stops_at_one_clean_line() {
     assert_guest_wall(retrace_guest::POLLSEL_DYN, &["pollclose"], "pollsel: pollclose\n",
-        "M53: close of descriptor ", "threads");
+        "close of descriptor ", "threads");
 }
 
 /// D1: every thread blocked with nothing left to wake one. Natively this program hangs forever; under
@@ -367,7 +367,7 @@ fn a_close_under_a_blocked_poll_stops_at_one_clean_line() {
 #[test]
 fn a_deadlock_is_a_wall_that_says_natively_the_program_would_hang() {
     let line = assert_guest_wall(retrace_guest::CF_WALLS, &["deadlock"], "cf: deadlock\n",
-        "M14: DEADLOCK - every thread is blocked", "threads");
+        "DEADLOCK - every thread is blocked", "threads");
     assert!(line.contains("Natively this program would hang here; if it does not, this is a bug in retrace"), "{line}");
 }
 
@@ -422,5 +422,5 @@ fn a_wall_prints_no_backtrace_even_with_rust_backtrace_set() {
 #[test]
 fn closing_a_kqueue_descriptor_a_thread_waits_on_stops_at_one_clean_line_and_replays_to_its_end() {
     assert_guest_wall(retrace_guest::KQDUP_DYN, &["closewait"], "closewait: closing\n",
-        "M53: close of kqueue descriptor ", "threads");
+        "close of kqueue descriptor ", "threads");
 }

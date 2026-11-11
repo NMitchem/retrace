@@ -62,7 +62,7 @@ pub struct IoEnd {
 pub fn lost_count(fd: u64, socket: bool) -> String {
     if socket { sock_lost(fd) } else {
         retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
-            "M48: pipe {fd}: the byte count is unknown: a read returned more bytes than the model \
+            "pipe {fd}: the byte count is unknown: a read returned more bytes than the model \
              counted, so a write reached the pipe by a path note_fd_effects does not see"))
     }
 }
@@ -231,7 +231,7 @@ impl Pipes {
     /// and `data`? `sys_pipe.c:filt_piperead_common` and `:filt_pipewrite_common` (F9).
     pub fn ready(&self, fd: u64, watch: FdKind, filter: i16) -> Result<Option<(u16, i64)>, String> {
         let lost = || retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
-            "M48: pipe {fd}: the byte count is unknown: a read returned more bytes than the model \
+            "pipe {fd}: the byte count is unknown: a read returned more bytes than the model \
              counted, so a write reached the pipe by a path note_fd_effects does not see"));
         match (watch, filter) {
             (FdKind::PipeRead(id), EVFILT_READ) => {
@@ -252,7 +252,7 @@ impl Pipes {
             }
             // K3: libuv's uv__stream_try_select probe, never ready.
             (FdKind::Other, _) => Ok(None),
-            (w, f) => unreachable!("M48: apply admits no filter {f} on {w:?}"),
+            (w, f) => unreachable!("apply admits no filter {f} on {w:?}"),
         }
     }
 }
@@ -329,7 +329,7 @@ impl Socks {
                 let free = SOCK_CAPACITY.checked_sub(st.peer_unread.ok_or_else(|| sock_lost(fd))?).ok_or_else(|| sock_lost(fd))?;
                 Ok((free >= SOCK_LOWAT).then_some((0, free as i64)))
             }
-            f => unreachable!("M55: apply admits no filter {f} on a socket"),
+            f => unreachable!("apply admits no filter {f} on a socket"),
         }
     }
 }
@@ -337,7 +337,7 @@ impl Socks {
 /// The refusal for a socket whose byte count the model lost.
 fn sock_lost(fd: u64) -> String {
     retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
-        "M55: socket {fd}: the byte count is unknown: a read returned more bytes than the model \
+        "socket {fd}: the byte count is unknown: a read returned more bytes than the model \
          counted, so a write reached the socket by a path note_fd_effects does not see"))
 }
 
@@ -387,7 +387,7 @@ impl GuestKqueues {
     pub fn create(&mut self, fd: u64) -> Result<(), String> {
         let k = self.kind_of(fd);
         if k != FdKind::Other {
-            return Err(format!("M48: kevent on fd {fd}: kqueue() returned fd {fd}, which the model \
+            return Err(format!("kevent on fd {fd}: kqueue() returned fd {fd}, which the model \
                                 still holds as {k:?}: a close it never saw"));
         }
         let id = self.next_id;
@@ -402,7 +402,7 @@ impl GuestKqueues {
         for fd in [r, w] {
             let k = self.kind_of(fd);
             if k != FdKind::Other {
-                return Err(format!("M48: pipe {fd}: pipe() returned fd {fd}, which the model still \
+                return Err(format!("pipe {fd}: pipe() returned fd {fd}, which the model still \
                                     holds as {k:?}: a close it never saw"));
             }
         }
@@ -420,7 +420,7 @@ impl GuestKqueues {
         for fd in [g0, g1] {
             let k = self.kind_of(fd);
             if k != FdKind::Other {
-                return Err(format!("M55: socketpair: socketpair() returned fd {fd}, which the model still \
+                return Err(format!("socketpair: socketpair() returned fd {fd}, which the model still \
                                     holds as {k:?}: a close it never saw"));
             }
         }
@@ -493,13 +493,13 @@ impl GuestKqueues {
         // it is unmeasured.
         if let Some((&tid, _)) = self.poll_waiters.iter().find(|(_, w)| w.watches(fd)) {
             return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
-                "M53: close of descriptor {fd} while thread {tid} waits in poll or select on it: what the \
-                 waiter then sees is not modelled (Ruling T4-closepolled)")));
+                "close of descriptor {fd} while thread {tid} waits in poll or select on it: what the \
+                 waiter then sees is not modelled")));
         }
         if let Some(w) = self.kq_of(fd).and_then(|k| k.waiter).filter(|w| w.fd == fd) {
             return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
-                "M53: close of kqueue descriptor {fd} while thread {} waits in kevent on it: natively the \
-                 waiter wakes at once with EBADF, which is not modelled (Ruling T0-M4)", w.tid)));
+                "close of kqueue descriptor {fd} while thread {} waits in kevent on it: natively the \
+                 waiter wakes at once with EBADF, which is not modelled", w.tid)));
         }
         if let Some(id) = self.fd_kq.remove(&fd) {
             if !self.fd_kq.values().any(|&v| v == id) { self.kqs.remove(&id); }
@@ -649,7 +649,7 @@ impl GuestKqueues {
     /// A refusal (`Err`) is a wall: it applies nothing, as the recording ends there.
     pub fn apply_room(&mut self, kq: u64, changes: &[Kevent], open: &[bool], room: usize) -> Result<Applied, String> {
         let id = *self.fd_kq.get(&kq)
-            .ok_or_else(|| format!("M48: kevent on fd {kq}, which is not a guest kqueue"))?;
+            .ok_or_else(|| format!("kevent on fd {kq}, which is not a guest kqueue"))?;
         let mut k = self.kqs[&id].clone();
         let mut seq = self.seq;
         let mut out = Applied::default();
@@ -672,7 +672,7 @@ impl GuestKqueues {
     fn apply_one(&self, k: &mut Kqueue, seq: &mut u64, i: usize, c: &Kevent, open: bool) -> Result<Step, String> {
         // F8: input flags lose EV_SYSFLAGS at copyin.
         let flags = c.flags & !EV_SYSFLAGS;
-        let at = format!("M48: kevent change {i}: (ident {:#x}, filter {}, flags {flags:#x}, fflags {:#x}, data {:#x})",
+        let at = format!("kevent change {i}: (ident {:#x}, filter {}, flags {flags:#x}, fflags {:#x}, data {:#x})",
                          c.ident, c.filter, c.fflags, c.data);
         const ENOENT: u64 = 2;
         const EBADF: u64 = 9;
@@ -686,7 +686,7 @@ impl GuestKqueues {
         }
         if !matches!(c.filter, EVFILT_USER | EVFILT_READ | EVFILT_WRITE) {
             return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("{at}: filter {} is not modelled: only EVFILT_USER and the pipe filters \
-                                are (M48 §3c)", c.filter)));
+                                are", c.filter)));
         }
         let key = (c.ident, c.filter);
         if flags & EV_DELETE != 0 {
@@ -709,9 +709,9 @@ impl GuestKqueues {
                     (FdKind::Sock(_), EVFILT_READ | EVFILT_WRITE) => {}
                     (FdKind::Other, EVFILT_READ) if flags == EV_ADD | EV_ENABLE => {}
                     (FdKind::Other, f) => return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
-                        "M48: kevent on fd {}: change {i}'s filter {f} with flags {flags:#x} asks about a \
+                        "kevent on fd {}: change {i}'s filter {f} with flags {flags:#x} asks about a \
                          descriptor that is not a guest pipe end: readiness of a file, socket, tty or \
-                         inherited descriptor is not modelled (M48 §7); only uv__stream_try_select's \
+                         inherited descriptor is not modelled; only uv__stream_try_select's \
                          EVFILT_READ, EV_ADD|EV_ENABLE is answered, never ready (K3)", c.ident))),
                     (w, f) => return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("{at}: filter {f} on {w:?} is not modelled"))),
                 }
@@ -879,7 +879,7 @@ impl GuestKqueues {
 
     pub fn set_poll_waiter(&mut self, tid: usize, w: PollWait) {
         let old = self.poll_waiters.insert(tid, w);
-        assert!(old.is_none(), "M53: thread {tid} blocked in poll twice");
+        assert!(old.is_none(), "thread {tid} blocked in poll twice");
     }
 
     pub fn take_poll_waiter(&mut self, tid: usize) -> Option<PollWait> { self.poll_waiters.remove(&tid) }
@@ -894,7 +894,7 @@ impl GuestKqueues {
     /// Record `w` as `kq`'s waiter. `Box_::guest_kevent` refuses a second one first (K2).
     pub fn set_waiter(&mut self, kq: u64, w: Waiter) {
         let k = self.kq_of_mut(kq).expect("set_waiter on a guest kqueue");
-        assert!(k.waiter.is_none(), "M48: a second waiter on kq {kq}; guest_kevent refuses it first (K2)");
+        assert!(k.waiter.is_none(), "a second waiter on kq {kq}; guest_kevent refuses it first (K2)");
         k.waiter = Some(w);
     }
 
@@ -951,7 +951,7 @@ mod tests {
         assert_eq!(g.socks.ready(10, end, EVFILT_WRITE).unwrap(), Some((0, 3072)));
         g.note_read(11, 8000).unwrap(); // more than counted: lost
         let e = g.socks.ready(11, g.socks.fds[&11], EVFILT_READ).unwrap_err().unmark();
-        assert!(e.starts_with("M55: socket 11: the byte count is unknown"), "{e}");
+        assert!(e.starts_with("socket 11: the byte count is unknown"), "{e}");
     }
 
     /// M55 spec 2b: the peer's last close fires both filters with `EV_EOF`: read's `data` is the unread
@@ -1004,7 +1004,7 @@ mod tests {
         assert!(g.knote(KQ, ID, EVFILT_USER).is_some(), "an EVFILT_USER knote names no descriptor and stays");
         g.set_waiter(4, Waiter { tid: 1, fd: 4, events: 0x1000, nevents: 1 });
         let e = g.close(4).unwrap_err().unmark();
-        assert!(e.starts_with("M53: close of kqueue descriptor 4 while thread 1 waits in kevent on it"), "{e}");
+        assert!(e.starts_with("close of kqueue descriptor 4 while thread 1 waits in kevent on it"), "{e}");
         assert!(g.is_kqueue(4), "the refused close changed nothing");
         g.close(KQ).unwrap();
         assert!(!g.is_kqueue(KQ) && g.knote(KQ, ID, EVFILT_USER).is_none(), "a kqueue's close drops its table");
@@ -1237,7 +1237,7 @@ mod tests {
             (ch(KQ, EVFILT_READ, EV_ADD, 0, 0, 0), "filter -1 on Kqueue is not modelled"),
         ] {
             let e = g.apply(KQ, &[c]).unwrap_err().unmark();
-            assert!(e.starts_with("M48: kevent ") && e.contains(why), "{why}: {e}");
+            assert!(e.starts_with("kevent ") && e.contains(why), "{why}: {e}");
         }
         g.apply(KQ, &[ch(1, EVFILT_READ, EV_ADD | EV_ENABLE, 0, 0, 0)]).unwrap();
         assert!(!g.has_events(KQ), "§11b item 7: registered, never ready");
@@ -1273,7 +1273,7 @@ mod tests {
         assert!(g.knote(9, ID, EVFILT_USER).is_some(), "the knotes stay");
         g.dup(9, 11).unwrap();
         let e = g.close(9).unwrap_err().unmark();
-        assert!(e.starts_with("M53: close of kqueue descriptor 9 while thread 2 waits in kevent on it"), "{e}");
+        assert!(e.starts_with("close of kqueue descriptor 9 while thread 2 waits in kevent on it"), "{e}");
         assert!(g.is_kqueue(9) && g.is_kqueue(11));
         g.close(11).unwrap();
         assert_eq!(g.waiter(9).map(|w| w.tid), Some(2));

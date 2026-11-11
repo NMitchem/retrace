@@ -252,7 +252,7 @@ fn refused(what: &str, why: &str) {
 /// Natively the call returns 0 (`filter n=0`).
 #[test]
 fn an_unmodelled_filter_stops_the_recorder_naming_it() {
-    refused("filter", "M48: kevent change 0: (ident 0x1, filter -7, flags 0x11, fflags 0x0, data 0x3e8): filter -7 is not modelled");
+    refused("filter", "kevent change 0: (ident 0x1, filter -7, flags 0x11, fflags 0x0, data 0x3e8): filter -7 is not modelled");
 }
 
 /// Restore parity (§3c "through every path"): a checkpoint taken while main is blocked in kevent
@@ -297,7 +297,7 @@ fn a_kevent_refused_on_replay_is_a_divergence_naming_it_not_a_panic() {
     let d = match s.advance() { Err(d) => d, Ok(_) => panic!("the tampered kevent at landmark {i} replayed") };
     assert_eq!(d.landmark, i);
     assert!(d.detail.starts_with("kevent refused on replay, though the recording accepted it")
-            && d.detail.contains("M48: kevent change 0: (ident 0x7, filter -7")
+            && d.detail.contains("kevent change 0: (ident 0x7, filter -7")
             && d.detail.contains("filter -7 is not modelled"), "{}", d.detail);
 }
 
@@ -328,5 +328,5 @@ fn a_rewritten_kevent_return_is_a_divergence_naming_the_rc() {
 /// (`notkq n=-1`).
 #[test]
 fn a_kevent_on_a_descriptor_that_is_not_a_kqueue_is_refused_by_value() {
-    refused("notkq", "M48: kevent on fd 1, which is not a guest kqueue: the kernel answers EBADF, which is not modelled");
+    refused("notkq", "kevent on fd 1, which is not a guest kqueue: the kernel answers EBADF, which is not modelled");
 }

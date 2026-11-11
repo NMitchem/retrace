@@ -1204,7 +1204,7 @@ pub fn arg_kinds(num: u64) -> Option<&'static Shape> {
 /// this check. Record-only by construction — replay never forwards.
 pub fn forwarded_shape(num: u64) -> &'static Shape {
     arg_kinds(num).unwrap_or_else(|| panic!(
-        "M33: syscall {num} ({}) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it \
+        "syscall {num} ({}) has no arg_kinds row in crates/retrace-arch/src/lib.rs — it \
          cannot be forwarded unclassified (an untranslated guest fd would act on retrace's own \
          descriptor of that number). Classify each argument from the SDK prototype under the \
          rules in ArgKind's docs and add the row; if a guest in the corpora dispatches it, add the \
@@ -2320,7 +2320,7 @@ pub fn kevent_qos_shape(args: [u64; 8], entry: &[u8]) -> Result<KeventShape, Str
         EVFILT_USER => first_difference(&e, &MANAGER_POKE, &[]).map(|()| KeventShape::ManagerPoke),
         other => Err(format!("filter is {:#x}, measured {:#x} (EVFILT_MEMORYSTATUS) or {:#x} \
                               (EVFILT_USER); an immediate timer or any other registration is not \
-                              modelled (M46 §7)",
+                              modelled",
                              other as u16, EVFILT_MEMORYSTATUS as u16, EVFILT_USER as u16)),
     }
     .map_err(|why| format!("changelist[0].{why}"))
@@ -2344,7 +2344,7 @@ pub fn kevent_return_change(entry: &[u8; KEVENT_QOS_SIZE]) -> Result<ChangeEntry
     let Some(tidx) = UPTIME_TIMER_FFLAGS.iter().position(|&f| f == e.fflags) else {
         let uptime = UPTIME_TIMER_FFLAGS.map(|f| format!("{f:#x}")).join(", ");
         return Err(format!("fflags is {:#x}, measured one of {uptime} (the UPTIME clock); MONOTONIC and \
-                            WALL timers are not modelled (M46 §7)", e.fflags));
+                            WALL timers are not modelled", e.fflags));
     };
     // `flags` and `fflags` copy `e`'s own values, and `filter` was already checked, so those three
     // comparisons cannot fail: the checks above validate them. What `first_difference` actually
@@ -2435,8 +2435,8 @@ pub fn madvise_effect(advice: u32) -> Result<MadviseEffect, String> {
         MADV_FREE_REUSABLE | MADV_FREE_REUSE => Ok(MadviseEffect::NoOp),
         MADV_ZERO => Ok(MadviseEffect::Zero),
         _ => Err(wall(WallCategory::Memory, format!(
-            "M47: unmeasured madvise advice {advice}. Modelled, from t0 M1(a)'s census: \
-             FREE_REUSABLE (7) and FREE_REUSE (8) as no-ops and ZERO (11) as a zero-fill (M47 §3c). \
+            "unmeasured madvise advice {advice}. Modelled, from t0 M1(a)'s census: \
+             FREE_REUSABLE (7) and FREE_REUSE (8) as no-ops and ZERO (11) as a zero-fill. \
              Measure its native effect before modelling it; forwarded, an advice acts on retrace's \
              own backing of the guest range"))),
     }
@@ -2472,10 +2472,10 @@ pub enum MacCall {
     /// `("AMFI", 0x5a)`: answered by the host, about retrace's own process (R4). Both measured
     /// callers, dyld's `amfi_check_dyld_policy_self` and libsystem_trace's, pass the same struct.
     AmfiDyldPolicy,
-    /// `("Sandbox", 2)`: answered with the errno the pre-M47 forward returned (R7).
+    /// `("Sandbox", 2)`: answered with the errno a forwarded call returned.
     SandboxCheck,
-    /// `("Sandbox", 4)`: answered ENOTSUP (45) with no write — what the pre-M47 forward returned and
-    /// what native returns for an unsandboxed process (t0, H7; the operator's ruling, 2026-10-01).
+    /// `("Sandbox", 4)`: answered ENOTSUP (45) with no write, which is what a forwarded call returned and
+    /// what native returns for an unsandboxed process.
     SandboxContainerPath,
 }
 
@@ -2488,8 +2488,8 @@ pub fn mac_syscall_model(policy: &[u8], call: u32) -> Result<MacCall, String> {
         (b"Sandbox", SANDBOX_CHECK) => Ok(MacCall::SandboxCheck),
         (b"Sandbox", SANDBOX_CONTAINER_PATH) => Ok(MacCall::SandboxContainerPath),
         _ => Err(wall(WallCategory::Syscalls, format!(
-            "M47: unmodelled __mac_syscall policy {:?} call {call:#x}. Modelled: (\"AMFI\", 0x5a), \
-             (\"Sandbox\", 0x2) and (\"Sandbox\", 0x4) (M47 §3d). A policy's argument struct may carry \
+            "unmodelled __mac_syscall policy {:?} call {call:#x}. Modelled: (\"AMFI\", 0x5a), \
+             (\"Sandbox\", 0x2) and (\"Sandbox\", 0x4). A policy's argument struct may carry \
              pointers the policy writes through, so it is never forwarded (ArgKind::NestedDest); \
              measure this one's struct and its native answer before modelling it", String::from_utf8_lossy(policy)))),
     }
@@ -2505,7 +2505,7 @@ pub fn sandbox_check_continuity(operation: &[u8]) -> Result<u64, String> {
         b"syscall-unix" => Ok(14),
         b"file-write-data" => Ok(22),
         _ => Err(wall(WallCategory::Syscalls, format!(
-            "M47: unmeasured Sandbox operation {:?}. Measured: \"syscall-unix\" (dyld's \
+            "unmeasured Sandbox operation {:?}. Measured: \"syscall-unix\" (dyld's \
              sandbox_check_common, EFAULT 14) and \"file-write-data\" (libsystem_sandbox's \
              rootless_check_trusted_internal, EINVAL 22) (t0 M2, R7). Measure what the pre-M47 \
              forward returned for this one before adding it", String::from_utf8_lossy(operation)))),
@@ -2876,7 +2876,7 @@ mod tests {
         assert_eq!(refusal_before_forward(7).map(|u| u.category), Some(WallCategory::ProcessCreation), "wait4");
         assert_eq!(refusal_before_forward((-38i64) as u64),
             Some(Unsupported::new(WallCategory::Threads, "semaphore_timedwait_trap (mach trap -38)")));
-        let nested = (0..600u64).find(|&n| writes_via_nested_pointer(n)).expect("a nested-pointer row (M27)");
+        let nested = (0..600u64).find(|&n| writes_via_nested_pointer(n)).expect("a nested-pointer row");
         let u = refusal_before_forward(nested).unwrap();
         assert!(u.category == WallCategory::Syscalls && u.what.ends_with(", which writes through a pointer inside a struct"),
             "{u:?}");
@@ -3052,7 +3052,7 @@ mod tests {
             assert_eq!(fd_operands(num).collect::<Vec<_>>(), [0], "syscall {num} holds its fd in x0");
         }
         assert_eq!(fd_operands(SYS_MMAP).collect::<Vec<_>>(), [4], "mmap's fd is x4, consumed by guest_mmap_file");
-        assert_eq!(fd_operands(SYS_DUP2).collect::<Vec<_>>(), [0], "dup2's fd2 is the guest's target slot, not a descriptor to translate (M37)");
+        assert_eq!(fd_operands(SYS_DUP2).collect::<Vec<_>>(), [0], "dup2's fd2 is the guest's target slot, not a descriptor to translate");
         // Path-only, fd-free, and fd-RETURNING calls must not have an operand translated.
         for num in [SYS_OPEN, SYS_OPEN_NOCANCEL, SYS_SOCKET, SYS_SHM_OPEN,
                     SYS_EXIT, SYS_MUNMAP, SYS_SYSCTL] {
@@ -3198,7 +3198,7 @@ mod tests {
         }
         // dup2 names its own target slot, so it is NOT bound like the others — M37 models it in
         // the box (`guest_dup2`) and the return IS the target. See allocates_fd's doc comment.
-        assert!(!allocates_fd(SYS_DUP2), "dup2 returns its own target slot (M37), not a fresh allocation");
+        assert!(!allocates_fd(SYS_DUP2), "dup2 returns its own target slot, not a fresh allocation");
     }
 
     /// The M9 defect generalized. `jq` reaches the kernel through 396/397/398/399/406 and never

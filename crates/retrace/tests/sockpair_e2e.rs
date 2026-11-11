@@ -165,7 +165,7 @@ unwritable sv: rc=-1 errno=14 lowest_unchanged=1\n");
 fn a_datagram_pair_is_refused_by_value() {
     let (rec, _) = record(&["dgram"], BOUND);
     assert_eq!(rec.code, Some(4), "the recorder stops at the wall. stderr:\n{}", rec.stderr);
-    assert!(rec.stderr.contains("retrace: unsupported: M55: socketpair of SOCK_DGRAM"), "{}", rec.stderr);
+    assert!(rec.stderr.contains("retrace: unsupported: socketpair of SOCK_DGRAM"), "{}", rec.stderr);
     assert_eq!(String::from_utf8_lossy(&rec.stdout), "", "nothing ran past the call");
 }
 
@@ -178,7 +178,7 @@ fn calls_outside_the_model_are_refused_by_value() {
         assert_eq!(rec.code, Some(4), "{which}: the recorder stops at the wall. stderr:\n{}", rec.stderr);
         let lines: Vec<&str> = rec.stderr.lines().filter(|l| l.starts_with("retrace: unsupported: ")).collect();
         assert_eq!(lines.len(), 1, "{which}: {}", rec.stderr);
-        assert!(lines[0].contains("M55: ") && lines[0].contains(call) && lines[0].contains("is not modelled"), "{which}: {}", lines[0]);
+        assert!(lines[0].contains("") && lines[0].contains(call) && lines[0].contains("is not modelled"), "{which}: {}", lines[0]);
         assert_eq!(String::from_utf8_lossy(&rec.stdout), "pair ok\n", "{which}: native's output up to the call");
     }
 }
@@ -199,7 +199,7 @@ fn a_plain_sendmsg_on_a_socket_is_refused_by_value() {
     assert_eq!(rec.code, Some(4), "stderr:\n{}", rec.stderr);
     let lines: Vec<&str> = rec.stderr.lines().filter(|l| l.starts_with("retrace: unsupported: ")).collect();
     assert_eq!(lines.len(), 1, "{}", rec.stderr);
-    assert!(lines[0].contains("M55: ") && lines[0].contains("sendmsg") && lines[0].contains("is not modelled"), "{}", lines[0]);
+    assert!(lines[0].contains("") && lines[0].contains("sendmsg") && lines[0].contains("is not modelled"), "{}", lines[0]);
     assert_eq!(String::from_utf8_lossy(&rec.stdout), "pair ok\n");
 }
 

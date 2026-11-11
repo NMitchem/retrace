@@ -58,24 +58,24 @@ fn is_a_wall(mode: &str, says: &str, printed: &str) {
 
 #[test]
 fn a_blocking_read_on_an_empty_pipe_is_a_wall_not_a_hang() {
-    is_a_wall("pipe", "M55: read on guest pipe fd", "start\n");
+    is_a_wall("pipe", "read on guest pipe fd", "start\n");
 }
 
 #[test]
 fn a_blocking_read_on_an_empty_socket_is_a_wall_not_a_hang() {
-    is_a_wall("sock", "M55: read on guest socket fd", "start\n");
+    is_a_wall("sock", "read on guest socket fd", "start\n");
 }
 
 #[test]
 fn a_blocking_write_that_cannot_complete_is_a_wall() {
     // T0-blockwrite: an empty pipe completes 65536 at once, an empty socket direction 8192.
-    is_a_wall("pipewrite", "M55: write of 70000 bytes on guest pipe fd", "start\n");
-    is_a_wall("sockwrite", "M55: write of 10000 bytes on guest socket fd", "start\n");
+    is_a_wall("pipewrite", "write of 70000 bytes on guest pipe fd", "start\n");
+    is_a_wall("sockwrite", "write of 10000 bytes on guest socket fd", "start\n");
 }
 
 #[test]
 fn clearing_o_nonblock_makes_the_read_a_wall_again() {
-    is_a_wall("cleared", "M55: read on guest pipe fd", "start\n");
+    is_a_wall("cleared", "read on guest pipe fd", "start\n");
 }
 
 #[test]
@@ -112,7 +112,7 @@ fn the_would_block_capacity_is_not_the_kqueue_models() {
 /// blocked the recorder (exit 142 under the review's 15 s bound). It is a wall, naming the bytes it would wait for.
 #[test]
 fn recv_waitall_for_more_than_is_held_is_a_wall() {
-    is_a_wall("waitall", "M55: read on guest socket fd", "start\n");
+    is_a_wall("waitall", "read on guest socket fd", "start\n");
     let (rec, _) = record("waitall", WALL_BOUND);
     assert!(rec.stderr.contains("with MSG_WAITALL would wait for 90 more bytes"), "{}", rec.stderr);
 }

@@ -800,7 +800,7 @@ fn a_deadlock_fails_loud_instead_of_hanging() {
 
     let r = b.schedule_after_block();
     assert!(matches!(&r, Err(u) if u.category == retrace_arch::WallCategory::Threads
-        && u.what.starts_with("M14: DEADLOCK")), "every thread blocked must be a wall, never a spin: {r:?}");
+        && u.what.starts_with("DEADLOCK")), "every thread blocked must be a wall, never a spin: {r:?}");
 }
 
 /// **M14 Task 10, F-1: the switch's WIRING into `run()`, not just its logic.**
@@ -1479,7 +1479,7 @@ fn a_park_that_strands_the_guest_is_a_wall_rather_than_a_hang() {
     b.guest_workq_kernreturn([0x4, 0x0, 0x0, 0x0, 0, 0, 0, 0]);
     let r = b.schedule_after_block();
     assert!(matches!(&r, Err(u) if u.category == retrace_arch::WallCategory::Threads
-        && u.what.starts_with("M14: DEADLOCK")), "every thread blocked must be a wall, never a spin: {r:?}");
+        && u.what.starts_with("DEADLOCK")), "every thread blocked must be a wall, never a spin: {r:?}");
 }
 
 /// The park's own refuse-by-value guard, pinned the way its neighbours are: the panic must NAME

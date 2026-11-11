@@ -402,7 +402,7 @@ fn record_raise(w: &mut Writer, b: &mut Box_, count: &mut usize, r: &RecordRaise
     };
     match kind {
         // M55 §3h: before the append and before anything changes, so a replay never meets a landmark for it.
-        K::Refuse => Err(wall(WallCategory::Signals, format!("M55: {}", b.refuse_raise_text(target, sig)))),
+        K::Refuse => Err(wall(WallCategory::Signals, b.refuse_raise_text(target, sig))),
         K::Pend => {
             // M16: pended on the TARGET and materialised at its next unmask or wake, a syscall landmark.
             landmark_event(w, count, "pended raise")?;
@@ -500,7 +500,7 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
         // M42 §3f: record never steps and never arms a debug register, so no debug exit reaches it
         // and the exclusive shadow can never be set here. A shadow would mean an exit path skipped
         // `note_exit`.
-        assert!(b.dbg_excl().is_none(), "M42: record set the exclusive shadow at pc {:#x}, at the exit {stop:?}: {:?}",
+        assert!(b.dbg_excl().is_none(), "record set the exclusive shadow at pc {:#x}, at the exit {stop:?}: {:?}",
             b.pc(), b.dbg_excl());
         // M15: the thread that produced this stop, captured ONCE and used by every append arm
         // below. Read here rather than at each append because this is the only point guaranteed to
@@ -946,11 +946,11 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                             .map_err(|e| wall_or_bug(retrace_arch::in_context("mach_vm_remap (4813) decode", e)))?;
                         if req.copy != 0 {
                             return Err(wall(WallCategory::Memory,
-                                "mach_vm_remap: copy=TRUE is unmodelled (spec §3f)"));
+                                "mach_vm_remap: copy=TRUE is unmodelled"));
                         }
                         if req.flags as u64 & VM_FLAGS_ANYWHERE != 0 {
                             return Err(wall(WallCategory::Memory,
-                                "mach_vm_remap: VM_FLAGS_ANYWHERE is unmodelled (spec §3f)"));
+                                "mach_vm_remap: VM_FLAGS_ANYWHERE is unmodelled"));
                         }
                         if Some(req.src_task as u64) != guest_task_port {
                             return Err(wall(WallCategory::Memory, format!(
@@ -958,7 +958,7 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                         }
                         if !(req.target + req.size <= req.src || req.src + req.size <= req.target) {
                             return Err(wall(WallCategory::Memory, format!(
-                                "mach_vm_remap: target {:#x}+{:#x} overlaps src {:#x} — unmodelled (spec §3f)",
+                                "mach_vm_remap: target {:#x}+{:#x} overlaps src {:#x} — unmodelled",
                                 req.target, req.size, req.src)));
                         }
                         // Final-review I1: FIXED without OVERWRITE over occupied VA is KERN_NO_SPACE
@@ -1256,7 +1256,7 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                 // forward, which is the whole point: after it, the process is already blocked and
                 // there is nothing left to assert from.
                 assert!(!retrace_arch::is_mach_semaphore_trap(num),
-                    "M18 Stage 2b: mach semaphore trap {num:#x} ({}) reached the generic forward \
+                    "mach semaphore trap {num:#x} ({}) reached the generic forward \
                      arm — it must be serviced by its dedicated arm above (Box_::guest_sem_wait / \
                      guest_sem_signal). Forwarding it blocks retrace's own process forever on a \
                      semaphore only the guest's worker could signal. args={args:#x?}",
@@ -2036,7 +2036,7 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                 // silently restoring the hazard — the same shape as the signal guard above.
                 assert!(num != retrace_arch::SYS_WORKQ_OPEN && num != retrace_arch::SYS_WORKQ_KERNRETURN,
                     "workq syscall {num} reached the generic forward arm — it must be emulated \
-                     above (M18 Stage 2a). Forwarding it creates a real host worker thread inside \
+                     above. Forwarding it creates a real host worker thread inside \
                      the recorder and takes a SIGSEGV at address 0.");
                 // M45: kevent_qos joins them. With KEVENT_FLAG_WORKQ the host kernel resolves the
                 // call to RETRACE's own workqueue kqueue (M44 t0 M1); the arm above emulates the one
@@ -2045,7 +2045,7 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                 // bsdthread_create).
                 assert!(num != retrace_arch::SYS_KEVENT_QOS,
                     "kevent_qos (374) reached the generic forward arm — it must be emulated above \
-                     (M45). Forwarded, KEVENT_FLAG_WORKQ acts on retrace's own workqueue kqueue.");
+                    . Forwarded, KEVENT_FLAG_WORKQ acts on retrace's own workqueue kqueue.");
                 // M48 §3b: kevent (363) on a guest kqueue is emulated above. Forwarded, it acts on a
                 // kqueue retrace never created, and a filter that blocks would block the RECORDER.
                 // This assert makes "never forwarded" a checked fact (the bsdthread_create gap M37
@@ -2053,45 +2053,45 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                 // M52 §3c: thread_selfid is answered per guest thread above. Forwarded, every thread
                 // reads the recorder's one host id and main's 0 breaks recursive mutexes.
                 assert!(num != retrace_arch::SYS_THREAD_SELFID,
-                    "thread_selfid (372) reached the generic forward arm — it must be answered above (M52 §3c).");
+                    "thread_selfid (372) reached the generic forward arm — it must be answered above.");
                 assert!(num != retrace_arch::SYS_KEVENT,
-                    "kevent (363) reached the generic forward arm — it must be emulated above (M48 §3c).");
+                    "kevent (363) reached the generic forward arm — it must be emulated above.");
                 assert!(!retrace_arch::is_poll_family(num),
-                    "poll, select or pselect reached the generic forward arm — it must be emulated above (M53 §3e).");
+                    "poll, select or pselect reached the generic forward arm — it must be emulated above.");
                 assert!(num != retrace_arch::SYS_SETITIMER && num != retrace_arch::SYS_GETITIMER,
-                    "setitimer or getitimer reached the generic forward arm — it must be emulated above (M53 §3f); \
+                    "setitimer or getitimer reached the generic forward arm — it must be emulated above; \
                      forwarded, it would arm the recorder's own timer.");
                 // M53 §3c: the iovec calls are translated above. Forwarded as issued, the host kernel
                 // reads each iov_base as a host address.
                 assert!(!retrace_arch::is_iovec(num),
-                    "iovec syscall {num} reached the generic forward arm — it must be translated above (M53 §3c).");
+                    "iovec syscall {num} reached the generic forward arm — it must be translated above.");
                 // M48 §3e: every psynch call is handled above, modelled or refused by value. Forwarded,
                 // it acts on the HOST's psynch state keyed by retrace's own addresses, blocking or
                 // waking the recorder.
                 assert!(!retrace_arch::is_psynch(num),
-                    "psynch syscall {num} reached the generic forward arm — it must be emulated above (M48 §3e).");
+                    "psynch syscall {num} reached the generic forward arm — it must be emulated above.");
                 // M49 §3f: `__semwait_signal` and its `_nocancel` twin are handled above, modelled or
                 // refused by value. Forwarded, the recorder itself would sleep on a host semaphore.
                 assert!(num != retrace_arch::SYS___SEMWAIT_SIGNAL && num != retrace_arch::SYS___SEMWAIT_SIGNAL_NOCANCEL,
-                    "__semwait_signal ({num}) reached the generic forward arm — it must be emulated above (M49 §3f).");
+                    "__semwait_signal ({num}) reached the generic forward arm — it must be emulated above.");
                 // M47 §3c: madvise joins them. Forwarded, the advice acts on RETRACE's backing of
                 // the guest range: a MADV_FREE_REUSABLE there lets the host reclaim pages the guest
                 // may later write through stage 2, and a MADV_ZERO wrote 512 KiB past the diff
                 // window. The arm above models it; this assert makes "never forwarded" a checked
                 // fact rather than an arm-ordering accident.
                 assert!(num != retrace_arch::SYS_MADVISE,
-                    "madvise (75) reached the generic forward arm — it must be modelled above (M47). \
+                    "madvise (75) reached the generic forward arm — it must be modelled above. \
                      Forwarded, its advice acts on retrace's own backing of the guest range.");
                 // M47 §3e: fork's row exists for the census and the views, which makes
                 // `forwarded_shape` accept it; this assert is what keeps a missing refusal arm from
                 // forwarding it and starting a real child of the recorder.
                 assert!(retrace_arch::fork_refusal_errno(num).is_none(),
-                    "fork ({num}) reached the generic forward arm — it must be refused above (M47). \
+                    "fork ({num}) reached the generic forward arm — it must be refused above. \
                      Forwarded, it starts a real child of the recorder.");
                 // M54: exec is never forwarded (it would replace retrace's own process). Every 59 and 244
                 // lands in a returning arm above (the child wall, or the exec arm); this is the checked fact.
                 assert!(num != retrace_arch::SYS_EXECVE && num != retrace_arch::SYS_POSIX_SPAWN,
-                    "exec ({num}) reached the generic forward arm — it must be handled above (M54). \
+                    "exec ({num}) reached the generic forward arm — it must be handled above. \
                      Forwarded, it would replace the recorder's own process image.");
                 // M50 §3c (B3): an unrowed syscall, or one that writes through a nested pointer, ends
                 // the recording here as a wall. It comes after the "never forwarded" asserts above,
@@ -2465,7 +2465,7 @@ impl ReplaySession {
         match kind {
             // F-2: a marked wall, so `end_or_diverge` reads it as the incomplete recording's end.
             K::Refuse => Err(Divergence { landmark: self.idx, pc, detail: retrace_arch::wall(
-                retrace_arch::WallCategory::Signals, format!("M55: {}", self.b.refuse_raise_text(target, sig))) }),
+                retrace_arch::WallCategory::Signals, self.b.refuse_raise_text(target, sig)) }),
             K::Pend => {
                 if kernel { self.b.threads_mut().pend_kernel(target, sig); } else { self.b.threads_mut().pend(target, sig); }
                 Ok(None)
@@ -3198,13 +3198,13 @@ impl ReplaySession {
                                         let buf = self.b.read_guest(m.data, m.send_size as usize);
                                         let req = machmsg::decode_vm_remap(&buf).map_err(|e| Divergence {
                                             landmark: self.idx, pc, detail: format!("replay vm_remap decode: {e}") })?;
-                                        assert_eq!(req.copy, 0, "mach_vm_remap: copy=TRUE is unmodelled (spec §3f)");
+                                        assert_eq!(req.copy, 0, "mach_vm_remap: copy=TRUE is unmodelled");
                                         assert_eq!(req.flags as u64 & VM_FLAGS_ANYWHERE, 0,
-                                            "mach_vm_remap: VM_FLAGS_ANYWHERE is unmodelled (spec §3f)");
+                                            "mach_vm_remap: VM_FLAGS_ANYWHERE is unmodelled");
                                         assert_eq!(Some(req.src_task as u64), self.guest_task_port,
                                             "mach_vm_remap: src_task {:#x} is not the guest's own task port", req.src_task);
                                         assert!(req.target + req.size <= req.src || req.src + req.size <= req.target,
-                                            "mach_vm_remap: target {:#x}+{:#x} overlaps src {:#x} — unmodelled (spec §3f)",
+                                            "mach_vm_remap: target {:#x}+{:#x} overlaps src {:#x} — unmodelled",
                                             req.target, req.size, req.src);
                                         let placed = self.b.guest_vm_remap_checked(req.target, req.size, req.src, req.flags as u64);
                                         let reply = match placed {
@@ -5006,7 +5006,7 @@ pub fn replay_opts(trace_path: &Path, sink: Option<Box<dyn OutputSink>>) -> Resu
             },
         };
         // M42 §3f: plain replay never arms a debug register either; see record_box's twin assert.
-        assert!(s.dbg_excl().is_none(), "M42: plain replay set the exclusive shadow at landmark {}", s.landmark());
+        assert!(s.dbg_excl().is_none(), "plain replay set the exclusive shadow at landmark {}", s.landmark());
         if let Advance::Exited(report) = adv { return Ok(report); }
     }
 }

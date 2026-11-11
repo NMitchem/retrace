@@ -142,7 +142,7 @@ fn a_second_init_is_refused_against_the_knote_table() {
     let (mut b, e) = inited();
     b.poke_guest(e, &KQINIT.to_bytes());
     let err = b.guest_kevent_qos([0xffff_ffff, e, 1, 0, 0, 0, 0, 0x21]).unwrap_err();
-    assert!(err.contains("M46: kevent_qos against the knote table: "), "{err}");
+    assert!(err.contains("kevent_qos against the knote table: "), "{err}");
 }
 
 /// A disarm of a timer that is not armed passes the entry's classification and is refused by the
@@ -156,7 +156,7 @@ fn a_disarm_of_an_unarmed_timer_is_refused_against_the_knote_table() {
                              data: 0, ext: [0; 4] };
     b.poke_guest(pthread - 0x480, &disarm.to_bytes());
     let err = b.try_workq_kernreturn(kevent_return(pthread - 0x480, 1)).unwrap_err();
-    assert!(err.contains("M46: KEVENT_RETURN against the knote table: "), "{err}");
+    assert!(err.contains("KEVENT_RETURN against the knote table: "), "{err}");
 }
 
 /// M46 final review M1: a plain worker's park (`THREAD_RETURN`, 0x4) from the bound manager is
@@ -167,7 +167,7 @@ fn a_thread_return_from_the_bound_manager_is_refused_naming_kevent_return() {
     let (mut b, _, _) = spawned();
     b.switch_to_thread(1);
     let err = b.try_workq_kernreturn([0x4, 0, 0, 0, 0, 0, 0, 0]).unwrap_err();
-    assert!(err.contains("M46: workq_kernreturn THREAD_RETURN (0x4) from thread 1, which is the bound event manager")
+    assert!(err.contains("workq_kernreturn THREAD_RETURN (0x4) from thread 1, which is the bound event manager")
         && err.contains("THREAD_KEVENT_RETURN (0x40)"), "{err}");
     assert_eq!(b.threads().state_of(1), ThreadState::Runnable, "not parked");
     assert_eq!(b.dbg_kq().manager(), Manager::Bound(1));
@@ -191,7 +191,7 @@ const SIGUSR1: u64 = 30;
 /// `Blocked`. The poke's re-entry would make it Runnable and replace its context, leaving the bit
 /// set where `assert_no_stranded_signals` cannot see it, so the unpark refuses.
 #[test]
-#[should_panic(expected = "M46: unpark of parked workqueue thread 1 with signal set 0x20000000 pending")]
+#[should_panic(expected = "unpark of parked workqueue thread 1 with signal set 0x20000000 pending")]
 fn a_poke_to_a_parked_manager_with_a_signal_pending_on_it_is_refused() {
     let (mut b, e) = parked();
     assert!(b.should_pend_for(1, SIGUSR1), "the raise path's own predicate pends on a parked target");
@@ -202,7 +202,7 @@ fn a_poke_to_a_parked_manager_with_a_signal_pending_on_it_is_refused() {
 /// The same refusal for a signal the manager's mask blocks, which `peek_deliverable` does not see.
 /// The mask on a workqueue thread is unmeasured, so the unpark checks the whole pending set.
 #[test]
-#[should_panic(expected = "M46: unpark of parked workqueue thread 1 with signal set 0x20000000 pending")]
+#[should_panic(expected = "unpark of parked workqueue thread 1 with signal set 0x20000000 pending")]
 fn a_poke_to_a_parked_manager_with_a_masked_signal_pending_on_it_is_refused_too() {
     let (mut b, e) = parked();
     b.threads_mut().set_mask_of(1, SIG_BLOCK, 1 << (SIGUSR1 - 1));
@@ -222,5 +222,5 @@ fn a_kevent_return_carrying_a_wall_timer_is_refused_naming_its_fflags() {
                            qos: EVENT_MANAGER_QOS, udata: 0x6c850, fflags: 0x9c, xflags: 0, data: 1, ext: [0; 4] };
     b.poke_guest(pthread - 0x480, &wall.to_bytes());
     let err = b.try_workq_kernreturn(kevent_return(pthread - 0x480, 1)).unwrap_err();
-    assert!(err.contains("M46: unmeasured KEVENT_RETURN change: changelist[0].fflags is 0x9c"), "{err}");
+    assert!(err.contains("unmeasured KEVENT_RETURN change: changelist[0].fflags is 0x9c"), "{err}");
 }

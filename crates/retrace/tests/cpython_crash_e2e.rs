@@ -86,7 +86,7 @@ fn cpython_runs_a_real_script_crashes_on_the_computed_pointer_and_reverse_debugs
     assert_eq!(far, TARGET, "crash FAR must be the computed target (esr={esr:#x})");
     assert_eq!(esr & 0x3f, 0x05, "DFSC must be a level-1 translation fault (esr={esr:#x})");
     assert_eq!(cthread, mthread, "the deref must run on the marker's thread");
-    assert_eq!(rec.code, 139, "a recorded crash exits 139 (M6). stderr:\n{}", rec.stderr);
+    assert_eq!(rec.code, 139, "a recorded crash exits 139. stderr:\n{}", rec.stderr);
 
     // 3. Replay agrees, twice.
     for i in 1..=2 {

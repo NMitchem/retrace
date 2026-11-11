@@ -24,10 +24,8 @@ written out of sight of the assert that caught it.
 
 ## When not to use it
 
-- A bug the source shows at a glance, or a logic error that one rerun will solve. Recording costs more
-  than reading or a rerun.
-- Python or JavaScript bugs. retrace records the interpreter, so you would be debugging its machine
-  code, not your script.
+- A bug the source shows at a glance, or a logic error one rerun will solve: recording costs more.
+- Python or JavaScript bugs: retrace records the interpreter, so you would debug its machine code.
 - Network servers. `bind`, `listen` and `accept` are walls (see "Read the result"), and tokio's TCP and
   Unix listener tests stop at `bind`. `socket` and `connect` are forwarded, but waiting on such a socket
   through kqueue, `poll` or `select` is refused (this is from reading retrace's code; no network client
@@ -150,6 +148,8 @@ last write to 0x304125c0 (8 bytes): store at 0x100001ab4 in ledger::fees::charge
 - Otherwise the cursor moves to the write, so a second `last-write` finds the write before it. Without a
   position, `break rust_panic; continue` stops at the first panic.
 - `last-write` uses one of the four hardware watch slots. With four `watch`es armed it is an error.
+- At the start of the recording it searches back from the end. Built with `-g`, a C or C++ global or a field of
+  one can stand for the address (`last-write app.insert`), and its size is the length.
 
 Positions can differ between two recordings of the same test, so take them from the recording you are
 asking. One recording answers the same question the same way every time.

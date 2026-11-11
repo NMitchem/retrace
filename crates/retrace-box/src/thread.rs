@@ -307,7 +307,7 @@ impl ThreadTable {
     pub fn unpark(&mut self, tid: usize) {
         let pending = self.threads[tid].pending;
         if pending != 0 {
-            retrace_arch::refuse!(Threads, "M46: unpark of parked workqueue thread {tid} with signal set {pending:#x} pending (bit n \
+            retrace_arch::refuse!(Threads, "unpark of parked workqueue thread {tid} with signal set {pending:#x} pending (bit n \
                  is signal n+1, masked or not). The re-entry replaces its context with a fresh upcall \
                  block, so the signal would vanish where assert_no_stranded_signals cannot see it. \
                  Measure the kernel's register state for a parked workqueue manager that a signal \
@@ -315,7 +315,7 @@ impl ThreadTable {
                  delivery on both sides before allowing this.");
         }
         assert_eq!(self.threads[tid].state, ThreadState::Blocked(BlockReason::Parked),
-            "M46: unpark of thread {tid}, which is not parked");
+            "unpark of thread {tid}, which is not parked");
         self.threads[tid].state = ThreadState::Runnable;
     }
 
@@ -614,7 +614,7 @@ impl ThreadTable {
             self.threads[tid].pending
         };
         if pending != 0 {
-            retrace_arch::refuse!(Threads, "M48: a signal is pending on thread {tid} (set {pending:#x}; bit n is signal n+1, \
+            retrace_arch::refuse!(Threads, "a signal is pending on thread {tid} (set {pending:#x}; bit n is signal n+1, \
                  masked or not), and this wake would write its reply over the blocked context. \
                  What still reaches this is a masked or unmasked signal on a condition-variable, mutex or poll waiter's \
                  wake (a kevent, semaphore or sleep waiter is interrupted at the raise, M55). Measure the kernel's \
@@ -623,7 +623,7 @@ impl ThreadTable {
         assert!(matches!(self.threads[tid].state,
                 ThreadState::Blocked(BlockReason::Kevent { .. } | BlockReason::Cv { .. } | BlockReason::Sleep { .. }
                     | BlockReason::Sem { .. } | BlockReason::Mutex { .. } | BlockReason::Poll { .. })),
-            "M48: wake of thread {tid}, which is {:?}, not blocked in a psynch, kevent, poll, sleep or semaphore wait",
+            "wake of thread {tid}, which is {:?}, not blocked in a psynch, kevent, poll, sleep or semaphore wait",
             self.threads[tid].state);
         self.threads[tid].state = ThreadState::Runnable;
         Ok(())
@@ -637,7 +637,7 @@ impl ThreadTable {
         match self.threads[tid].state {
             ThreadState::Blocked(BlockReason::Sleep { .. } | BlockReason::Sem { .. } | BlockReason::Kevent { .. }) => {}
             ThreadState::Blocked(BlockReason::SigSuspend { saved_mask }) => self.threads[tid].frame_mask = Some(saved_mask),
-            s => panic!("M53: interrupt of thread {tid}, which is {s:?}, not asleep, in sigsuspend, a semaphore wait or kevent"),
+            s => panic!("interrupt of thread {tid}, which is {s:?}, not asleep, in sigsuspend, a semaphore wait or kevent"),
         }
         self.threads[tid].state = ThreadState::Runnable;
     }
@@ -655,7 +655,7 @@ impl ThreadTable {
     /// in the settle that blocked it, so a yield is never observable as a blocked thread.
     pub fn end_yield(&mut self, tid: usize) {
         assert_eq!(self.threads[tid].state, ThreadState::Blocked(BlockReason::Yield),
-            "M52: end_yield of thread {tid}, which is {:?}, not yielding", self.threads[tid].state);
+            "end_yield of thread {tid}, which is {:?}, not yielding", self.threads[tid].state);
         self.threads[tid].state = ThreadState::Runnable;
     }
 
@@ -941,7 +941,7 @@ mod tests {
         t.pend(0, 30);
         let e = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| t.wake(0))).unwrap_err();
         let u = retrace_arch::Unsupported::from_panic(e.as_ref()).expect("the refusal is a wall");
-        assert!(u.what.starts_with("M48: a signal is pending on thread 0 (set 0x20000000"), "{}", u.what);
+        assert!(u.what.starts_with("a signal is pending on thread 0 (set 0x20000000"), "{}", u.what);
         assert_eq!(t.state_of(0), ThreadState::Blocked(BlockReason::Kevent { kq: 3, deadline: None }));
         assert_eq!(BlockReason::Kevent { kq: 3, deadline: Some(7) }.deadline(), Some(7));
         assert_eq!(BlockReason::Wait { addr: 8 }.deadline(), None, "only a timed wait carries a deadline");

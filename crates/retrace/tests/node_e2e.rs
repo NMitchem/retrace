@@ -59,7 +59,7 @@ fn node_prints_one_and_replays() {
     let jit = util::map_jit_ranges(&retrace_trace::Reader::open(&out.trace).unwrap());
     assert!(!jit.is_empty(),
         "the recording holds no MAP_JIT mapping: V8 never reserved its code range, which a \
-         --jitless run also prints 1 without (spec §4)");
+         --jitless run also prints 1 without");
     // … and toggled its write-protect at least once.
     let writes = rec_stderr.lines().filter(|l| l.starts_with("[M48 SPRR] thread ")).count();
     assert!(writes >= 1,

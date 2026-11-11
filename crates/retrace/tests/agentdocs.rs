@@ -1,5 +1,5 @@
-//! M58 A3: the agent-facing docs are read as source. Every command they show exists, the skill's
-//! frontmatter is valid, the paste-in snippet is the README's, and the plugin manifests agree.
+//! The agent-facing docs are read as source. Every command they show exists, the skill's frontmatter is
+//! valid, the paste-in snippet is the guide's, and the plugin manifests agree.
 
 use std::fs;
 use std::path::PathBuf;
@@ -12,7 +12,7 @@ fn read(rel: &str) -> String {
     fs::read_to_string(root().join(rel)).unwrap_or_else(|e| panic!("cannot read {rel}: {e}"))
 }
 
-/// The text inside code spans and fenced blocks. A block fenced as `markdown` (the README's copy of the snippet) is
+/// The text inside code spans and fenced blocks. A block fenced as `markdown` (the guide's copy of the snippet) is
 /// Markdown text, so only its code spans count, as in the snippet's own file.
 fn code_text(md: &str) -> String {
     let mut out = String::new();
@@ -78,7 +78,7 @@ fn debugger_verbs() -> Vec<String> {
     quoted_arms(&body[..end], true)
 }
 
-const DOCS: [&str; 3] = ["README.md", "plugin/skills/retrace/SKILL.md", "docs/agents-snippet.md"];
+const DOCS: [&str; 4] = ["README.md", "docs/guide.md", "plugin/skills/retrace/SKILL.md", "docs/agents-snippet.md"];
 
 #[test]
 fn every_command_the_docs_show_exists() {
@@ -139,11 +139,11 @@ fn skill_frontmatter_is_valid() {
 }
 
 #[test]
-fn snippet_matches_readme() {
+fn snippet_matches_guide() {
     let snippet = read("docs/agents-snippet.md");
     let body = snippet.trim();
     assert!(!body.is_empty() && body.lines().count() <= 6, "the snippet is 3 to 6 lines");
-    assert!(read("README.md").contains(body), "README.md must embed docs/agents-snippet.md verbatim");
+    assert!(read("docs/guide.md").contains(body), "docs/guide.md must embed docs/agents-snippet.md verbatim");
 }
 
 #[test]

@@ -12,7 +12,7 @@ mod tool;
 mod unwind;
 mod lldbcmd;
 
-/// Where the bug banner sends a report (M50 §3b).
+/// Where the bug banner sends a report.
 const ISSUES_URL: &str = "https://github.com/NMitchem/retrace/issues";
 const USAGE: &str = "usage: retrace <record [-o <trace>] <program> [<args>...] | replay <trace> \
                      | lldb <trace> [--exe <path>] [-- <lldb args>...] | debug <trace> [--json] [--script '...'] \
@@ -176,7 +176,7 @@ fn run(a: &[String]) -> i32 {
     // adds no bug path a program could take; the panic stands in for a broken internal invariant.
     #[cfg(debug_assertions)]
     if std::env::var_os("RETRACE_DEBUG_PANIC").is_some() {
-        panic!("RETRACE_DEBUG_PANIC is set: a deliberate internal error, the bug-banner control (M50 §3f)");
+        panic!("RETRACE_DEBUG_PANIC is set: a deliberate internal error, the bug-banner control");
     }
     match a.get(1).map(String::as_str) {
         Some("record") => record(a),

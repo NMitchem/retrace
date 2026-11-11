@@ -860,7 +860,7 @@ mod tests {
         e
     }
 
-    // Probe §2, and the bytes the controller measured for `posix_spawnattr_init` + `setflags(SETEXEC)` +
+    // The bytes measured on macOS for `posix_spawnattr_init` + `setflags(SETEXEC)` +
     // `setbinpref_np(ARM64)`: flags 0x40, binprefs[0] 0x0100000c, subcpuprefs all -1.
     #[test]
     fn decode_accepts_homebrews_launcher_attributes() {

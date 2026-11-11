@@ -193,8 +193,8 @@ mod tests {
     #[test]
     fn what_is_flattened_to_one_ascii_line() {
         let u = Unsupported::new(WallCategory::Threads,
-            "M14: DEADLOCK \u{2014} no runnable\n   thread.\tStates: [\u{e9}\u{7}]");
-        assert_eq!(u.line(), format!("retrace: unsupported: M14: DEADLOCK - no runnable thread. \
+            "DEADLOCK \u{2014} no runnable\n   thread.\tStates: [\u{e9}\u{7}]");
+        assert_eq!(u.line(), format!("retrace: unsupported: DEADLOCK - no runnable thread. \
             States: [??] - see {WALLS_URL}#threads"));
         let l = incomplete_line("landmark 7\n(pc 0x10)");
         assert_eq!(l, format!("retrace: incomplete recording: it ends at landmark 7 (pc 0x10) - see \
@@ -208,7 +208,7 @@ mod tests {
         let m = wall(WallCategory::MachMessages, "mach_msg2 msgh_id 205");
         assert_eq!(Unsupported::from_marked(&m),
             Some(Unsupported::new(WallCategory::MachMessages, "mach_msg2 msgh_id 205")));
-        assert_eq!(Unsupported::from_marked("M48: psynch psynch_mutexwait (301) is not modelled"), None);
+        assert_eq!(Unsupported::from_marked("psynch psynch_mutexwait (301) is not modelled"), None);
         assert_eq!(Unsupported::from_marked(&format!("refused on replay: {m}")), None,
             "the marker must start the string: context added in front makes it a bug's text");
         assert_eq!(Unsupported::from_marked("[retrace-wall:nonsense] x"), None, "an unknown anchor is no wall");
@@ -223,7 +223,7 @@ mod tests {
         let p = std::panic::catch_unwind(|| { crate::refuse!(Signals, "signal {sig} out of range") }).unwrap_err();
         assert_eq!(Unsupported::from_panic(p.as_ref()),
             Some(Unsupported::new(WallCategory::Signals, "signal 0 out of range")));
-        let p = std::panic::catch_unwind(|| panic!("M14: an internal invariant")).unwrap_err();
+        let p = std::panic::catch_unwind(|| panic!("an internal invariant")).unwrap_err();
         assert_eq!(Unsupported::from_panic(p.as_ref()), None);
         // A B1 wrapper's `panic!("{m}")` of a marked `m` is a wall too: the payload is `m` itself.
         let m = wall(WallCategory::Memory, "x");

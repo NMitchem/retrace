@@ -81,7 +81,7 @@ fn every_other_advice_value_is_refused_naming_it() {
     for v in (0..=64u32).chain([0x7fff_ffff, 0x8000_0000, 0xffff_fff9, u32::MAX]) {
         if accepted.contains(&v) { continue; }
         let e = marked_what(madvise_effect(v).unwrap_err());
-        assert!(e.starts_with(&format!("M47: unmeasured madvise advice {v}.")), "{v}: {e}");
+        assert!(e.starts_with(&format!("unmeasured madvise advice {v}.")), "{v}: {e}");
     }
 }
 
@@ -108,7 +108,7 @@ fn every_flipped_or_truncated_policy_or_call_is_refused() {
                 let mut p = policy.to_vec();
                 p[i] ^= 1 << bit;
                 let e = marked_what(mac_syscall_model(&p, call).unwrap_err());
-                assert!(e.starts_with(&format!("M47: unmodelled __mac_syscall policy {:?} call {call:#x}", String::from_utf8_lossy(&p))), "{e}");
+                assert!(e.starts_with(&format!("unmodelled __mac_syscall policy {:?} call {call:#x}", String::from_utf8_lossy(&p))), "{e}");
             }
         }
         for n in 0..policy.len() { assert!(mac_syscall_model(&policy[..n], call).is_err(), "{policy:?} cut to {n}"); }
@@ -125,7 +125,7 @@ fn sandbox_continuity_is_by_operation_and_refuses_the_rest() {
     assert_eq!(sandbox_check_continuity(b"file-write-data"), Ok(22));
     for op in [&b"syscall-uni"[..], b"syscall-unix2", b"file-read-data", b"", b"SYSCALL-UNIX"] {
         let e = marked_what(sandbox_check_continuity(op).unwrap_err());
-        assert!(e.starts_with(&format!("M47: unmeasured Sandbox operation {:?}", String::from_utf8_lossy(op))), "{e}");
+        assert!(e.starts_with(&format!("unmeasured Sandbox operation {:?}", String::from_utf8_lossy(op))), "{e}");
     }
 }
 
