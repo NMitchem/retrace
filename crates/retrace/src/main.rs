@@ -1,15 +1,21 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::exit;
 
 mod debug;
+mod demangle;
+mod json;
 mod rsp;
 mod gdbserver;
+mod image;
+mod source;
+mod tool;
+mod unwind;
 mod lldbcmd;
 
 /// Where the bug banner sends a report (M50 §3b).
 const ISSUES_URL: &str = "https://github.com/NMitchem/retrace/issues";
 const USAGE: &str = "usage: retrace <record [-o <trace>] <program> [<args>...] | replay <trace> \
-                     | lldb <trace> [--exe <path>] [-- <lldb args>...] | debug <trace> --script '...' \
+                     | lldb <trace> [--exe <path>] [-- <lldb args>...] | debug <trace> [--json] [--script '...'] \
                      | gdbserver <trace> [--port <n>] [--exe <path>]>";
 const RECORD_USAGE: &str = "usage: retrace record [-o <trace>] <program> [<args>...]";
 /// The text of `--help`, and of `retrace` with no command.
@@ -20,10 +26,13 @@ fn help() -> String {
                                               the program's basename plus .retrace in the working directory
   replay <trace>                              replay a recording, bit for bit
   lldb <trace> [--exe <path>] [-- <lldb args>...]   debug a recording in lldb, with reverse commands
-  debug <trace> --script '<cmds>'             run debugger commands over a recording
+  debug <trace> [--json] [--script '<cmds>']  run debugger commands over a recording; with no script it runs
+                                              `summary`: how the run ended, each panic with its backtrace
   gdbserver <trace> [--port <n>] [--exe <path>]   serve a recording to a gdb-remote client
 
   retrace --version    print the version
+
+  RETRACE_DIR=<dir>  record without -o into <dir>/<basename>.retrace
 
 Programs retrace cannot run yet are listed at {}", retrace_arch::WALLS_URL)
 }
@@ -306,6 +315,16 @@ fn default_trace_name(program: &str) -> String {
     format!("{base}.retrace")
 }
 
+/// Where a recording goes: `-o` wins; else `<dir>/<basename>.retrace` when `dir` is set and non-empty
+/// (`RETRACE_DIR`); else the default name in the working directory.
+fn trace_path(out: Option<&str>, program: &str, dir: Option<&std::ffi::OsStr>) -> PathBuf {
+    if let Some(o) = out { return PathBuf::from(o); }
+    match dir.filter(|d| !d.is_empty()) {
+        Some(d) => Path::new(d).join(default_trace_name(program)),
+        None => PathBuf::from(default_trace_name(program)),
+    }
+}
+
 /// `record [-o <trace>] <program> [<args>...]`. LC_LOAD_DYLINKER present records through the named
 /// dylinker (real dyld); absent, the freestanding static path.
 fn record(a: &[String]) -> i32 {
@@ -329,7 +348,16 @@ fn record(a: &[String]) -> i32 {
         return bad_input(&format!("a static program takes no arguments ({guest}); {RECORD_USAGE}"));
     }
     let named = r.out.is_some();
-    let out = r.out.clone().unwrap_or_else(|| default_trace_name(guest));
+    let dir = std::env::var_os("RETRACE_DIR");
+    let out_path = trace_path(r.out.as_deref(), guest, dir.as_deref());
+    if !named && dir.as_deref().is_some_and(|d| !d.is_empty()) {
+        if let Some(parent) = out_path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                return bad_input(&format!("cannot create {}: {e}", parent.display()));
+            }
+        }
+    }
+    let out = out_path.to_string_lossy().into_owned();
     // Guest argv: argv[0] is the path as typed (what dyld's `executable_path=` is derived from).
     let mut argv = vec![guest.clone()];
     argv.extend(r.args.iter().cloned());
@@ -395,16 +423,32 @@ fn finish(fall_throughs: u64, outcome: &retrace_core::Outcome) -> i32 {
     }
 }
 
-/// `debug <trace> --script '<cmd>; <cmd>; …'`. A missing trace, a missing `--script`, or a
-/// `--script` with no value is a usage error (exit 2), validated before any file I/O or VM work.
+/// `debug <trace> --script '<cmd>; <cmd>; …'`. A missing trace, a `--script` with no value, or an
+/// argument other than `--json` and `--script` is a usage error (exit 2), validated before any file
+/// I/O or VM work.
 fn debug_cmd(a: &[String]) -> i32 {
-    let script = a.iter().position(|s| s == "--script").and_then(|i| a.get(i + 1));
-    let (Some(trace), Some(script)) = (a.get(2), script) else {
-        return bad_input("usage: retrace debug <trace> --script '<cmds>'");
-    };
+    const DEBUG_USAGE: &str = "usage: retrace debug <trace> [--json] [--script '<cmds>']";
+    let Some(trace) = a.get(2).filter(|t| *t != "--json" && *t != "--script") else { return bad_input(DEBUG_USAGE) };
+    // Final review: an argument `debug` does not know (`--jsno`) is bad input, never silently a text-mode summary.
+    let unknown = |arg: &str| bad_input(&format!("unknown argument to debug: {arg} ({DEBUG_USAGE})"));
+    if trace.starts_with("--") { return unknown(trace); }
+    let (mut json, mut script) = (false, "summary");
+    let mut rest = a.iter().skip(3);
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--json" => json = true,
+            "--script" => match rest.next() {
+                Some(s) => script = s.as_str(),
+                None => return bad_input(DEBUG_USAGE),
+            },
+            other => return unknown(other),
+        }
+    }
+    if let Err(e) = check_recording(trace) { return bad_input(&e); }
     if let Err(code) = vm_preflight() { return code; }
     if let Err(code) = host_pin(trace) { return code; }
-    match debug::run_script(Path::new(trace), script, &mut std::io::stdout()) {
+    let mode = if json { debug::Mode::Json } else { debug::Mode::Text };
+    match debug::run_script_mode(Path::new(trace), script, mode, &mut std::io::stdout()) {
         Ok(()) => 0,
         Err(e) => { say(&format!("DEBUG ERROR: {e}")); 5 }
     }
@@ -479,6 +523,15 @@ mod record_args_tests {
     fn default_names() {
         assert_eq!(default_trace_name("./sub/crashy"), "crashy.retrace");
         assert_eq!(default_trace_name("/bin/ls"), "ls.retrace");
+    }
+
+    #[test]
+    fn trace_path_prefers_o_then_dir_then_default() {
+        use std::ffi::OsStr;
+        assert_eq!(trace_path(Some("t.bin"), "./p", Some(OsStr::new("d"))), PathBuf::from("t.bin"));
+        assert_eq!(trace_path(None, "./x/p", Some(OsStr::new("d"))), PathBuf::from("d/p.retrace"));
+        assert_eq!(trace_path(None, "./p", None), PathBuf::from("p.retrace"));
+        assert_eq!(trace_path(None, "./p", Some(OsStr::new(""))), PathBuf::from("p.retrace"));
     }
 }
 

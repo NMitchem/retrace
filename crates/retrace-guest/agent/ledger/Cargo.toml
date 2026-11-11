@@ -1,0 +1,8 @@
+[package]
+name = "ledger"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Its own workspace: built offline, not a member of retrace's.
+[workspace]

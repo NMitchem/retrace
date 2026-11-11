@@ -9,6 +9,8 @@ use std::sync::OnceLock;
 pub mod hits;
 /// M43: a minimal gdb-remote client for `retrace gdbserver` (see `rsp.rs`).
 pub mod rsp;
+/// M58: `cargo test` of a fixture crate through the runner hook (see `cargo.rs`).
+pub mod cargo;
 
 // `.cargo/config.toml`'s `runner` ad-hoc codesigns the binary cargo invokes
 // directly (the test harness) with the hypervisor entitlement, but CARGO_BIN_EXE_retrace

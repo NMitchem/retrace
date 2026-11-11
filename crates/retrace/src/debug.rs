@@ -4,6 +4,7 @@
 //! timing, no map-iteration order — so a transcript is bit-reproducible (the Task 6 e2e contract).
 
 use std::io::Write;
+use crate::json::{hex, J};
 use std::path::Path;
 use retrace_core::{checkpointed_seek, Advance, Armed, CheckpointCache, Outcome, ReplayReport, ReplaySession, Stepped, ThreadState};
 use retrace_core::symbols::Symbols;
@@ -40,6 +41,14 @@ pub enum Cmd {
     Unwatch(u64),
     Threads,
     RegsOf(u32),
+    /// M58 B4: a frame-pointer backtrace of a thread (the current one when omitted).
+    Bt(Option<u32>),
+    /// M58 B5: move the cursor to position (n, k).
+    Goto(usize, u64),
+    /// M58 B5: the last write to `len` bytes at an address or symbol, before the cursor.
+    LastWrite(Operand, u64),
+    /// M58 B6: how the run ended and every Rust panic, from the recording's start.
+    Summary,
 }
 
 /// The non-empty, trimmed command segments of a script, in order. `break;;continue;` → the two
@@ -177,6 +186,7 @@ fn parse_one(seg: &str) -> Result<Cmd, String> {
             Ok(Cmd::Watch(addr, len, thread))
         }
         "unwatch"         => { one_operand(verb, &ops)?; Ok(Cmd::Unwatch(parse_addr(ops[0])?)) }
+        "summary"         => expect_none(Cmd::Summary, &ops),
         "continue"        => expect_none(Cmd::Continue, &ops),
         "reverse-continue"=> expect_none(Cmd::ReverseContinue, &ops),
         "stepi"           => { at_most_one(verb, &ops)?; Ok(Cmd::Stepi(parse_count(ops.first().copied())?)) }
@@ -191,12 +201,52 @@ fn parse_one(seg: &str) -> Result<Cmd, String> {
             }
         }
         "where"           => expect_none(Cmd::Where, &ops),
+        "bt"              => {
+            at_most_one(verb, &ops)?;
+            match ops.first() {
+                None => Ok(Cmd::Bt(None)),
+                Some(t) => Ok(Cmd::Bt(Some(t.parse::<u32>().map_err(|_| format!("bad thread id: {t}"))?))),
+            }
+        }
+        "goto"            => {
+            // `goto 3 5`, `goto (3, 5)` and `goto 3:5` are one command.
+            let joined = ops.join(" ").replace(['(', ')', ',', ':'], " ");
+            let nums: Vec<&str> = joined.split_whitespace().collect();
+            if nums.len() != 2 { return Err("`goto` takes <n> <k>, (n, k) or n:k".to_string()); }
+            let n = nums[0].parse::<usize>().map_err(|_| format!("bad landmark: {}", nums[0]))?;
+            let k = nums[1].parse::<u64>().map_err(|_| format!("bad step: {}", nums[1]))?;
+            if n == 0 { return Err("landmarks start at 1".to_string()); }
+            Ok(Cmd::Goto(n, k))
+        }
+        "last-write"      => {
+            if ops.is_empty() || ops.len() > 2 {
+                return Err(format!("`last-write` takes <addr|symbol> [len]; got {} operand(s)", ops.len()));
+            }
+            let len = match ops.get(1) {
+                Some(l) => l.parse::<u64>().map_err(|_| format!("bad watch len: {l}"))?,
+                None => 8,
+            };
+            check_watch_len(len)?;
+            let op = parse_operand(ops[0]);
+            if let Operand::Addr(a) = &op { check_watch_align(*a, len)?; }
+            Ok(Cmd::LastWrite(op, len))
+        }
         "x"               => {
             if ops.len() != 2 { return Err(format!("`x` takes <addr> <len>; got {} operand(s)", ops.len())); }
             Ok(Cmd::Examine(parse_addr(ops[0])?, parse_len(ops[1])?))
         }
         other             => Err(format!("unknown command: {other}")),
     }
+}
+
+/// The `last-write` line when an exec at landmark `n` comes before any write: the image that held the address is gone.
+fn no_write_since_exec(addr: u64, n: usize) -> String { format!("no write to {addr:#x} since the exec at ({n}, 0)") }
+
+fn check_watch_len(len: u64) -> Result<(), String> {
+    if matches!(len, 1 | 2 | 4 | 8) { Ok(()) } else { Err(format!("watch len must be 1, 2, 4, or 8; got {len}")) }
+}
+fn check_watch_align(addr: u64, len: u64) -> Result<(), String> {
+    if addr.is_multiple_of(len) { Ok(()) } else { Err(format!("watch address {addr:#x} must be {len}-byte aligned")) }
 }
 
 fn one_operand(verb: &str, ops: &[&str]) -> Result<(), String> {
@@ -398,6 +448,13 @@ pub(crate) struct Exec<'a> {
     /// path, the host's own symbols, or anything timing- or iteration-order-dependent. An empty
     /// table (static guest, stripped binary) simply formats every address as bare hex.
     epochs: Vec<(Epoch, Symbols)>,
+    /// M58 B2: readable names, one lazy cache per epoch (exec epochs have different images).
+    readables: Vec<crate::demangle::Readable>,
+    /// M58 B3: file and line, one lazy `SourceMap` per epoch, built on the first pc that needs one so a session
+    /// that never asks for a line never runs `atos`. Host-derived and never written into a trace.
+    sources: std::cell::RefCell<Vec<Option<crate::source::SourceMap>>>,
+    /// M58 B3: epoch 0's candidate paths for its program, read from the opening start stack.
+    start_cands: Vec<String>,
 }
 
 impl<'a> Exec<'a> {
@@ -431,9 +488,13 @@ impl<'a> Exec<'a> {
                 (e, syms)
             }).collect::<Vec<_>>()
         }).unwrap_or_default();
+        let readables = epochs.iter().map(|(_, s)| crate::demangle::Readable::new(s)).collect();
+        let start_cands = crate::image::start_candidates(&session);
+        let sources = std::cell::RefCell::new((0..epochs.len().max(1)).map(|_| None).collect());
         Ok(Exec {
             trace, session: Some(session), n: 1, k: 0,
-            breakpoints: Vec::new(), watches: Vec::new(), phase: Phase::Bp, cache, epochs,
+            breakpoints: Vec::new(), watches: Vec::new(), phase: Phase::Bp, cache, readables, epochs,
+            sources, start_cands,
         })
     }
 
@@ -447,8 +508,8 @@ impl<'a> Exec<'a> {
     /// intact, which is why this returns an annotation rather than a replacement for the address.
     fn annot(&self, n: usize, addr: u64) -> String {
         match self.syms_at(n).resolve(addr) {
-            Some((n, 0)) => format!("  in {n}"),
-            Some((n, off)) => format!("  in {n}+{off:#x}"),
+            Some((raw, 0)) => format!("  in {}", self.readable_at(n, raw)),
+            Some((raw, off)) => format!("  in {}+{off:#x}", self.readable_at(n, raw)),
             None => String::new(),
         }
     }
@@ -466,6 +527,24 @@ impl<'a> Exec<'a> {
 
     /// The symbols of the epoch at landmark count `n`. Empty when the trace could not be decoded.
     fn syms_at(&self, n: usize) -> &Symbols {
+        self.syms_at_inner(n)
+    }
+
+    /// M58 B2: the readable form of a raw symbol name in the epoch at `n` (the raw name when none).
+    fn readable_at(&self, n: usize, raw: &str) -> String {
+        match self.readables.get(self.epoch_of(n)) { Some(r) => r.name(raw), None => raw.to_string() }
+    }
+
+    /// M58 B2: `Symbols::format` with the readable name.
+    fn format_at(&self, n: usize, addr: u64) -> String {
+        match self.syms_at(n).resolve(addr) {
+            Some((raw, 0)) => format!("{addr:#x} ({})", self.readable_at(n, raw)),
+            Some((raw, off)) => format!("{addr:#x} ({}+{off:#x})", self.readable_at(n, raw)),
+            None => format!("{addr:#x}"),
+        }
+    }
+
+    fn syms_at_inner(&self, n: usize) -> &Symbols {
         static EMPTY: std::sync::OnceLock<Symbols> = std::sync::OnceLock::new();
         match self.epochs.get(self.epoch_of(n)) { Some((_, s)) => s, None => EMPTY.get_or_init(Symbols::default) }
     }
@@ -564,6 +643,10 @@ impl<'a> Exec<'a> {
             Cmd::Unwatch(a)       => self.cmd_unwatch(*a, out),
             Cmd::Threads          => self.cmd_threads(out),
             Cmd::RegsOf(tid)      => self.cmd_regs_of(*tid, out),
+            Cmd::Bt(tid)          => self.cmd_bt(*tid, out).map(|_| ()),
+            Cmd::Goto(n, k)       => self.cmd_goto(*n, *k, out),
+            Cmd::LastWrite(op, l) => self.cmd_last_write(op, *l, out).map(|_| ()),
+            Cmd::Summary          => self.cmd_summary(out).map(|_| ()),
         }
     }
 
@@ -590,7 +673,10 @@ impl<'a> Exec<'a> {
         match op {
             Operand::Addr(a) => Ok(*a),
             Operand::Sym(name) => {
-                let hits = self.syms_at(self.n).addrs_of(name);
+                let hits = match self.readables.get(self.epoch_of(self.n)) {
+                    Some(r) => r.lookup(self.syms_at(self.n), name),
+                    None => self.syms_at(self.n).addrs_of(name),
+                };
                 match hits.len() {
                     0 => Err(format!("no symbol \"{name}\"")),
                     1 => Ok(hits[0]),
@@ -617,7 +703,7 @@ impl<'a> Exec<'a> {
         // feedback, and it makes the ambiguity error above actionable. Safe by inspection — both
         // existing assertions on this line use `contains("breakpoint at 0x…")`, never `ends_with`,
         // which is the check M19's four broken assertions earned.
-        line(out, format_args!("breakpoint at {}", self.syms_at(self.n).format(addr)))
+        line(out, format_args!("breakpoint at {}", self.format_at(self.n, addr)))
     }
 
     pub(crate) fn cmd_delete<W: Write>(&mut self, addr: u64, out: &mut W) -> Result<(), String> {
@@ -703,6 +789,197 @@ impl<'a> Exec<'a> {
             Some(dump) => line(out, format_args!("{dump}")),
             None => Err(format!("no such thread: {tid}")),
         }
+    }
+
+    /// M58 B4: `bt [tid]`. A frame-pointer walk of `tid` (default: the current thread) from its own registers:
+    /// `ThreadCtx` is the live vCPU for the current thread and the saved context for any other.
+    ///
+    /// Whether `lr` is frame 1 is `unwind::walk`'s rule: `at_entry` (pc at offset 0 of its symbol, or at offset 4
+    /// right after a `pacibsp`/`paciasp`), or `lr` differs from the record's return address at `fp` and does not
+    /// point back into pc's own function. That covers a frameless leaf, a pc between `sub sp` and `stp`, and a
+    /// syscall stub's `svc`. A leaf whose caller's own `lr`-equal record cannot be told apart is the residual limit.
+    ///
+    /// Frames from index 1 are return addresses: printed as such, but symbol and line are looked up at `pc - 4`, the
+    /// call. One `atos` call covers every frame. Returns the JSON fields `frames` and, when there is one, `source_note`.
+    fn cmd_bt<W: Write>(&mut self, tid: Option<u32>, out: &mut W) -> Result<Vec<(&'static str, J)>, String> {
+        let tid = tid.unwrap_or_else(|| self.sess().current_thread());
+        let ctx = self.sess().thread_ctx(tid as usize).ok_or_else(|| format!("no such thread: {tid}"))?;
+        let (pc, fp, lr) = (ctx.regs.pc, ctx.regs.x[29], ctx.regs.x[30]);
+        let n = self.n;
+        let at_entry = match self.syms_at(n).resolve(pc) {
+            Some((_, 0)) => true,
+            Some((_, 4)) => self.sess().read_mem(pc - 4, 4)
+                .is_some_and(|b| matches!(u32::from_le_bytes([b[0], b[1], b[2], b[3]]), 0xd503_237f | 0xd503_233f)),
+            _ => false,
+        };
+        let frames = {
+            let sess = self.sess();
+            let read = |a: u64| -> Option<(u64, u64)> {
+                let b = sess.read_mem(a, 16)?;
+                Some((u64::from_le_bytes(b[..8].try_into().ok()?), u64::from_le_bytes(b[8..].try_into().ok()?)))
+            };
+            // Same function as pc: the same resolved symbol, or, when either is unresolved (shared-cache stubs),
+            // an address below pc within a small window.
+            let syms = self.syms_at(n);
+            let here = syms.resolve(pc).map(|(r, _)| r);
+            let same_fn = |a: u64| match (here, syms.resolve(a)) {
+                (Some(h), Some((r, _))) => h == r,
+                _ => a < pc && pc - a < 0x400,
+            };
+            crate::unwind::walk(pc, fp, lr, at_entry, same_fn, read, crate::unwind::MAX_FRAMES)
+        };
+        // Where each frame is looked up: its pc for frame 0, the call (pc - 4) for a return address.
+        let probes: Vec<u64> = frames.iter().enumerate().map(|(i, f)| if i == 0 { f.pc } else { f.pc.saturating_sub(4) }).collect();
+        let (lines, note) = self.source_lines(&probes);
+        let mut jf = Vec::new();
+        for (i, f) in frames.iter().enumerate() {
+            let sym = self.syms_at(n).resolve(probes[i]).map(|(raw, off)| (self.readable_at(n, raw), off + (f.pc - probes[i])));
+            let loc = lines.get(i).cloned().flatten();
+            let mut text = format!("#{i} {:#x}", f.pc);
+            if let Some((name, off)) = &sym { text += &format!(" in {name}+{off:#x}"); }
+            if let Some((file, l)) = &loc { text += &format!(" at {file}:{l}"); }
+            line(out, format_args!("{text}"))?;
+            jf.push(J::Obj(vec![
+                ("index", J::UInt(i as u64)),
+                ("pc", hex(f.pc)),
+                ("function", sym.as_ref().map_or(J::Null, |(n, _)| J::Str(n.clone()))),
+                ("offset", sym.as_ref().map_or(J::Null, |(_, o)| J::UInt(*o))),
+                ("file", loc.as_ref().map_or(J::Null, |(f, _)| J::Str(f.clone()))),
+                ("line", loc.as_ref().map_or(J::Null, |(_, l)| J::UInt(u64::from(*l)))),
+            ]));
+        }
+        let mut v = vec![("frames", J::Arr(jf))];
+        if let Some(nt) = note {
+            line(out, format_args!("{nt}"))?;
+            v.push(("source_note", J::Str(nt)));
+        }
+        Ok(v)
+    }
+
+    /// M58 B5: move to (n, k) with phase `Bp` and print `where`'s line. A position the recording does not reach is
+    /// an error naming the last one; the cursor stays where it was.
+    fn cmd_goto<W: Write>(&mut self, n: usize, k: u64, out: &mut W) -> Result<(), String> {
+        let at = (self.n, self.k, self.phase);
+        if let Err(e) = self.reseek(n, k) {
+            self.recover(at)?;
+            let last = self.last_position()?;
+            return Err(format!("goto ({n}, {k}): {e}; the recording's last position is ({}, {})", last.0, last.1));
+        }
+        self.cmd_where(out)
+    }
+
+    /// The recording's last position, the terminal's park. The cursor is restored.
+    fn last_position(&mut self) -> Result<(usize, u64), String> {
+        let at = (self.n, self.k, self.phase);
+        let (bps, ws) = (std::mem::take(&mut self.breakpoints), std::mem::take(&mut self.watches));
+        let r = self.cmd_continue(&mut std::io::sink());
+        let pos = (self.n, self.k);
+        self.breakpoints = bps;
+        self.watches = ws;
+        self.recover(at)?;
+        match r? {
+            Halt::Terminal(_) => Ok(pos),
+            h => Err(format!("goto: no end of the recording was reached ({h:?})")),
+        }
+    }
+
+    /// M58 B5: who wrote `len` bytes at `op` last, before the cursor. It arms a temporary unscoped watch (with the
+    /// user's other watches and breakpoints off, so only this write can stop it), runs `reverse-continue`, and
+    /// reads its `Halt`. Whatever happens the user's breakpoints and watches come back.
+    fn cmd_last_write<W: Write>(&mut self, op: &Operand, len: u64, out: &mut W) -> Result<Vec<(&'static str, J)>, String> {
+        let addr = self.addr_of(op)?;
+        check_watch_align(addr, len)?;
+        if self.watches.len() >= 4 {
+            return Err("last-write needs a free watchpoint slot; 4 are armed (hardware limit: DBGWVR0-3)".into());
+        }
+        if self.watches.iter().any(|&(a, _, _)| a == addr) {
+            return Err(format!("{addr:#x} is already watched; `unwatch {addr:#x}` before `last-write`"));
+        }
+        let at = (self.n, self.k, self.phase);
+        let (bps, ws) = (std::mem::take(&mut self.breakpoints), std::mem::take(&mut self.watches));
+        self.watches = vec![(addr, len, None)];
+        let halt = self.cmd_reverse_continue(&mut std::io::sink());
+        // The report steps the writer once, so it too runs with the user's breakpoints and watches still off.
+        self.watches.clear();
+        let rep = self.last_write_report(halt, addr, len, at, out);
+        self.breakpoints = bps;
+        self.watches = ws;
+        rep
+    }
+
+    fn last_write_report<W: Write>(&mut self, halt: Result<Halt, String>, addr: u64, len: u64, at: (usize, u64, Phase), out: &mut W)
+        -> Result<Vec<(&'static str, J)>, String> {
+        let mut f: Vec<(&'static str, J)> = Vec::new();
+        let hex_of = |b: Option<Vec<u8>>| b.map_or(J::Null, |b| J::Str(b.iter().map(|x| format!("{x:02x}")).collect()));
+        match halt? {
+            Halt::NoEarlierHit => {
+                line(out, format_args!("no earlier write to {addr:#x}: it holds what it held when the program started"))?;
+                f.push(("found", J::Bool(false)));
+                f.push(("reason", J::Str("start".into())));
+            }
+            Halt::Exec { .. } => {
+                // The scan met an exec first: the image that held this address is gone, and no write is later.
+                let n = self.n;
+                self.recover(at)?;
+                line(out, format_args!("{}", no_write_since_exec(addr, n)))?;
+                f.push(("found", J::Bool(false)));
+                f.push(("reason", J::Str("exec".into())));
+            }
+            Halt::Watch { .. } => {
+                let (n, k) = (self.n, self.k);
+                let (pc, thread) = (self.sess().pc(), self.sess().current_thread());
+                let before = self.sess().read_mem(addr, len as usize);
+                // One step of the writing thread retires the store; a window end leaves `value_after` null.
+                let after = match self.cmd_stepi(1, &mut std::io::sink())? {
+                    Halt::Stepped => self.sess().read_mem(addr, len as usize),
+                    _ => None,
+                };
+                self.reseek(n, k)?;
+                self.phase = Phase::Watch;
+                let sym = self.syms_at(n).resolve(pc).map(|(raw, off)| (self.readable_at(n, raw), off));
+                let (lines, _) = self.source_lines(&[pc]);
+                let loc = lines.into_iter().next().flatten();
+                let mut text = format!("last write to {addr:#x} ({len} bytes): store at {pc:#x}");
+                if let Some((name, off)) = &sym { text += &format!(" in {name}+{off:#x}"); }
+                if let Some((file, l)) = &loc { text += &format!(" at {file}:{l}"); }
+                text += &format!(" on thread {thread}, ({n}, {k})");
+                line(out, format_args!("{text}"))?;
+                f.push(("found", J::Bool(true)));
+                f.push(("kind", J::Str("store".into())));
+                f.push(("value_before", hex_of(before)));
+                f.push(("value_after", hex_of(after)));
+                f.extend(self.cmd_bt(None, out)?);
+            }
+            Halt::WatchSys { thread, .. } => {
+                let n = self.n;
+                // The write belongs to the event that ended window n - 1: park before it to read its number.
+                self.park_before_event(n)?;
+                let num = self.sess().peek_syscall().map(|(num, _)| num)
+                    .ok_or_else(|| format!("last-write: no syscall event ends window {}", n - 1))?;
+                self.reseek(n, 0)?;
+                self.phase = Phase::Sys;
+                let name = retrace_arch::syscall_name(num).map_or_else(|| format!("syscall{num}"), str::to_string);
+                let after = self.sess().read_mem(addr, len as usize);
+                line(out, format_args!("last write to {addr:#x}: syscall {name} ({num}) on thread {thread}, ({n}, 0)"))?;
+                f.push(("found", J::Bool(true)));
+                f.push(("kind", J::Str("syscall".into())));
+                f.push(("thread", J::UInt(u64::from(thread))));
+                // pc, function, file and line are the writer's, as `thread` is: at (n, 0) the current thread is the
+                // one that runs next, which a call that blocked or switched leaves another. Null when the writer's
+                // context is not there. These replace the cursor's own fields; when the writer is another thread, a
+                // note the cursor's pc had is replaced too (by the writer's, or null).
+                let (fields, note) = self.pc_fields(self.sess().thread_ctx(thread as usize).map(|c| c.regs.pc));
+                f.extend(fields);
+                if note.is_some() || thread != self.sess().current_thread() {
+                    f.push(("source_note", note.map_or(J::Null, J::Str)));
+                }
+                f.push(("syscall", J::Obj(vec![("number", J::UInt(num)), ("name", J::Str(name))])));
+                f.push(("value_before", J::Null));
+                f.push(("value_after", hex_of(after)));
+            }
+            h => return Err(format!("last-write: unexpected stop {h:?}")),
+        }
+        Ok(f)
     }
 
     fn cmd_where<W: Write>(&mut self, out: &mut W) -> Result<(), String> {
@@ -1406,23 +1683,384 @@ impl<'a> Exec<'a> {
     }
 }
 
+/// M58 B6: a hit of `summary`'s scans. `pc` is the breakpoint's address.
+struct SumHit { pos: (usize, u64), thread: u32, pc: u64, x1: u64, x2: u64, text: Vec<String>, frames: J }
+
+const SUMMARY_PANIC_CAP: usize = 16;
+const SUMMARY_TAIL_LINES: usize = 20;
+
+/// Whether a readable name is `core::panicking::assert_failed` itself: the bare name (legacy mangling, hash dropped)
+/// or one instantiation of it (v0 mangling, `core::panicking::assert_failed::<i64, i64>`), and not
+/// `assert_failed_inner`, the non-generic function it calls.
+fn is_assert_failed(name: &str) -> bool {
+    name == "core::panicking::assert_failed" || name.starts_with("core::panicking::assert_failed::")
+}
+
+/// M58 final review: the start of the `assert_failed` instantiation in a panic's backtrace (`bt`'s frames, as JSON):
+/// the first frame `is_assert_failed` accepts, at its pc less its offset. A program has one instantiation per type
+/// pair it asserts on, so the panic's own frame says which one failed.
+fn assert_failed_start(frames: &J) -> Option<u64> {
+    let J::Arr(fs) = frames else { return None };
+    fs.iter().find_map(|f| {
+        let J::Obj(kv) = f else { return None };
+        let get = |k: &str| kv.iter().find(|(key, _)| *key == k).map(|(_, v)| v);
+        let Some(J::Str(name)) = get("function") else { return None };
+        if !is_assert_failed(name) { return None; }
+        let (Some(J::Str(pc)), Some(J::UInt(off))) = (get("pc"), get("offset")) else { return None };
+        u64::from_str_radix(pc.trim_start_matches("0x"), 16).ok()?.checked_sub(*off)
+    })
+}
+
+impl Exec<'_> {
+    /// The executable's addresses whose readable name (hash dropped) `pred` accepts, ascending. A raw name must
+    /// contain `needle` first, so no name is demangled that cannot match.
+    fn exe_addrs(&self, needle: &str, pred: impl Fn(&str) -> bool) -> Vec<u64> {
+        let mut v: Vec<u64> = match self.syms_at(1).exe() {
+            Some(t) => t.iter().filter(|(_, raw)| raw.contains(needle))
+                .filter(|(_, raw)| pred(&self.readable_at(1, raw))).map(|(a, _)| a).collect(),
+            None => Vec::new(),
+        };
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
+    /// From the recording's start, `continue` with only `addrs` armed until the terminal. `cap` bounds the hits kept:
+    /// one more than `cap` ends the scan early (`truncated`), and the run goes on to the terminal with nothing armed.
+    /// With `frames`, each hit carries its backtrace. The terminal's report comes back with the hits.
+    fn scan_hits(&mut self, addrs: &[u64], cap: usize, frames: bool) -> Result<(Vec<SumHit>, bool, ReplayReport), String> {
+        self.reseek(1, 0)?;
+        self.breakpoints = addrs.to_vec();
+        let mut hits = Vec::new();
+        let mut truncated = false;
+        let mut sink = std::io::sink();
+        for _ in 0..(cap + 1) * 4 + 64 {
+            match self.cmd_continue(&mut sink)? {
+                Halt::Break => {
+                    if hits.len() == cap {
+                        truncated = true;
+                        self.breakpoints.clear();
+                        continue;
+                    }
+                    let (thread, pc) = (self.sess().current_thread(), self.sess().pc());
+                    let (x1, x2) = self.sess().thread_ctx(thread as usize).map_or((0, 0), |c| (c.regs.x[1], c.regs.x[2]));
+                    let (text, fr) = if frames {
+                        let mut buf = Vec::new();
+                        let f = self.cmd_bt(None, &mut buf)?;
+                        let text = String::from_utf8_lossy(&buf).lines().filter(|l| l.starts_with('#')).map(str::to_string).collect();
+                        (text, f.into_iter().find(|(k, _)| *k == "frames").map_or(J::Arr(Vec::new()), |(_, v)| v))
+                    } else { (Vec::new(), J::Null) };
+                    hits.push(SumHit { pos: (self.n, self.k), thread, pc, x1, x2, text, frames: fr });
+                }
+                // The addresses are the first image's: past an exec they name whatever the new image holds there, so
+                // nothing stays armed and an exec'd program never shows a false panic.
+                Halt::Exec { .. } => self.breakpoints.clear(),
+                Halt::Terminal(r) => return Ok((hits, truncated, r)),
+                h => return Err(format!("summary: unexpected stop {h:?}")),
+            }
+        }
+        Err("summary: the scan did not reach the end of the recording".into())
+    }
+
+    /// M58 B6: how the run ended and every Rust panic, from the recording's start. The user's breakpoints and
+    /// watches are set aside for it and come back; the cursor is left at the recording's end.
+    pub(crate) fn cmd_summary<W: Write>(&mut self, out: &mut W) -> Result<Vec<(&'static str, J)>, String> {
+        let (bps, ws) = (std::mem::take(&mut self.breakpoints), std::mem::take(&mut self.watches));
+        let r = self.summary_inner(out);
+        self.breakpoints = bps;
+        self.watches = ws;
+        r
+    }
+
+    fn summary_inner<W: Write>(&mut self, out: &mut W) -> Result<Vec<(&'static str, J)>, String> {
+        let mut programs: Vec<String> = Vec::new();
+        for (i, (e, _)) in self.epochs.iter().enumerate() {
+            programs.push(if i == 0 { self.start_cands.first().cloned().unwrap_or_default() } else { String::from_utf8_lossy(&e.path).into_owned() });
+        }
+        if programs.is_empty() { programs.push(self.start_cands.first().cloned().unwrap_or_default()); }
+
+        let mut notes: Vec<String> = Vec::new();
+        let mut panic_at = self.exe_addrs("rust_panic", |r| r == "rust_panic" || r.ends_with("::rust_panic"));
+        if panic_at.len() > 6 {
+            notes.push(format!("{} rust_panic symbols; only the first 6 by address are armed", panic_at.len()));
+            panic_at.truncate(6);
+        }
+        let (mut panics, truncated, mut report) = self.scan_hits(&panic_at, SUMMARY_PANIC_CAP, true)?;
+        let mut asserts: Vec<Option<(u64, u64)>> = vec![None; panics.len()];
+        // Each panic's own `assert_failed`, from its backtrace. A test binary has one instantiation per type pair it
+        // asserts on, so arming every symbol of that name (the first six by address) missed the failing one, and under
+        // v0 mangling no symbol has the bare name at all; both silently.
+        let starts: Vec<Option<u64>> = panics.iter().map(|p| assert_failed_start(&p.frames)).collect();
+        let mut assert_at: Vec<u64> = starts.iter().flatten().copied().collect();
+        assert_at.sort_unstable();
+        assert_at.dedup();
+        if assert_at.len() > 6 {
+            notes.push(format!("{} assert_failed instantiations among the panics; only the first 6 by address are armed, so the panics in the others have no operands", assert_at.len()));
+            assert_at.truncate(6);
+        }
+        if !assert_at.is_empty() {
+            // `scan_hits`'s truncated flag is dropped: 256 hits is enough. Only the panics' own instantiations are
+            // armed, and `assert_failed` never returns (it panics), so each hit is followed on its thread by a
+            // `rust_panic` hit. The panics listed are the first SUMMARY_PANIC_CAP, so the hits they pair with are among
+            // the first SUMMARY_PANIC_CAP plus one per other thread inside a failing assert at that moment.
+            let (ahits, _, r) = self.scan_hits(&assert_at, 256, false)?;
+            report = r;
+            let mut used = vec![false; ahits.len()];
+            for (pi, p) in panics.iter().enumerate() {
+                let Some(start) = starts[pi].filter(|s| assert_at.contains(s)) else { continue };
+                // The latest unused entry of this panic's own assert_failed on its thread before the panic.
+                if let Some(ai) = (0..ahits.len()).rev()
+                    .find(|&i| !used[i] && ahits[i].pc == start && ahits[i].thread == p.thread && ahits[i].pos <= p.pos) {
+                    used[ai] = true;
+                    asserts[pi] = Some((ahits[ai].x1, ahits[ai].x2));
+                }
+            }
+        }
+        panics.truncate(SUMMARY_PANIC_CAP);
+
+        // The cursor is at the terminal.
+        let mut bt = Vec::new();
+        let frames = self.cmd_bt(None, &mut bt)?.into_iter().find(|(k, _)| *k == "frames").map_or(J::Arr(Vec::new()), |(_, v)| v);
+        // `bt`'s frame lines at the end, as a panic's are printed (a note line is left out, as it is there).
+        let end_text: Vec<String> = String::from_utf8_lossy(&bt).lines().filter(|l| l.starts_with('#')).map(str::to_string).collect();
+        let (end_pos, end_thread) = ((self.n, self.k), self.sess().current_thread());
+        let (kind, ended, extra): (&str, String, Vec<(&'static str, J)>) = match &report.outcome {
+            Outcome::Exit { code } => ("exit", format!("exited with {code}"), vec![("code", J::UInt(*code))]),
+            Outcome::Crash { sig, far, .. } => {
+                let name = retrace_arch::signal_name(*sig);
+                ("crash", format!("killed by {name}, fault at {far:#x}"), vec![("signal", J::Str(name)), ("fault_address", hex(*far))])
+            }
+            Outcome::Signal { sig } => {
+                let name = retrace_arch::signal_name(*sig);
+                ("signal", format!("killed by {name}"), vec![("signal", J::Str(name))])
+            }
+            o => return Err(format!("summary: the recording ends in {o:?}")),
+        };
+        let mut ending = vec![("kind", J::Str(kind.into()))];
+        ending.extend(extra);
+        ending.extend(self.state_fields().into_iter().filter(|(k, _)| *k != "source_note"));
+        ending.push(("frames", frames));
+
+        let tail_of = |b: &[u8]| -> Vec<String> {
+            let s = String::from_utf8_lossy(b).into_owned();
+            let all: Vec<&str> = s.lines().collect();
+            all[all.len().saturating_sub(SUMMARY_TAIL_LINES)..].iter().map(|l| l.to_string()).collect()
+        };
+        let (tail, out_tail) = (tail_of(&report.stderr), tail_of(&report.stdout));
+        let threads: Vec<(u32, String, bool)> = self.sess().thread_summaries().into_iter().map(|t| (t.tid, format!("{:?}", t.state), t.is_current)).collect();
+
+        let shown = if programs.iter().all(String::is_empty) { "(unknown)".to_string() } else { programs.join(" -> ") };
+        line(out, format_args!("program: {shown}"))?;
+        line(out, format_args!("ended: {ended}"))?;
+        // Where a crash or a signal stopped the program: the thread, the position and its backtrace. An exit's
+        // backtrace is the runtime's exit path, so it stays in JSON only.
+        if kind != "exit" {
+            line(out, format_args!("{kind} on thread {end_thread} at ({}, {})", end_pos.0, end_pos.1))?;
+            for l in &end_text { line(out, format_args!("  {l}"))?; }
+        }
+        for (p, a) in panics.iter().zip(&asserts) {
+            line(out, format_args!("panic on thread {} at ({}, {})", p.thread, p.pos.0, p.pos.1))?;
+            for l in &p.text { line(out, format_args!("  {l}"))?; }
+            if let Some((l, r)) = a { line(out, format_args!("  assert_eq! left operand at {l:#x}, right at {r:#x}"))?; }
+        }
+        if truncated { line(out, format_args!("(more than {SUMMARY_PANIC_CAP} panics; the rest are not listed)"))?; }
+        for n in &notes { line(out, format_args!("note: {n}"))?; }
+        // A libtest run prints a failing test's panic message on stdout (it captures the test's own stderr).
+        if !out_tail.is_empty() {
+            line(out, format_args!("stdout (last {SUMMARY_TAIL_LINES} lines):"))?;
+            for l in &out_tail { line(out, format_args!("  {l}"))?; }
+        }
+        if !tail.is_empty() {
+            line(out, format_args!("stderr (last {SUMMARY_TAIL_LINES} lines):"))?;
+            for l in &tail { line(out, format_args!("  {l}"))?; }
+        }
+        line(out, format_args!("threads:"))?;
+        for (t, s, cur) in &threads { line(out, format_args!("  {}thread {t}: {s}", if *cur { "* " } else { "  " }))?; }
+
+        let jpanics = panics.iter().zip(&asserts).map(|(p, a)| {
+            let mut o = vec![
+                ("position", J::Arr(vec![J::UInt(p.pos.0 as u64), J::UInt(p.pos.1)])),
+                ("thread", J::UInt(u64::from(p.thread))),
+                ("frames", p.frames.clone()),
+            ];
+            if let Some((l, r)) = a { o.push(("assert", J::Obj(vec![("left", hex(*l)), ("right", hex(*r))]))); }
+            J::Obj(o)
+        }).collect();
+        let mut v = vec![
+            ("programs", J::Arr(programs.into_iter().map(J::Str).collect())),
+            ("ending", J::Obj(ending)),
+            ("panics", J::Arr(jpanics)),
+            ("threads", J::Arr(threads.into_iter().map(|(t, s, cur)| J::Obj(vec![
+                ("thread", J::UInt(u64::from(t))), ("state", J::Str(s)), ("current", J::Bool(cur))])).collect())),
+            ("stderr_tail", J::Str(tail.join("\n"))),
+            ("stdout_tail", J::Str(out_tail.join("\n"))),
+            ("truncated", J::Bool(truncated)),
+        ];
+        if !notes.is_empty() { v.push(("notes", J::Arr(notes.into_iter().map(J::Str).collect()))); }
+        Ok(v)
+    }
+}
+
+/// Output mode of a script run (M58 B1).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mode { Text, Json }
+
 /// Execute a `;`-separated debugger script against `trace`, writing the transcript to `out`. Parses
 /// the whole script up front (a syntax error aborts before any output/VM work → the CLI exits 5),
 /// then echoes and runs each command in order.
+#[allow(dead_code)] // kept as the text-mode entry (M58 B1)
 pub fn run_script(trace: &Path, script: &str, out: &mut impl Write) -> Result<(), String> {
-    let cmds = parse_script(script)?;
+    run_script_mode(trace, script, Mode::Text, out)
+}
+
+fn emit(out: &mut impl Write, j: J) -> Result<(), String> {
+    let mut s = j.render();
+    s.push('\n');
+    out.write_all(s.as_bytes()).map_err(|e| format!("write error: {e}"))
+}
+
+/// `run_script` with a mode. In JSON mode each command is one line: its captured text lines in
+/// `output`, then `state_fields`, then the command's extra fields. A failure prints its own
+/// `ok:false` line before the error is returned.
+pub fn run_script_mode(trace: &Path, script: &str, mode: Mode, out: &mut impl Write) -> Result<(), String> {
+    let cmds = match parse_script(script) {
+        Ok(c) => c,
+        Err(e) => {
+            if mode == Mode::Json {
+                emit(out, J::Obj(vec![("command", J::Null), ("ok", J::Bool(false)), ("error", J::Str(e.clone()))]))?;
+            }
+            return Err(e);
+        }
+    };
     let segs: Vec<&str> = segments(script).collect(); // echo the exact source segment text
-    let mut ex = Exec::new(trace)?;
+    let mut ex = match Exec::new(trace) {
+        Ok(ex) => ex,
+        Err(e) => {
+            if mode == Mode::Json {
+                emit(out, J::Obj(vec![("command", J::Null), ("ok", J::Bool(false)), ("error", J::Str(e.clone()))]))?;
+            }
+            return Err(e);
+        }
+    };
     for (seg, cmd) in segs.iter().zip(&cmds) {
-        line(out, format_args!("> {seg}"))?;
-        ex.exec(cmd, out)?;
+        match mode {
+            Mode::Text => {
+                line(out, format_args!("> {seg}"))?;
+                ex.exec(cmd, out)?;
+            }
+            Mode::Json => {
+                let mut buf = Vec::new();
+                match ex.exec_structured(cmd, &mut buf) {
+                    Ok(extra) => {
+                        let text = String::from_utf8_lossy(&buf);
+                        let lines = text.lines().map(|l| J::Str(l.to_string())).collect();
+                        let mut o = vec![("command", J::Str(seg.to_string())), ("ok", J::Bool(true)), ("output", J::Arr(lines))];
+                        o.extend(ex.state_fields());
+                        for (k, v) in extra { // an extra field of a state field's name replaces it
+                            match o.iter_mut().find(|(ok, _)| *ok == k) { Some(slot) => slot.1 = v, None => o.push((k, v)) }
+                        }
+                        emit(out, J::Obj(o))?;
+                    }
+                    Err(e) => {
+                        emit(out, J::Obj(vec![("command", J::Str(seg.to_string())), ("ok", J::Bool(false)), ("error", J::Str(e.clone()))]))?;
+                        return Err(e);
+                    }
+                }
+            }
+        }
     }
     Ok(())
+}
+
+impl Exec<'_> {
+    /// Today's `exec` into `out`, plus the extra fields a command contributes (none yet; B2-B6 add them).
+    pub fn exec_structured(&mut self, cmd: &Cmd, out: &mut Vec<u8>) -> Result<Vec<(&'static str, J)>, String> {
+        if let Cmd::Bt(tid) = cmd { return self.cmd_bt(*tid, out); }
+        if let Cmd::LastWrite(op, len) = cmd { return self.cmd_last_write(op, *len, out); }
+        if let Cmd::Summary = cmd { return self.cmd_summary(out); }
+        self.exec(cmd, out)?;
+        Ok(Vec::new())
+    }
+
+    /// The cursor as JSON: `position`, `thread`, `pc`, `function`. The one place these are built.
+    pub fn state_fields(&self) -> Vec<(&'static str, J)> {
+        let mut v = vec![
+            ("position", J::Arr(vec![J::UInt(self.n as u64), J::UInt(self.k)])),
+            ("thread", J::UInt(u64::from(self.sess().current_thread()))),
+        ];
+        let (fields, note) = self.pc_fields(Some(self.sess().pc()));
+        v.extend(fields);
+        if let Some(n) = note { v.push(("source_note", J::Str(n))); }
+        v
+    }
+
+    /// `pc`, `function`, `offset`, `file` and `line` for `pc` in the cursor's epoch (all null for `None`), and the
+    /// note explaining a missing line. As a `bt` frame has them: the readable name alone, and the offset into it as
+    /// its own field.
+    fn pc_fields(&self, pc: Option<u64>) -> (Vec<(&'static str, J)>, Option<String>) {
+        let Some(pc) = pc else {
+            return (vec![("pc", J::Null), ("function", J::Null), ("offset", J::Null), ("file", J::Null), ("line", J::Null)], None);
+        };
+        let (function, offset) = match self.syms_at(self.n).resolve(pc) {
+            Some((raw, off)) => (J::Str(self.readable_at(self.n, raw)), J::UInt(off)),
+            None => (J::Null, J::Null),
+        };
+        let (lines, note) = self.source_lines(&[pc]);
+        let (file, line) = match lines.into_iter().next().flatten() {
+            Some((f, l)) => (J::Str(f), J::UInt(u64::from(l))),
+            None => (J::Null, J::Null),
+        };
+        (vec![("pc", hex(pc)), ("function", function), ("offset", offset), ("file", file), ("line", line)], note)
+    }
+
+    /// M58 B3: `(file, line)` per pc in the cursor's epoch, plus the note explaining an absence. The epoch's
+    /// `SourceMap` is built on the first call that reaches it, from the image `resolve_image` trusts (the
+    /// recorded `LC_UUID`; candidates are the recorded path, then the trace's directory). At most one note
+    /// comes back per call, and only when a pc inside the executable got no line.
+    pub(crate) fn source_lines(&self, pcs: &[u64]) -> (Vec<Option<(String, u32)>>, Option<String>) {
+        let e = self.epoch_index();
+        let mut maps = self.sources.borrow_mut();
+        let Some(slot) = maps.get_mut(e) else { return (vec![None; pcs.len()], None) };
+        if slot.is_none() {
+            let cands: Vec<String> = if e == 0 { self.start_cands.clone() }
+                else { self.epochs.get(e).map(|(ep, _)| String::from_utf8_lossy(&ep.path).into_owned()).into_iter().collect() };
+            let trace_dir = match self.trace.parent() { Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(), _ => std::path::PathBuf::from(".") };
+            let want = crate::image::recorded_uuid(self.sess());
+            let image = crate::image::resolve_for_source(&cands, &trace_dir, want);
+            let text_end = self.syms_at(self.n).exe().map_or(0, |t| t.text_end());
+            *slot = Some(crate::source::SourceMap::new(image, want, text_end));
+        }
+        slot.as_ref().map_or((vec![None; pcs.len()], None), |m| m.lines(pcs))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn frame(function: Option<&str>, pc: u64, offset: Option<u64>) -> J {
+        J::Obj(vec![("pc", hex(pc)), ("function", function.map_or(J::Null, |f| J::Str(f.into()))),
+            ("offset", offset.map_or(J::Null, J::UInt))])
+    }
+
+    #[test] fn a_panic_s_own_assert_failed_is_its_function_start() {
+        // The readme's ledger panic: assert_failed_inner first (not it), then assert_failed+0x54.
+        let legacy = J::Arr(vec![
+            frame(Some("__rustc::rust_panic"), 0x100077ba8, Some(0)),
+            frame(Some("core::panicking::assert_failed_inner"), 0x100079028, Some(0xbc)),
+            frame(Some("core::panicking::assert_failed"), 0x100073308, Some(0x54)),
+            frame(Some("core::panicking::assert_failed"), 0x100074000, Some(0x10)),
+        ]);
+        assert_eq!(assert_failed_start(&legacy), Some(0x100073308 - 0x54));
+        // v0 mangling: the instantiation's readable name carries its type arguments.
+        let v0 = J::Arr(vec![frame(Some("core::panicking::assert_failed::<i64, i64>"), 0x100002010, Some(0x10))]);
+        assert_eq!(assert_failed_start(&v0), Some(0x100002000));
+        // No assert_failed frame (a plain `panic!`), a frame without a symbol, and no frames: none.
+        let plain = J::Arr(vec![frame(Some("core::panicking::panic_fmt"), 0x10, Some(4)), frame(None, 0x20, None)]);
+        assert_eq!(assert_failed_start(&plain), None);
+        assert_eq!(assert_failed_start(&J::Arr(Vec::new())), None);
+        assert!(!is_assert_failed("core::panicking::assert_failed_inner"));
+    }
 
     #[test] fn parses_commands() {
         let cs = parse_script("break 0x1804af834; continue; reverse-stepi 2; x 0x1000 16; where").unwrap();
@@ -1438,6 +2076,31 @@ mod tests {
         // these two cases used to sit in one test where they read as the same thing; they are not.
         assert!(parse_script("frobnicate").is_err());
         assert!(parse_script("threads x").is_err(), "`threads` takes no arguments");
+    }
+
+    #[test]
+    fn exec_text_names_the_exec() {
+        assert_eq!(no_write_since_exec(0x1000, 7), "no write to 0x1000 since the exec at (7, 0)");
+    }
+
+    #[test]
+    fn goto_parses_three_spellings() {
+        for t in ["goto 3 5", "goto (3, 5)", "goto 3:5", "goto (3,5)"] {
+            assert_eq!(parse_script(t).unwrap(), vec![Cmd::Goto(3, 5)], "{t}");
+        }
+        for t in ["goto", "goto 3", "goto 3 x", "goto a:b", "goto 1 2 3", "goto 0 1", "goto -1 2"] {
+            assert!(parse_script(t).is_err(), "{t}");
+        }
+    }
+
+    #[test]
+    fn last_write_parses_len_and_alignment() {
+        assert_eq!(parse_script("last-write 0x1000").unwrap(), vec![Cmd::LastWrite(Operand::Addr(0x1000), 8)]);
+        assert_eq!(parse_script("last-write 0x1004 4").unwrap(), vec![Cmd::LastWrite(Operand::Addr(0x1004), 4)]);
+        assert_eq!(parse_script("last-write rust_panic 1").unwrap(), vec![Cmd::LastWrite(Operand::Sym("rust_panic".into()), 1)]);
+        assert!(parse_script("last-write 0x1000 3").is_err(), "bad len");
+        assert!(parse_script("last-write 0x1004").is_err(), "8-byte misaligned");
+        assert!(parse_script("last-write").is_err() && parse_script("last-write 0x1000 8 8").is_err());
     }
 
     // -------------------------------------------------------------------------------------------
@@ -1503,6 +2166,8 @@ mod tests {
         assert_eq!(parse_script("threads").unwrap(), vec![Cmd::Threads]);
         assert_eq!(parse_script("regs").unwrap(), vec![Cmd::Regs]);
         assert_eq!(parse_script("regs 3").unwrap(), vec![Cmd::RegsOf(3)]);
+        assert_eq!(parse_script("bt; bt 2").unwrap(), vec![Cmd::Bt(None), Cmd::Bt(Some(2))]);
+        assert!(parse_script("bt x").is_err() && parse_script("bt 1 2").is_err());
         assert!(parse_script("regs 1 2").is_err(), "`regs` takes at most one operand");
         assert!(parse_script("regs abc").is_err(), "a thread id must parse as u32");
         assert!(parse_script("threads x").is_err(), "`threads` takes no arguments");

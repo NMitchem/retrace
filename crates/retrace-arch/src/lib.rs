@@ -1,5 +1,6 @@
 // M50 (spec §3c): the wall types and the lines a user sees, and the SDK's syscall names.
 mod sysnames;
+pub use sysnames::syscall_name;
 mod wall;
 pub use wall::*;
 pub mod host;

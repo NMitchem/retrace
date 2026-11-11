@@ -290,8 +290,7 @@ fn regs_of_out_of_range_thread_is_a_usage_error_not_a_panic() {
 
 #[test]
 fn debug_arg_errors_are_usage_not_panics() {
-    for args in [vec!["debug"], vec!["debug", "/nonexistent-but-unread.bin"],
-                 vec!["debug", "/tmp/x.bin", "--script"]] {
+    for args in [vec!["debug"], vec!["debug", "/tmp/x.bin", "--script"]] {
         let out = std::process::Command::new(util::bin()).args(&args)
             .output().expect("spawn");
         assert_eq!(out.status.code(), Some(2), "usage exit for {args:?}: {}",
@@ -299,4 +298,227 @@ fn debug_arg_errors_are_usage_not_panics() {
         assert!(String::from_utf8_lossy(&out.stderr).contains("usage"),
             "usage text for {args:?}");
     }
+}
+
+#[test]
+fn an_unknown_debug_argument_is_bad_input() {
+    // A misspelt flag (`--jsno`) used to be ignored, giving a text summary where JSON was asked for. It is bad input:
+    // one `retrace:` line naming it, exit 2, before the trace is read (this one does not exist).
+    for args in [["debug", "/nonexistent-but-unread.bin", "--jsno"], ["debug", "--jsno", "/nonexistent-but-unread.bin"]] {
+        let out = std::process::Command::new(util::bin()).args(args).output().expect("spawn");
+        let err = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {err}");
+        let lines: Vec<&str> = err.lines().collect();
+        assert_eq!(lines.len(), 1, "{args:?}: one line:\n{err}");
+        assert!(lines[0].starts_with("retrace: ") && lines[0].contains("--jsno") && !lines[0].contains("cannot read"), "{args:?}: {err}");
+        assert!(out.stdout.is_empty(), "{args:?}: nothing on stdout");
+    }
+}
+
+#[test]
+fn debug_of_a_missing_trace_is_bad_input() {
+    // With no script `debug <trace>` runs `summary`; a trace that cannot be read is bad input, before any VM work.
+    let out = std::process::Command::new(util::bin()).args(["debug", "/nonexistent-but-unread.bin"]).output().expect("spawn");
+    assert_eq!(out.status.code(), Some(2), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("cannot read"), "{}", String::from_utf8_lossy(&out.stderr));
+}
+
+fn json_lines(s: &str) -> Vec<serde_json::Value> {
+    s.lines().map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("not JSON ({e}): {l}"))).collect()
+}
+
+#[test]
+fn json_mode_one_object_per_command() {
+    let (rec, trace) = util::record_dynamic(retrace_guest::CRASHY);
+    assert_eq!(rec.code, 139, "record: {}", rec.stderr);
+    let ts = trace.to_str().unwrap();
+    let script = "where; break _main; continue; where; regs";
+    let out = std::process::Command::new(util::bin())
+        .args(["debug", ts, "--json", "--script", script]).output().expect("spawn");
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    let objs = json_lines(&String::from_utf8(out.stdout).unwrap());
+    assert_eq!(objs.len(), 5);
+    for o in &objs { assert_eq!(o["ok"], true, "{o}"); }
+    let (code, text, err) = debug_run(ts, script);
+    assert_eq!(code, 0, "{err}");
+    let where_line = text.lines().rfind(|l| l.starts_with("at (")).unwrap();
+    assert_eq!(objs[3]["output"], serde_json::json!([where_line]));
+    let pos = objs[3]["position"].as_array().unwrap();
+    assert!(pos.len() == 2 && pos.iter().all(|v| v.is_u64()));
+    assert!(objs[3]["pc"].as_str().unwrap().starts_with("0x"));
+}
+
+#[test]
+fn json_mode_error_is_a_json_line_and_exit_5() {
+    let (rec, trace) = util::record_dynamic(retrace_guest::CRASHY);
+    assert_eq!(rec.code, 139, "record: {}", rec.stderr);
+    let out = std::process::Command::new(util::bin())
+        .args(["debug", trace.to_str().unwrap(), "--script", "break nosuchsym", "--json"]).output().expect("spawn");
+    assert_eq!(out.status.code(), Some(5));
+    let objs = json_lines(&String::from_utf8(out.stdout).unwrap());
+    assert_eq!(objs.len(), 1);
+    assert_eq!(objs[0]["ok"], false);
+    assert!(objs[0]["error"].is_string());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("DEBUG ERROR:"));
+}
+
+#[test]
+fn json_mode_escapes_program_text() {
+    // The shell's printf writes a quote, a backslash and a control byte to stderr; `summary --json` must carry them
+    // as one valid line and give them back unchanged.
+    let want = "q\"b\\c\u{1}d";
+    let (rec, trace) = util::record_dynamic_args("/bin/sh", &["-c", "printf 'q\"b\\\\c\\001d\\n' >&2"]);
+    assert_eq!(rec.code, 0, "record: {}", rec.stderr);
+    let out = std::process::Command::new(util::bin())
+        .args(["debug", trace.to_str().unwrap(), "--json"]).output().expect("spawn");
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    let objs = json_lines(&String::from_utf8(out.stdout).unwrap());
+    assert_eq!(objs.len(), 1);
+    let tail = objs[0]["stderr_tail"].as_str().expect("stderr_tail");
+    assert!(tail.contains(want), "the program's characters survive the round trip: {tail:?}");
+    // The text summary shows the same stderr under its header.
+    let text = std::process::Command::new(util::bin()).args(["debug", trace.to_str().unwrap()]).output().expect("spawn");
+    assert_eq!(text.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&text.stdout).into_owned();
+    assert!(text.contains("stderr (last") && text.contains(want), "{text}");
+}
+
+#[test]
+fn json_mode_incomplete_recording_is_a_json_line_and_exit_5() {
+    let (rec, trace) = util::record_dynamic(retrace_guest::CRASHY);
+    assert_eq!(rec.code, 139, "record: {}", rec.stderr);
+    // The same recording without its terminal event: incomplete.
+    let mut ev = retrace_trace::Reader::open(&trace).unwrap();
+    let end = ev.iter().position(|e| matches!(e, retrace_trace::Event::Crash { .. } | retrace_trace::Event::Exit { .. })).expect("a terminal event");
+    ev.truncate(end);
+    let cut = trace.with_extension("cut.bin");
+    let mut w = retrace_trace::Writer::create(&cut).unwrap();
+    for e in &ev { w.append(e).unwrap(); }
+    drop(w);
+    let out = std::process::Command::new(util::bin())
+        .args(["debug", cut.to_str().unwrap(), "--json", "--script", "where"]).output().expect("spawn");
+    assert_eq!(out.status.code(), Some(5), "{}", String::from_utf8_lossy(&out.stderr));
+    let objs = json_lines(&String::from_utf8(out.stdout).unwrap());
+    assert_eq!(objs.len(), 1);
+    assert_eq!(objs[0]["ok"], false);
+    assert!(objs[0]["command"].is_null());
+    assert!(objs[0]["error"].as_str().unwrap().contains("incomplete recording"), "{}", objs[0]);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("DEBUG ERROR:"));
+}
+
+/// M58 B2: a Rust name breaks by its readable form, without its hash, and prints readable.
+#[test]
+fn break_by_readable_rust_name() {
+    if util::cargo::cargo_path().is_none() {
+        util::announce("SKIPPED: cargo is not runnable (break_by_readable_rust_name)");
+        return;
+    }
+    let dir = util::cargo::fresh_dir("readable");
+    let b = util::cargo::cargo_test_under_retrace(util::cargo::LEDGER_MANIFEST, &dir,
+        &["--no-fail-fast", "settling_four_hundred_leaves_the_rest"]);
+    assert_ne!(b.code, Some(0), "the failing test must fail: {}", b.stderr);
+    let trace = std::fs::read_dir(&dir).expect("recordings dir").filter_map(|e| e.ok()).map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|x| x == "retrace")).expect("a recording");
+    let t = trace.to_str().unwrap();
+
+    let (code, out, err) = debug_run(t, "break rust_panic; continue; where");
+    assert_eq!(code, 0, "{err}\n{out}");
+    assert!(out.contains("(__rustc::rust_panic)"), "{out}");
+    assert!(out.contains("breakpoint at 0x"), "{out}");
+    assert!(out.contains("hit 0x"), "{out}");
+    assert!(out.contains("in __rustc::rust_panic"), "{out}");
+
+    let (code, out, err) = debug_run(t, "break ledger::tests::settling_four_hundred_leaves_the_rest");
+    assert_eq!(code, 0, "{err}\n{out}");
+    assert!(out.contains("(ledger::tests::settling_four_hundred_leaves_the_rest)"), "{out}");
+    // The suffix form finds the same function.
+    let (_, out2, _) = debug_run(t, "break tests::settling_four_hundred_leaves_the_rest");
+    let bp = |s: &str| s.lines().find(|l| l.starts_with("breakpoint at")).map(str::to_string);
+    assert!(bp(&out).is_some());
+    assert_eq!(bp(&out), bp(&out2));
+    // And no mangled text leaks into either line.
+    assert!(!out.contains("__ZN") && !out.contains("17h"), "{out}");
+}
+
+/// M58 B3: a stop in the program's own code has a source file and line, from `atos` over the executable on disk.
+#[test]
+fn json_where_has_file_and_line_in_the_program() {
+    if util::cargo::cargo_path().is_none() || !std::path::Path::new("/usr/bin/atos").exists() {
+        util::announce("SKIPPED: cargo or atos is not runnable (json_where_has_file_and_line_in_the_program)");
+        return;
+    }
+    let dir = util::cargo::fresh_dir("fileline");
+    let b = util::cargo::cargo_test_under_retrace(util::cargo::LEDGER_MANIFEST, &dir,
+        &["--no-fail-fast", "settling_four_hundred_leaves_the_rest"]);
+    assert_ne!(b.code, Some(0), "the failing test must fail: {}", b.stderr);
+    let trace = std::fs::read_dir(&dir).expect("recordings dir").filter_map(|e| e.ok()).map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|x| x == "retrace")).expect("a recording");
+    let out = std::process::Command::new(util::bin())
+        .args(["debug", trace.to_str().unwrap(), "--json", "--script",
+               "break ledger::tests::settling_four_hundred_leaves_the_rest; continue; where"]).output().expect("spawn");
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    let objs = json_lines(&String::from_utf8(out.stdout).unwrap());
+    let last = objs.last().unwrap();
+    assert!(last["file"].as_str().is_some_and(|f| f.starts_with('/') && f.ends_with("src/lib.rs")), "{last}");
+    assert!(last["line"].as_u64().is_some_and(|l| l > 0), "{last}");
+    assert!(last.get("source_note").is_none(), "{last}");
+
+    // Ruling P12: a stop in Rust's std has no line, and the note never claims the binary lacks debug info.
+    let out = std::process::Command::new(util::bin())
+        .args(["debug", trace.to_str().unwrap(), "--json", "--script", "break rust_panic; continue; where"]).output().expect("spawn");
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    let objs = json_lines(&String::from_utf8(out.stdout).unwrap());
+    let last = objs.last().unwrap();
+    assert!(last["file"].is_null() && last["line"].is_null(), "{last}");
+    assert_eq!(last["source_note"], "no line information at this address", "{last}");
+}
+
+/// M58 B3: a program rebuilt since the recording is not trusted: no file, no line, and the note says why.
+#[test]
+fn a_rebuilt_binary_gets_no_lines_and_says_why() {
+    let d = std::env::temp_dir().join(format!("retrace-b3-rebuilt-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::copy(retrace_guest::CRASHY, d.join("crashy")).unwrap();
+    let r = util::run_in(&d, &["record", "./crashy"], &[], 120);
+    assert_eq!(r.code, Some(139), "record crashy: {}", r.stderr);
+    std::fs::copy(retrace_guest::HELLO_DYN, d.join("crashy")).unwrap();
+    let out = std::process::Command::new(util::bin()).current_dir(&d)
+        .args(["debug", "crashy.retrace", "--json", "--script", "break _main; continue; where"]).output().expect("spawn");
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    let objs = json_lines(&String::from_utf8(out.stdout).unwrap());
+    let last = objs.last().unwrap();
+    assert!(last["file"].is_null() && last["line"].is_null(), "{last}");
+    assert!(last["source_note"].as_str().is_some_and(|n| n.contains("changed since the recording")), "{last}");
+}
+
+/// M58 final review: `summary` and `last-write` set the user's breakpoints and watches aside and put them back. After
+/// either, from the start again, `continue` stops at the user's breakpoint and then at the user's watch.
+#[test]
+fn user_breakpoints_and_watches_survive_summary_and_last_write() {
+    let (rec, trace) = util::record_dynamic(retrace_guest::CRASHY);
+    assert_eq!(rec.code, 139, "record: {}", rec.stderr);
+    let (st, ptr) = util::discover_crashy_addrs(&trace);
+    let ts = trace.to_str().unwrap();
+    // The two continues after `goto 1 0`, in order: the breakpoint at main's entry, then main's store to `g.ptr`.
+    let after_goto = |out: &str| -> Vec<String> {
+        let (_, tail) = out.split_once("> goto 1 0").unwrap_or_else(|| panic!("no goto:\n{out}"));
+        tail.lines().filter(|l| l.starts_with("hit ")).map(str::to_string).collect()
+    };
+    let check = |what: &str, out: &str| {
+        let hits = after_goto(out);
+        assert!(hits.len() >= 2, "{what}: two hits after the goto:\n{out}");
+        assert!(hits[0].starts_with("hit 0x") && hits[0].contains(" in _main"), "{what}: the user's breakpoint first:\n{out}");
+        assert!(hits[1].starts_with(&format!("hit watch {ptr:#x} ")), "{what}: then the user's watch:\n{out}");
+    };
+    let (code, out, err) = debug_run(ts, &format!("break _main; watch {ptr:#x}; summary; goto 1 0; continue; continue"));
+    assert_eq!(code, 0, "{err}\n{out}");
+    assert!(out.contains("ended: killed by SIGSEGV"), "the summary ran:\n{out}");
+    check("summary", &out);
+    // `last-write` of `g.st`, which `fstat` wrote, from the crash: it finds the write, then the user's stops are back.
+    let (code, out, err) = debug_run(ts, &format!(
+        "break _main; watch {ptr:#x}; continue; continue; continue; last-write {st:#x}; goto 1 0; continue; continue"));
+    assert_eq!(code, 0, "{err}\n{out}");
+    assert!(out.contains(&format!("last write to {st:#x}: syscall ")), "the last-write found fstat's write:\n{out}");
+    check("last-write", &out);
 }

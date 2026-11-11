@@ -237,6 +237,14 @@ impl SymbolTable {
 }
 
 impl SymbolTable {
+    /// The end of this image's `__TEXT`, slid: a pc from the image's base up to it is the image's own code.
+    pub fn text_end(&self) -> u64 { self.text_end }
+
+    /// Every `(addr, raw name)` in `(addr, name)` order. Read-only presentation helper.
+    pub fn iter(&self) -> impl Iterator<Item = (u64, &str)> {
+        self.syms.iter().map(|(a, n)| (*a, n.as_str()))
+    }
+
     /// Every address this image defines under `name`, sorted ascending and deduped.
     ///
     /// **Returns a `Vec`, not an `Option`, and that is the point (M20 S4).** Address → name is a
@@ -278,9 +286,29 @@ fn cstr_at(strs: &[u8], off: usize) -> Option<String> {
 #[derive(Default)]
 pub struct Symbols {
     images: Vec<SymbolTable>,
+    /// Presentation only: the base of `images[0]`, so `exe` can tell the executable from dyld alone.
+    first_base: u64,
 }
 
 impl Symbols {
+    /// A one-image (executable) table from literal names, for presentation-layer unit tests.
+    #[doc(hidden)]
+    pub fn from_names(names: &[(u64, &str)]) -> Symbols {
+        let mut syms: Vec<(u64, String)> = names.iter().map(|(a, n)| (*a, n.to_string())).collect();
+        syms.sort();
+        Symbols { images: vec![SymbolTable { syms, text_end: u64::MAX }], first_base: EXE_BASE }
+    }
+
+    /// The executable's table: `images[0]` when it was built from `EXE_BASE`.
+    pub fn exe(&self) -> Option<&SymbolTable> {
+        if self.first_base == EXE_BASE { self.images.first() } else { None }
+    }
+
+    /// Every `(addr, raw name)` of every image, executable first. Read-only presentation helper.
+    pub fn iter_all(&self) -> impl Iterator<Item = (u64, &str)> {
+        self.images.iter().flat_map(|t| t.iter())
+    }
+
     /// Build from a snapshot's regions. Never panics and never fails: an image that is absent or
     /// stripped simply contributes nothing, so a static guest and a `jq` recording both yield an
     /// empty `Symbols` that formats every address as bare hex.
@@ -292,11 +320,14 @@ impl Symbols {
     /// reintroduce the external-file dependency this design exists to avoid. That is the wall, and
     /// `cache_symbol_e2e` is parked at it.
     pub fn from_snapshot(mem: &[Region]) -> Symbols {
-        let images = [retrace_box::EXE_BASE, retrace_box::DYLD_BASE]
-            .into_iter()
-            .filter_map(|base| SymbolTable::for_image(mem, base))
-            .collect();
-        Symbols { images }
+        let (mut images, mut first_base) = (Vec::new(), 0);
+        for base in [retrace_box::EXE_BASE, retrace_box::DYLD_BASE] {
+            if let Some(t) = SymbolTable::for_image(mem, base) {
+                if images.is_empty() { first_base = base; }
+                images.push(t);
+            }
+        }
+        Symbols { images, first_base }
     }
 
     /// M54 §3i (C8): the symbols of an exec epoch, from the slices an `Event::Exec` carries. Each
@@ -310,11 +341,14 @@ impl Symbols {
             retrace_guest::try_parse_macho(bytes).map(|l| l.segments.into_iter()
                 .map(|s| Region { ipa: s.vaddr.wrapping_add(base), bytes: s.data }).collect()).unwrap_or_default()
         };
-        let images = [(image, retrace_box::EXE_BASE, 0), (dylinker, retrace_box::DYLD_BASE, retrace_box::DYLD_BASE)]
-            .into_iter()
-            .filter_map(|(bytes, header, base)| SymbolTable::for_image(&staged(bytes, base), header))
-            .collect();
-        Symbols { images }
+        let (mut images, mut first_base) = (Vec::new(), 0);
+        for (bytes, header, base) in [(image, retrace_box::EXE_BASE, 0), (dylinker, retrace_box::DYLD_BASE, retrace_box::DYLD_BASE)] {
+            if let Some(t) = SymbolTable::for_image(&staged(bytes, base), header) {
+                if images.is_empty() { first_base = header; }
+                images.push(t);
+            }
+        }
+        Symbols { images, first_base }
     }
 
     /// `(name, offset)` from whichever image claims the address.
@@ -607,7 +641,7 @@ mod tests {
     #[test]
     fn format_always_contains_the_raw_address() {
         let img = Img::new(0x1_0000_0000, 0).sym(0x1_0000_0460, "_main");
-        let s = Symbols { images: vec![table(&img)] };
+        let s = Symbols { images: vec![table(&img)], first_base: EXE_BASE };
         assert_eq!(s.format(0x1_0000_0460), "0x100000460 (_main)");
         assert_eq!(s.format(0x1_0000_0470), "0x100000470 (_main+0x10)");
         assert_eq!(s.format(0x9_9999_9999), "0x999999999");
