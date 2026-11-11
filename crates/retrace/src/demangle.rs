@@ -5,7 +5,9 @@ use retrace_core::symbols::Symbols;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::Write;
+use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The readable form of a Mach-O symbol, or `None` when it equals the raw one (C names, Swift).
 /// Rust names (v0 `_R…`, legacy `_ZN…17h<hash>E`) drop the hash; any other `_Z…` is C++ and is
@@ -29,24 +31,45 @@ fn rust(s: &str) -> Option<String> {
 }
 
 /// One `c++filt` call for the whole batch, names on stdin one per line. Any failure: all `None`.
+/// A failure says why once per process, on stderr (stdout stays pure for `--json`).
 pub fn cxx_batch(raws: &[&str]) -> Vec<Option<String>> {
-    let none = || vec![None; raws.len()];
-    if raws.is_empty() { return Vec::new(); }
-    let Ok(mut child) = Command::new("/usr/bin/c++filt")
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn() else { return none() };
+    static SAID: AtomicBool = AtomicBool::new(false);
+    let (out, why) = cxx_batch_with(Path::new("/usr/bin/c++filt"), raws);
+    notice_once(&SAID, why, &mut |m| eprintln!("{m}"));
+    out
+}
+
+/// Emit `reason` through `sink` unless a notice was already emitted through `said`.
+fn notice_once(said: &AtomicBool, reason: Option<String>, sink: &mut dyn FnMut(&str)) {
+    if let Some(r) = reason {
+        if !said.swap(true, Ordering::Relaxed) {
+            sink(&format!("retrace: c++filt failed ({r}); C++ names are shown mangled"));
+        }
+    }
+}
+
+/// `cxx_batch` with the tool's path given; the second value is why it failed, if it did.
+fn cxx_batch_with(tool: &Path, raws: &[&str]) -> (Vec<Option<String>>, Option<String>) {
+    if raws.is_empty() { return (Vec::new(), None); }
+    let fail = |why: String| (vec![None; raws.len()], Some(why));
+    let mut child = match Command::new(tool)
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn() {
+        Ok(c) => c,
+        Err(e) => return fail(format!("{}: {e}", tool.display())),
+    };
     let input: String = raws.iter().map(|r| format!("{r}\n")).collect();
-    let Some(mut stdin) = child.stdin.take() else { return none() };
+    let Some(mut stdin) = child.stdin.take() else { return fail("no stdin".into()) };
     // Feed from a thread: a large batch must not deadlock against the pipe's capacity.
     // (`std::thread::Thread` is denied for the recorder; this is presentation code, and the
     // spawn builder is not the denied type.)
     let writer = std::thread::spawn(move || { let _ = stdin.write_all(input.as_bytes()); });
-    let Ok(out) = child.wait_with_output() else { return none() };
+    let Ok(out) = child.wait_with_output() else { return fail("could not wait for it".into()) };
     let _ = writer.join();
-    if !out.status.success() { return none(); }
+    if !out.status.success() { return fail(format!("exit status {}", out.status)); }
     let text = String::from_utf8_lossy(&out.stdout);
     let lines: Vec<&str> = text.lines().collect();
-    if lines.len() != raws.len() { return none(); }
-    raws.iter().zip(lines).map(|(r, l)| (l != *r && !l.is_empty()).then(|| l.to_string())).collect()
+    if lines.len() != raws.len() { return fail("its output did not match its input".into()); }
+    (raws.iter().zip(lines).map(|(r, l)| (l != *r && !l.is_empty()).then(|| l.to_string())).collect(), None)
 }
 
 /// Drop a C++ parameter list: `ns::f(int)` becomes `ns::f`, `ns::g(int) const` too.
@@ -157,6 +180,22 @@ mod tests {
         assert_eq!(r.len(), 2);
         assert!(r[0].is_some());
         assert_eq!(r[1], None);
+    }
+
+    #[test] fn a_missing_tool_degrades_and_says_why_once() {
+        let missing = Path::new("/nonexistent/c++filt");
+        let said = AtomicBool::new(false);
+        let mut lines: Vec<String> = Vec::new();
+        for _ in 0..2 {
+            let (out, why) = cxx_batch_with(missing, &["__ZN2ns1fEi", "_main"]);
+            assert_eq!(out, vec![None, None]);
+            assert!(why.as_deref().is_some_and(|w| w.contains("/nonexistent/c++filt")), "{why:?}");
+            notice_once(&said, why, &mut |m| lines.push(m.to_string()));
+        }
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].starts_with("retrace: c++filt failed (") && lines[0].ends_with("C++ names are shown mangled"));
+        // A working tool reports no reason.
+        assert_eq!(cxx_batch_with(Path::new("/usr/bin/c++filt"), &["_main"]).1, None);
     }
 
     fn syms() -> Symbols {
