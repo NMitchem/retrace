@@ -11,5 +11,5 @@ fn fee_for(amount: i64) -> i64 {
 
 pub(crate) fn charge(balance: &mut i64, amount: i64) {
     let fee = fee_for(amount);
-    *balance -= amount + fee; // M58-WRITE
+    *balance -= amount + fee;
 }

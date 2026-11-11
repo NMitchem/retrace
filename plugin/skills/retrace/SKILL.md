@@ -1,6 +1,6 @@
 ---
 name: retrace
-description: Use when a Rust, C or C++ test or program on an Apple Silicon Mac crashes or fails because a value is wrong, and you need to know what set that value, from which line and on which thread, or a crash happens far from its cause, or a failure is rare and you want to keep the one run that showed it. retrace records the run once and replays it identically every time, so you can stop at the failure and run backwards to the last write of a value. Do not use it for logic errors that reading the code and one rerun will solve, for Python or JavaScript bugs, or for programs that open network sockets, start child processes or need a GUI.
+description: Use when a Rust, C or C++ test or program on an Apple Silicon Mac crashes or fails because a value is wrong, and you need to know what set that value, from which line and on which thread, or a crash happens far from its cause, or a failure is rare and you want to keep the one run that showed it. retrace records the run once and replays it identically every time, so you can stop at the failure and run backwards to the last write of a value. Do not use it for logic errors that reading the code and one rerun will solve, for Python or JavaScript bugs, or for programs that serve or wait on network sockets, start child processes or need a GUI.
 ---
 
 # Debugging a recorded run with retrace
@@ -16,15 +16,19 @@ Silicon and macOS 26 or 27.
 - A test fails because a value is wrong, and the code that set it is not obvious.
 - A crash or panic happens long after the mistake that caused it.
 - A failure is rare. Once recorded, it can be examined as often as you like.
-- You cannot add prints, or adding them changes the behavior.
+- You cannot add prints to the program.
 
 ## When not to use it
 
 - A logic error that reading the code and one rerun will solve. Recording costs more than a rerun.
 - Python or JavaScript bugs. retrace records the interpreter, so you would be debugging its machine
   code, not your script.
-- Programs that open network sockets, start child processes or need a GUI. These stop at a wall
-  (see "Exit codes").
+- Network servers: a listener stops at `bind`, a wall (see "Exit codes"). A program that waits on a
+  network socket through kqueue, `poll` or `select` is refused too (this is from reading retrace's
+  code; no network client has been run).
+- Programs that start other processes: `posix_spawn`, `system()` and `popen()` stop at a wall, and
+  `fork` fails with `EAGAIN` (retrace prints a `retrace: refused:` line and the program goes on).
+- GUI programs.
 - Races that need preemption. Guest threads switch only when one blocks, so a race that depends on
   the scheduler interrupting a thread will not reproduce.
 
@@ -46,10 +50,12 @@ A Cargo test suite, through cargo's runner. Set it in the environment, not in
 `.cargo/config.toml`, where it would also apply to `cargo run`:
 
 ```sh
-CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER="retrace record" RETRACE_DIR=target/retrace cargo test --no-fail-fast
+CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER="retrace record" RETRACE_DIR="$PWD/target/retrace" cargo test --no-fail-fast
 ```
 
-`RETRACE_DIR` is where a recording made without `-o` goes (created if missing). Use
+`RETRACE_DIR` is where a recording made without `-o` goes (created if missing). It is absolute so
+that in a workspace, where cargo runs each member's tests in that member's directory, every member
+records into the root's `target/`. Use
 `--no-fail-fast`: without it cargo stops after the first failing test binary and the rest are never
 recorded. Facts about this form:
 

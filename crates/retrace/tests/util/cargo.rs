@@ -8,6 +8,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub const LEDGER_MANIFEST: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../retrace-guest/agent/ledger/Cargo.toml");
 pub const INVENTORY_MANIFEST: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../retrace-guest/agent/inventory/Cargo.toml");
 
+/// The statement in each fixture that stores the wrong value, exactly as written. Tests find its line by this
+/// text (the fixtures carry no marker comment, since the README shows their source).
+pub const LEDGER_BAD_STORE: &str = "*balance -= amount + fee;";
+pub const INVENTORY_BAD_STORE: &str = "*slot += cases * CASE + loose;";
+
 /// Is cargo runnable here? (The tests skip loudly when it is not.)
 pub fn cargo_path() -> Option<String> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
@@ -44,7 +49,7 @@ pub fn cargo_test_under_retrace(manifest: &str, retrace_dir: &Path, extra: &[&st
 }
 
 /// A copy of a fixture crate's sources (everything beside its manifest but `target/`) in a fresh scratch directory,
-/// the way the README has a reader copy the installed example.
+/// under the crate's own directory name (`…/ledger`), the way the README has a reader copy the installed example.
 pub fn copy_fixture(manifest: &str, tag: &str) -> std::path::PathBuf {
     fn copy_tree(src: &Path, dst: &Path) {
         std::fs::create_dir_all(dst).unwrap_or_else(|e| panic!("mkdir {}: {e}", dst.display()));
@@ -55,21 +60,22 @@ pub fn copy_fixture(manifest: &str, tag: &str) -> std::path::PathBuf {
             if e.file_type().unwrap().is_dir() { copy_tree(&s, &d) } else { std::fs::copy(&s, &d).unwrap_or_else(|e| panic!("{}: {e}", s.display())); }
         }
     }
-    let dst = fresh_dir(tag);
-    copy_tree(Path::new(manifest).parent().unwrap(), &dst);
+    let src = Path::new(manifest).parent().unwrap();
+    let dst = fresh_dir(tag).join(src.file_name().unwrap());
+    copy_tree(src, &dst);
     dst
 }
 
 /// The README's recipe as a reader runs it, in `dir` (a crate's root): `cargo test --offline --no-fail-fast` with
-/// the runner `retrace record` and `RETRACE_DIR=target/retrace` exactly as written, relative, so cargo's own default
-/// target directory and the package-relative trace path are the ones the README shows; plus `env`. stdout and
-/// stderr share one file, interleaved as a terminal shows them. Returns cargo's exit code (`None` when the 600 s
+/// the runner `retrace record` and `RETRACE_DIR="$PWD/target/retrace"`, `$PWD` being `dir` as the shell would expand
+/// it, with cargo's own default target directory, so the paths are the ones the README shows; plus `env`. stdout
+/// and stderr share one file, interleaved as a terminal shows them. Returns cargo's exit code (`None` when the 600 s
 /// bound fired) and that output.
 pub fn readme_recipe_in(dir: &Path, env: &[(&str, &str)]) -> (Option<i32>, String) {
     let cargo = cargo_path().expect("cargo");
     let mut vars: Vec<(String, String)> = vec![
         ("CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER".into(), format!("{} record", bin())),
-        ("RETRACE_DIR".into(), "target/retrace".into()),
+        ("RETRACE_DIR".into(), dir.join("target/retrace").to_str().expect("a UTF-8 path").into()),
     ];
     for k in ["PATH", "HOME", "CARGO_HOME", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN", "TMPDIR"] {
         if let Ok(v) = std::env::var(k) { vars.push((k.into(), v)); }

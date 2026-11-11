@@ -45,7 +45,7 @@ mod tests {
         let mut s = Shelf::new(5);
         s.receive(2, 3);
         if std::env::var("INVENTORY_SHOW_ADDR").as_deref() == Ok("1") {
-            eprintln!("M58-ADDR on_hand {:p}", &s.on_hand);
+            eprintln!("on_hand at {:p}", &s.on_hand);
         }
         assert_eq!(s.on_hand, 32);
     }

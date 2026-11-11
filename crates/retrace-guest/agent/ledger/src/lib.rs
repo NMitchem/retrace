@@ -58,7 +58,7 @@ mod tests {
         l.deposit(500);
         l.settle(400);
         if std::env::var("LEDGER_SHOW_ADDR").as_deref() == Ok("1") {
-            eprintln!("M58-ADDR balance {:p}", &l.balance);
+            eprintln!("balance at {:p}", &l.balance);
         }
         assert_eq!(l.balance, 100);
     }

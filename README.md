@@ -5,7 +5,7 @@ thread, and get the same answer every time.**
 
 retrace records a run of a program or a test suite on an Apple Silicon Mac and replays it exactly. In
 the replay you can stop where it failed and run backwards to the instruction that last wrote a value,
-and lldb names the function, the file and line, and the thread.
+and lldb names the function, its file and line (for a program built with debug info) and the thread.
 
 That suits a coding agent, Claude Code or any other. A live debugger session is a conversation the
 agent has to steer one prompt at a time. A recording is a file: each question is its own command, and
@@ -16,10 +16,16 @@ What it needs and what it runs:
 
 - macOS 26 or 27 on Apple Silicon.
 - Rust, C and C++ programs, including the test binaries `cargo test` builds, and Swift programs that
-  use neither Dispatch queues nor async/await.
-- Not programs that open network sockets, start other processes or need a GUI. They stop at a wall:
-  one `retrace: unsupported: …` line and exit status 4. [`docs/walls.md`](docs/walls.md) explains
-  each kind.
+  use neither Dispatch queues nor async/await (a C program's GCD queues work, but Swift's
+  `DispatchQueue` reaches a libdispatch call retrace doesn't model).
+- Not network servers: a listener stops at `bind`. A program that waits on a network socket through
+  kqueue, `poll` or `select` is refused too (this is from reading the code; no network client has
+  been run).
+- Not programs that start other processes: `posix_spawn`, `system()` and `popen()` stop at a wall, and
+  `fork` fails with `EAGAIN`.
+- Not GUI programs.
+- A wall is one `retrace: unsupported: …` line and exit status 4. [`docs/walls.md`](docs/walls.md)
+  explains each kind.
 - Threads run one at a time and switch only when one blocks, so a race that needs preemption won't
   reproduce.
 
@@ -32,7 +38,7 @@ It's a technical preview.
   used.
 - A failure you finally caught once and don't want to lose. The recording replays the same way every
   time.
-- A program you can't add prints to, or one where adding them changes what happens.
+- A program you can't add prints to.
 
 And when not to:
 
@@ -75,7 +81,7 @@ For an `AGENTS.md` or `CLAUDE.md`, these lines tell an agent that retrace is the
 ```markdown
 retrace records a failing Rust, C or C++ program or test on an Apple Silicon Mac, once, and replays it exactly, so you can ask the recording which instruction last wrote a value and from which line.
 Reach for it when a value is wrong and the code that set it is not obvious, or a crash happens long after its cause. Skip it for logic errors a rerun will solve, Python or JavaScript bugs, and programs that use the network, child processes or a GUI.
-Record: `CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER="retrace record" RETRACE_DIR=target/retrace cargo test --no-fail-fast`, or `retrace record ./prog`. Then query it with `retrace lldb <trace>`.
+Record: `CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER="retrace record" RETRACE_DIR="$PWD/target/retrace" cargo test --no-fail-fast`, or `retrace record ./prog`. Then query it with `retrace lldb <trace>`.
 The full recipe is the retrace skill (`claude plugin install retrace@retrace`), also installed at `$(brew --prefix)/share/retrace/skills/retrace/SKILL.md`.
 ```
 
@@ -91,14 +97,15 @@ cp -R "$(brew --prefix)/share/retrace/examples/ledger" . && cd ledger
 ### Record
 
 ```sh
-CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER="retrace record" RETRACE_DIR=target/retrace cargo test --no-fail-fast
+CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER="retrace record" RETRACE_DIR="$PWD/target/retrace" cargo test --no-fail-fast
 ```
 
 The runner variable makes cargo start each test binary under `retrace record`. `RETRACE_DIR` is where
-the recordings go; a relative path is taken from the package's directory, which is where cargo runs
-the tests. `--no-fail-fast` keeps cargo going after the first failing test binary, so every binary is
-recorded. Set these in the environment, not in `.cargo/config.toml`, where the runner would also apply
-to `cargo run`. The output, abridged:
+the recordings go. It is absolute so that in a workspace, where cargo runs each member's tests in that
+member's directory, every member records into the root's `target/`. `--no-fail-fast` keeps cargo going
+after the first failing test binary, so every binary is recorded. Set these in the environment, not in
+`.cargo/config.toml`, where the runner would also apply to `cargo run`. The output, abridged (`…` is
+the directory you copied `ledger` into):
 
 ```
      Running unittests src/lib.rs (target/debug/deps/ledger-844be10fb1d57b0c)
@@ -113,18 +120,19 @@ assertion `left == right` failed
   left: 99
  right: 100
 ...
-retrace: saved the recording to target/retrace/ledger-844be10fb1d57b0c.retrace
+retrace: saved the recording to …/ledger/target/retrace/ledger-844be10fb1d57b0c.retrace
 error: test failed, to rerun pass `--lib`
      Running tests/flow.rs (target/debug/deps/flow-b3e1a684154f3fc3)
 ...
-retrace: saved the recording to target/retrace/flow-b3e1a684154f3fc3.retrace
+retrace: saved the recording to …/ledger/target/retrace/flow-b3e1a684154f3fc3.retrace
 ...
 error: 1 target failed:
     `--lib`
 ```
 
-Each test binary gets its own recording, named after the binary. The failing test's recording is the
-one saved under its `Running` line. cargo exits as it would without retrace, 101 here. Doctests are
+Each test binary gets its own recording, named after the binary, hash included. The failing test's
+recording is the one saved under its `Running` line. Your hashes, and the addresses in the commands
+below, may differ from these: use the ones your own run prints. cargo exits as it would without retrace, 101 here. Doctests are
 recorded too, all as `rust_out.retrace`, each overwriting the last, with no saved line. A test filter
 (`cargo test <name>`) still records every test binary.
 
@@ -160,7 +168,7 @@ so `left=0x00000000304125c0` is the address of `l.balance`, the value that came 
 
 ### Who wrote it?
 
-Watch those 8 bytes and run backwards from the panic:
+Watch those 8 bytes (the `left=` address your run shows) and run backwards from the panic:
 
 ```sh
 retrace lldb target/retrace/ledger-844be10fb1d57b0c.retrace -- --batch -o 'breakpoint set -n rust_panic' -o 'process continue' -o 'watchpoint set expression -w write -s 8 -- 0x304125c0' -o 'process continue -R' -o 'bt 4'
@@ -176,7 +184,7 @@ retrace lldb target/retrace/ledger-844be10fb1d57b0c.retrace -- --batch -o 'break
    11
    12  	pub(crate) fn charge(balance: &mut i64, amount: i64) {
    13  	    let fee = fee_for(amount);
--> 14  	    *balance -= amount + fee; // M58-WRITE
+-> 14  	    *balance -= amount + fee;
    15  	}
 (lldb) bt 4
 * thread #2, stop reason = watchpoint 1
@@ -207,12 +215,12 @@ value, print its address from the test with `{:p}` and record again. The address
 address in that recording:
 
 ```rust
-eprintln!("{:p}", &l.balance);
+eprintln!("balance at {:p}", &l.balance);
 ```
 
 libtest shows a failing test's output with its failure. The example crate has this line behind an
 environment variable: recorded with `LEDGER_SHOW_ADDR=1` set, its failure output starts with
-`M58-ADDR balance 0x304125c0`, the same address as `left=`.
+`balance at 0x304125c0`, the address `left=` shows in that recording.
 
 ## Commands and exit codes
 
@@ -224,7 +232,9 @@ environment variable: recorded with `LEDGER_SHOW_ADDR=1` set, its failure output
 | `retrace debug <trace> --script '<cmds>'` | the built-in debugger, without lldb: `continue`, `reverse-continue`, `stepi`, `reverse-stepi`, `break`, `watch`, `where`, `regs`, `threads`, `x`. It works in addresses and symbols, with no file and line |
 | `retrace gdbserver <trace> [--port <n>] [--exe <path>]` | serve the recording to an lldb you start yourself |
 
-Every command ends in one of these exit statuses:
+Every command ends in one of these exit statuses, except `retrace lldb` once lldb has started: it
+then exits with lldb's own status, which under `--batch` is 0 even when a crash stop made lldb drop
+the remaining `-o` commands.
 
 | Status | Meaning |
 |---|---|
@@ -245,9 +255,10 @@ retrace: unsupported: posix_spawn of a child process (syscall 244) - see https:/
 ```
 
 The limit is retrace's, and the program has not failed: debug it some other way, or change it so it
-doesn't make that call under test. Under `cargo test` the line shows in cargo's
-output, followed by cargo's `process didn't exit successfully: … (exit status: 4)`, and the recording
-is still saved. A recording that ends at a wall replays up to the wall, but `retrace debug`, `retrace
+doesn't make that call under test. Under `cargo test` the line shows in cargo's output, followed by
+cargo's `process didn't exit successfully: … (exit status: 4)`, and the recording is still saved. A
+call that retrace answers with an error the program can handle, such as `fork`, is not a wall: it
+prints `retrace: refused: <call>, returned <error> to the program` and the recording goes on. A recording that ends at a wall replays up to the wall, but `retrace debug`, `retrace
 lldb` and `retrace gdbserver` refuse it with exit 5: debugging up to a wall isn't supported. To report
 a wall or a bug, record the program again with `RETRACE_TRACE=1` set, which logs every trap.
 
@@ -278,9 +289,10 @@ limit and the measurement behind it. These are the ones you'll hit first:
   Xcode selected, an `xcrun` shim such as `/usr/bin/git` can start a child first (when xcrun's cache is
   cold), which stops at that wall; run the tool itself or select the Command Line Tools.
 - Command-line programs only. XPC service lookups, I/O Kit and GUI frameworks aren't modelled, and
-  kqueue, `poll` and `select` readiness cover only a program's own pipes and `socketpair`s, so nothing that waits on a
-  network socket, a terminal or an inherited descriptor runs; a tokio program that listens stops at `bind`,
-  and one that connects stops when it first waits on its socket. A blocking read or write that has to wait for another thread to feed or drain a pipe or
+  kqueue, `poll` and `select` readiness cover only a program's own pipes and `socketpair`s, so waiting on a
+  terminal, an inherited descriptor or a network socket is refused (the network case is from reading the
+  code: `socket` and `connect` are forwarded, but no network client has been run). A tokio program that
+  listens stops at `bind`. A blocking read or write that has to wait for another thread to feed or drain a pipe or
   socket stops at a wall, and so does a handled signal sent to a thread blocked in a condition variable or mutex.
 - A syscall or Mach message retrace has no model for stops the recording at a wall. In the latest
   sweep, 46 of the 54 Apple binaries in the committed sample recorded and replayed with native's
@@ -294,8 +306,8 @@ limit and the measurement behind it. These are the ones you'll hit first:
   MiB, and node's `console.log(1)` is about 501 MiB because retrace backs V8's address-space
   reservations in full. Delete them when you're done. The format isn't stable, and recordings from an
   older retrace are rejected.
-- Debugging goes through lldb for file and line, which come from the program's own debug info (the
-  loop above uses a Cargo dev profile's). lldb has no Rust language plugin, so it shows Rust variables
+- Debugging goes through lldb for file and line, which come from the program's own debug info
+  (measured with a Cargo dev profile, and with C and C++ built with `-g`). lldb has no Rust language plugin, so it shows Rust variables
   only in part, which is why the loop works with addresses. `retrace debug` has no file and line and no
   backtraces. Under lldb you get at most six breakpoints and four watchpoints (the hardware's),
   watchpoints trigger on writes only, each `process continue -R` replays forward from the start of the
@@ -356,7 +368,10 @@ crash, lldb drops the remaining `-o` commands and exits 0 without saying so, whi
 retrace lldb crashy.retrace -- --batch -o 'process continue' -k 'bt' -k 'watchpoint set expression -w write -s 8 -- 0x1000080b0' -k 'process continue -R' -k 'bt'
 ```
 
-`lldbbatch_e2e` runs this, and checks that an `-o` command after the crash is dropped.
+`lldbbatch_e2e` runs this, and checks that an `-o` command after the crash is dropped. Built with `-g`
+(`clang -g -o crashy crashy.c`, which also writes `crashy.dSYM` beside it), the same stops name source
+lines instead of instructions: the crash at `crashy.c:31` and the store at `crashy.c:30`. The test checks
+both, with `crashy.c` compiled as C and as C++.
 
 ## How it works
 
@@ -395,8 +410,8 @@ That model covers:
 watchpoints, `bt`, registers, memory and threads.
 
 In short, it's rr for macOS. rr is the record-and-replay debugger for Linux, and retrace does the same
-job for macOS programs, with two differences: threads switch only when one blocks, and a program
-can't start a child process.
+job for macOS programs. The main differences are that threads switch only when one blocks and that a
+program can't start a child process.
 
 The original design is in
 [`docs/superpowers/specs/2026-07-05-retrace-macos-record-replay-design.md`](docs/superpowers/specs/2026-07-05-retrace-macos-record-replay-design.md).
