@@ -1,6 +1,6 @@
 ---
 name: retrace
-description: Use when a Rust, C or C++ test or program on an Apple Silicon Mac crashes or fails because a value is wrong, and you need to know what set that value, from which line and on which thread, or a crash happens far from its cause, or a failure is rare and you want to keep the one run that showed it. retrace records the run once and replays it identically every time; retrace debug then says how the run ended and finds the last write to a value, with its function, file and line, thread and backtrace, as text or JSON. If the source shows the bug at a glance, read the source instead; retrace pays off when the value was written out of sight of the failing assert (in another module, on another thread, by one of many writers, or long before the check), when the failure does not reproduce on demand, or for a crash. Do not use it for Python or JavaScript bugs, or for programs that serve or wait on network sockets, start child processes or need a GUI.
+description: Use when a Rust, C or C++ test or program on an Apple Silicon Mac crashes or fails because a value is wrong, and you need to know what set that value, from which line and on which thread, or a crash happens far from its cause, or a failure is rare and you want to keep the one run that showed it. retrace records the run once and replays it identically every time. retrace debug then says how the run ended and finds the last write to a value, with its function, file and line, thread and backtrace, as text or JSON. If the source shows the bug at a glance, read the source instead. retrace pays off when the value was written out of sight of the failing assert (in another module, on another thread, by one of many writers, or long before the check), when the failure doesn't reproduce on demand, or for a crash. Don't use it for Python or JavaScript bugs, or for programs that serve or wait on network sockets, start child processes or need a GUI.
 ---
 
 # Debugging a recorded run with retrace
@@ -8,7 +8,7 @@ description: Use when a Rust, C or C++ test or program on an Apple Silicon Mac c
 retrace runs a program inside a small virtual machine, records everything the outside world gave it
 (system calls, signals, the kernel's writes to memory), and can replay the run bit for bit. Each
 question about the recording is one command: how did the run end, which instruction last wrote this
-value, from which line, on which thread. A recording gives the same answer every time. It is the
+value, from which line, on which thread. A recording gives the same answer every time. It's the
 macOS counterpart of rr on Linux. It needs Apple Silicon and macOS 26 or 27.
 
 ## When to use it
@@ -16,11 +16,11 @@ macOS counterpart of rr on Linux. It needs Apple Silicon and macOS 26 or 27.
 If the source shows the bug at a glance, read the source. retrace pays off when the wrong value was
 written out of sight of the assert that caught it.
 
-- A test fails because a value is wrong, and the code that set it is not obvious: it is in another
+- A test fails because a value is wrong, and the code that set it isn't obvious: it's in another
   module, on another thread, one of many writers, or long before the check.
 - A crash or panic happens long after the mistake that caused it.
-- A failure is rare or does not reproduce on demand. Once recorded, it can be examined at will.
-- You cannot add prints to the program.
+- A failure is rare or doesn't reproduce on demand. Once recorded, it can be examined at will.
+- You can't add prints to the program.
 
 ## When not to use it
 
@@ -28,13 +28,13 @@ written out of sight of the assert that caught it.
 - Python or JavaScript bugs: retrace records the interpreter, so you would debug its machine code.
 - Network servers. `bind`, `listen` and `accept` are walls (see "Read the result"), and tokio's TCP and
   Unix listener tests stop at `bind`. `socket` and `connect` are forwarded, but waiting on such a socket
-  through kqueue, `poll` or `select` is refused (this is from reading retrace's code; no network client
+  through kqueue, `poll` or `select` is refused (this is from reading retrace's code: no network client
   has been run).
 - Programs that start other processes: `posix_spawn`, `system()` and `popen()` stop at a wall, and
   `fork` fails with `EAGAIN` (retrace prints a `retrace: refused:` line and the program goes on).
 - GUI programs.
 - Races that need preemption. Guest threads switch only when one blocks, so a race that depends on
-  the scheduler interrupting a thread will not reproduce.
+  the scheduler interrupting a thread won't reproduce.
 
 Recordings are tens to hundreds of MiB. Delete them when you are done (last section).
 
@@ -58,7 +58,7 @@ A Cargo test suite, through cargo's runner. Set it in the environment, not in
 CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER="retrace record" RETRACE_DIR="$PWD/target/retrace" cargo test --no-fail-fast
 ```
 
-`RETRACE_DIR` is where a recording made without `-o` goes (created if missing). It is absolute so
+`RETRACE_DIR` is where a recording made without `-o` goes (created if missing). It's absolute so
 that in a workspace, where cargo runs each member's tests in that member's directory, every member
 records into the root's `target/`. Use `--no-fail-fast`: without it cargo stops after the first
 failing test binary and the rest are never recorded. Facts about this form:
@@ -97,9 +97,9 @@ stdout (last 20 lines):
 
 - `ended:` is `exited with <code>`, `killed by <signal>`, or for a crash `killed by <signal>, fault at <address>`.
 - Each Rust panic, a caught one included and up to 16, comes with its position `(n, k)`, its thread
-  and its backtrace. A frame in the program's own code has its file and line; paths are absolute.
+  and its backtrace. A frame in the program's own code has its file and line, and paths are absolute.
 - A failing `assert_eq!` adds the addresses of the two values it compared. For `assert_eq!(x.field, 100)`,
-  `left` is the field itself. For `assert_eq!(f(), x)` it is a temporary, whose last write is on the
+  `left` is the field itself. For `assert_eq!(f(), x)` it's a temporary, whose last write is on the
   assert's own line: watch where the value lives instead, by its `{:p}` address (below).
 - The last 20 lines of the program's stdout and stderr follow. libtest prints a failing test's panic
   message on stdout.
@@ -108,10 +108,10 @@ stdout (last 20 lines):
 - `summary` leaves the cursor at the end of the recording, which for a crash is the faulting
   instruction. `goto` goes back to a panic.
 - `thread N` is retrace's own index: 0 is the program's main thread, then threads in the order they
-  were created. It does not match the number in libtest's `thread '<name>' (1048578)`, which is Rust's
+  were created. It doesn't match the number in libtest's `thread '<name>' (1048578)`, which is Rust's
   `ThreadId`, or lldb's `thread #N`.
 - Only the program the recording started as is searched for panics. If it execs another program, the
-  new program's panics are not listed.
+  new program's panics aren't listed.
 
 ### Who wrote this value
 
@@ -122,10 +122,10 @@ retrace debug <trace> --script 'goto <n> <k>; last-write <address> <size>'
 `<n> <k>` is the panic's position and `<address>` the left operand's address, both from the summary.
 `<size>` is the size of the left side's type in bytes, from the assert line or the field's declaration
 (8 if omitted): 1 for `u8`, `i8`, `bool`; 2 for `u16`, `i16`; 4 for `u32`, `i32`, `f32`, `char`; 8 for
-`u64`, `i64`, `usize`, `isize`, `f64`, a reference or a pointer. retrace refuses any other size (`watch len must be 1, 2, 4, or 8`) and an address that is not a multiple
+`u64`, `i64`, `usize`, `isize`, `f64`, a reference or a pointer. retrace refuses any other size (`watch len must be 1, 2, 4, or 8`) and an address that isn't a multiple
 of the size (`watch address 0x… must be 4-byte aligned`), with exit 5. A size larger than the value also
 watches the bytes beside it, so it can report a write to a neighbour. A larger value (a `u128`, a struct)
-cannot be watched whole: print the address of one of its fields with `{:p}` and watch that.
+can't be watched whole: print the address of one of its fields with `{:p}` and watch that.
 
 On the example above, `l.balance` is an `i64`, and `goto 462 12447; last-write 0x304125c0 8` prints:
 
@@ -137,17 +137,17 @@ last write to 0x304125c0 (8 bytes): store at 0x100001ab4 in ledger::fees::charge
 ...
 ```
 
-- The first line names the store's function, file and line, thread and position; its backtrace follows.
+- The first line names the store's function, file and line, thread and position, and its backtrace follows.
   The writer may be another thread than the one that failed: a worker's backtrace includes the closure
   it was spawned with.
 - Memory the kernel wrote (a `read` into a buffer) is named by its system call instead:
   `last write to <address>: syscall read (3) on thread 0, (<n>, 0)`. A write retrace makes itself (an emulated call's
-  result such as a `kevent` event list or a `poll`/`select` result, or a signal handler's frame) is not seen: it names an earlier write instead.
+  result such as a `kevent` event list or a `poll`/`select` result, or a signal handler's frame) isn't seen: it names an earlier write instead.
 - With no earlier write it prints `no earlier write to <address>: it holds what it held when the program
   started`, or `no write to <address> since the exec at (<n>, 0)`, and the cursor stays where it was.
 - Otherwise the cursor moves to the write, so a second `last-write` finds the write before it. Without a
   position, `break rust_panic; continue` stops at the first panic.
-- `last-write` uses one of the four hardware watch slots. With four `watch`es armed it is an error.
+- `last-write` uses one of the four hardware watch slots. With four `watch`es armed it's an error.
 - At the start of the recording it searches back from the end. Built with `-g`, a C or C++ global or a field of
   one can stand for the address (`last-write app.insert`), and its size is the length.
 
@@ -170,9 +170,9 @@ those:
 - `bt`: `frames`, each with `index`, `pc`, `function`, `offset`, `file` and `line`.
 - `value_before` and `value_after` are the bytes in memory order, in hex. Apple Silicon is
   little-endian, so `f401000000000000` is 500.
-- `file` and `line` are `null` where there is no line information, and `source_note` says why:
+- `file` and `line` are `null` where there's no line information, and `source_note` says why:
   `no line information at this address`, `the binary changed since the recording`, that the binary
-  was not found, or that `dsymutil` or `atos` (which read the binary's debug info) failed or timed out.
+  wasn't found, or that `dsymutil` or `atos` (which read the binary's debug info) failed or timed out.
 - A command that fails prints `{"command":…,"ok":false,"error":"…"}`, and retrace exits 5.
 
 ### Other commands
@@ -211,7 +211,7 @@ variables only in part.
 
 For a crash, `process continue` alone stops at the fault, and every command after it goes in a `-k`
 flag instead of `-o`. Once the program stops on a crash, lldb's batch mode drops the remaining `-o`
-commands and still exits 0; `-k` commands run after a crash:
+commands and still exits 0. `-k` commands run after a crash:
 
 ```sh
 retrace lldb crash.retrace -- --batch -o 'process continue' -k 'bt' -k 'frame variable'
@@ -223,9 +223,9 @@ retrace lldb crash.retrace -- --batch -o 'process continue' -k 'bt' -k 'frame va
 |---|---|---|
 | the program's own | The program ran to its end. | Its code is what the program returned. |
 | 128 + signal | The program died of a signal, as natively (139 is a segfault, 134 an abort). | Ask the recording. |
-| 2 | Bad input to retrace: a missing file, a file that is not an arm64 program or not a recording, a missing entitlement. | Read the line retrace printed. |
-| 3 | The replay did not match its recording. | A retrace bug. Report it with the trace. |
-| 4 | A wall: the program did something retrace cannot run yet. | See below. |
+| 2 | Bad input to retrace: a missing file, a file that isn't an arm64 program or not a recording, a missing entitlement. | Read the line retrace printed. |
+| 3 | The replay didn't match its recording. | A retrace bug. Report it with the trace. |
+| 4 | A wall: the program did something retrace can't run yet. | See below. |
 | 5 | A debugger error: a `retrace debug` command that failed (`DEBUG ERROR: …`, or the `"ok":false` line), a `gdbserver` error, or an incomplete recording. | Read the line retrace printed. |
 | 70 | An internal error in retrace. | A retrace bug. Report it. |
 
@@ -239,9 +239,9 @@ retrace: unsupported: posix_spawn of a child process (syscall 244) - see https:/
 
 The line names what the program did and links the section of `docs/walls.md` that explains it. That is
 retrace's limit, not a fault in the program: stop and debug by other means, or change the program
-so it does not do that under test. The recording up to the wall stays on disk: `retrace replay`
+so it doesn't do that under test. The recording up to the wall stays on disk: `retrace replay`
 runs it to the wall and exits 4, but `retrace debug`, `retrace gdbserver` and `retrace lldb` refuse it
-with exit 5 (`retrace lldb` before it starts lldb), because debugging up to a wall is not supported.
+with exit 5 (`retrace lldb` before it starts lldb), because debugging up to a wall isn't supported.
 
 ## Clean up
 

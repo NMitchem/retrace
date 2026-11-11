@@ -1,8 +1,8 @@
 # Guide
 
-This walks through retrace on two small Rust crates with a failing test each, then the same questions in lldb,
-then every command. The crates and `crashy.c` are installed with retrace, under
-`$(brew --prefix)/share/retrace/examples`.
+This guide runs retrace on 2 small Rust crates, each with 1 failing test. You'll record them, find the line that
+wrote each bad value, then ask the same questions in lldb. Every command is listed at the end. The crates and
+`crashy.c` are installed with retrace, under `$(brew --prefix)/share/retrace/examples`.
 
 ## Contents
 
@@ -28,7 +28,7 @@ CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER="retrace record" RETRACE_DIR="$PWD/targ
 ```
 
 The runner variable makes cargo start each test binary under `retrace record`. `RETRACE_DIR` is where
-the recordings go. It is absolute so that in a workspace, where cargo runs each member's tests in that
+the recordings go. It's absolute so that in a workspace, where cargo runs each member's tests in that
 member's directory, every member records into the root's `target/`. `--no-fail-fast` keeps cargo going
 after the first failing test binary, so every binary is recorded. Set these in the environment, not in
 `.cargo/config.toml`, where the runner would also apply to `cargo run`. The output, abridged
@@ -63,7 +63,7 @@ Doctests are recorded too, all as `rust_out.retrace`, each overwriting the last,
 test filter (`cargo test <name>`) still records every test binary.
 
 A program records the same way: `retrace record ./prog arg1 arg2` writes `prog.retrace` (into
-`$RETRACE_DIR` when that is set), and the program's output and exit status are its own.
+`$RETRACE_DIR` when that's set), and the program's output and exit status are its own.
 
 Your hashes, addresses and positions may differ from the ones shown here, so use the ones your own
 run prints: two recordings of the same test can put the failure at different positions. One recording
@@ -116,7 +116,7 @@ created. It isn't the `(1048578)` in libtest's message, which is Rust's `ThreadI
 
 ### Who wrote it?
 
-Go to the panic and ask for the last write to `l.balance`. It is an `i64`, so the length is 8:
+Go to the panic and ask for the last write to `l.balance`. It's an `i64`, so the length is 8:
 
 ```sh
 retrace debug target/retrace/ledger-844be10fb1d57b0c.retrace --script 'goto 462 12447; last-write 0x304125c0 8'
@@ -212,7 +212,7 @@ last write to 0x302065c4 (4 bytes): store at 0x10000534c in inventory::restock::
 ...
 ```
 
-The test failed on thread 1, but thread 4 wrote the count. That is the thread `Shelf::receive`
+The test failed on thread 1, but thread 4 wrote the count. That's the thread `Shelf::receive`
 spawns: frame #1 is its closure, at `lib.rs` line 20, and the store is in `restock::add`,
 `src/restock.rs` line 6. There `CASE` is 10, while its comment says a case holds 12.
 
@@ -322,7 +322,7 @@ both, with `crashy.c` compiled as C and as C++.
 | Command | What it does |
 |---|---|
 | `retrace record [-o <trace>] <program> [<args...>]` | record a program. The trace is `-o`'s name, else `$RETRACE_DIR/<basename>.retrace` when `RETRACE_DIR` is set, else `<basename>.retrace` in the working directory |
-| `retrace replay <trace>` | replay the recording and check it against what was recorded; exits 3 on a divergence |
+| `retrace replay <trace>` | replay the recording and check it against what was recorded. It exits 3 on a divergence |
 | `retrace debug <trace>` | summarise the recording: how it ended (for a crash or a signal, with the thread, position and backtrace where it stopped), each Rust panic with its position, thread and backtrace, a failing `assert_eq!`'s operand addresses, the last lines of the program's stdout and stderr, and the threads |
 | `retrace debug <trace> [--json] --script '<cmds>'` | run the debugger commands below, separated by `;`, in order. `--json` prints one JSON object per command, one per line |
 | `retrace lldb <trace> [--exe <path>] [-- <lldb args...>]` | serve the recording and open lldb on it, with `rsi` (step back one instruction) loaded |
@@ -333,7 +333,7 @@ The debugger's commands, for `--script`:
 | Command | What it does |
 |---|---|
 | `summary` | what `retrace debug <trace>` prints. It leaves the cursor at the end of the recording |
-| `last-write <addr> [<len>]` | from the cursor, run back to the last write to `len` bytes at `addr` (1, 2, 4 or 8; 8 if omitted) and print the writer: a store with its function, file and line, thread, position and backtrace, or the system call that wrote it. The cursor moves to the write, so another `last-write` finds the one before. If nothing wrote it since the program started or since an exec, it says so and the cursor stays. At the start of the recording it searches back from the end. In a C or C++ program built with `-g`, `addr` can be a global variable or a field or element of one (`app.insert`, `table[3]`), and its size is the length |
+| `last-write <addr> [<len>]` | from the cursor, run back to the last write to `len` bytes at `addr` (1, 2, 4 or 8, and 8 if omitted) and print the writer: a store with its function, file and line, thread, position and backtrace, or the system call that wrote it. The cursor moves to the write, so another `last-write` finds the one before. If nothing wrote it since the program started or since an exec, it says so and the cursor stays. At the start of the recording it searches back from the end. In a C or C++ program built with `-g`, `addr` can be a global variable or a field or element of one (`app.insert`, `table[3]`), and its size is the length |
 | `bt [<thread>]` | the backtrace of the current thread or of another, a blocked one included, with file and line where the debug info has them |
 | `goto <n> <k>` | move to position `(n, k)`, as `summary`, `where` and `last-write` print it |
 | `where` | the cursor's position, pc, thread and function |
@@ -365,10 +365,10 @@ its section of [`docs/walls.md`](walls.md):
 retrace: unsupported: posix_spawn of a child process (syscall 244) - see https://github.com/NMitchem/retrace/blob/main/docs/walls.md#process-creation
 ```
 
-The limit is retrace's, and the program has not failed: debug it some other way, or change it so it
+The limit is retrace's, and the program hasn't failed: debug it some other way, or change it so it
 doesn't make that call under test. Under `cargo test` the line shows in cargo's output, followed by
 cargo's `process didn't exit successfully: … (exit status: 4)`, and the recording is still saved. A
-call that retrace answers with an error the program can handle, such as `fork`, is not a wall: it
+call that retrace answers with an error the program can handle, such as `fork`, isn't a wall: it
 prints `retrace: refused: <call>, returned <error> to the program` and the recording goes on. A
 recording that ends at a wall replays up to the wall, but `retrace debug`, `retrace lldb` and
 `retrace gdbserver` refuse it with exit 5: debugging up to a wall isn't supported. To report a wall or
@@ -394,7 +394,7 @@ For an `AGENTS.md` or `CLAUDE.md`, these lines tell an agent that retrace is the
 
 ```markdown
 retrace records a failing Rust, C or C++ program or test on an Apple Silicon Mac, once, and replays it exactly, so you can ask the recording which instruction last wrote a value, from which line and on which thread.
-Reach for it when a value is wrong and the code that set it is not obvious, or a crash happens long after its cause. Skip it for logic errors a rerun will solve, Python or JavaScript bugs, and programs that use the network, child processes or a GUI.
+Reach for it when a value is wrong and the code that set it isn't obvious, or a crash happens long after its cause. Skip it for logic errors a rerun will solve, Python or JavaScript bugs, and programs that use the network, child processes or a GUI.
 Record: `CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER="retrace record" RETRACE_DIR="$PWD/target/retrace" cargo test --no-fail-fast`, or `retrace record ./prog`. Then `retrace debug <trace>` says how the run ended, with each panic's backtrace, and `retrace debug <trace> --script 'goto <n> <k>; last-write <address> 8'` finds the last write to a value. Add `--json` for JSON.
 The full recipe is the retrace skill (`claude plugin install retrace@retrace`), also installed at `$(brew --prefix)/share/retrace/skills/retrace/SKILL.md`.
 ```
