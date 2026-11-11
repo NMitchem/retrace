@@ -852,7 +852,7 @@ mod tests {
             std::ptr::read_unaligned(hdr.add(mapping).cast::<u64>())
         };
         extern "C" { fn strlen(s: *const std::ffi::c_char) -> usize; }
-        let host = strlen as usize as u64;
+        let host = strlen as *const () as u64;
         let s = system_symbol(host - base + unslid + 4).expect("strlen is in the shared cache");
         assert!(s.name.as_deref().is_some_and(|n| n.contains("strlen")), "{s:?}");
         assert_eq!(s.offset, 4, "{s:?}");

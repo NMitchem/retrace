@@ -402,7 +402,7 @@ fn record_raise(w: &mut Writer, b: &mut Box_, count: &mut usize, r: &RecordRaise
     };
     match kind {
         // M55 §3h: before the append and before anything changes, so a replay never meets a landmark for it.
-        K::Refuse => Err(wall(WallCategory::Signals, format!("{}", b.refuse_raise_text(target, sig)))),
+        K::Refuse => Err(wall(WallCategory::Signals, b.refuse_raise_text(target, sig))),
         K::Pend => {
             // M16: pended on the TARGET and materialised at its next unmask or wake, a syscall landmark.
             landmark_event(w, count, "pended raise")?;
@@ -2465,7 +2465,7 @@ impl ReplaySession {
         match kind {
             // F-2: a marked wall, so `end_or_diverge` reads it as the incomplete recording's end.
             K::Refuse => Err(Divergence { landmark: self.idx, pc, detail: retrace_arch::wall(
-                retrace_arch::WallCategory::Signals, format!("{}", self.b.refuse_raise_text(target, sig))) }),
+                retrace_arch::WallCategory::Signals, self.b.refuse_raise_text(target, sig)) }),
             K::Pend => {
                 if kernel { self.b.threads_mut().pend_kernel(target, sig); } else { self.b.threads_mut().pend(target, sig); }
                 Ok(None)

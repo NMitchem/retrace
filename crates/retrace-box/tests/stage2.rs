@@ -97,7 +97,7 @@ fn a_hinted_placement_never_lands_on_page_zero_or_in_the_l3_window() {
 
 /// Task 3 (F3): nothing may give a stage-1-unmapped page an attribute again.
 #[test]
-#[should_panic(expected = "M49 F3")]
+#[should_panic(expected = "would map a page stage 1 leaves unmapped")]
 fn set_region_exec_refuses_a_page_stage_one_leaves_unmapped() {
     let mut b = boxed(HELLO);
     b.set_region_exec(0, 0x4000);
