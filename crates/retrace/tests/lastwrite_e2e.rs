@@ -74,7 +74,10 @@ fn finds_the_bad_store_in_ledger() {
     assert_eq!(o["kind"], "store", "{o}");
     assert!(o["file"].as_str().unwrap().ends_with("fees.rs"), "{o}");
     assert_eq!(o["line"].as_u64().unwrap(), line_of(LEDGER_MANIFEST, "fees.rs", LEDGER_BAD_STORE), "{o}");
-    assert!(o["function"].as_str().unwrap().contains("charge"), "{o}");
+    // The name alone, as a frame has it, with the offset into it as its own field (the text line keeps `+0x…`).
+    assert_eq!(o["function"], "ledger::fees::charge", "{o}");
+    assert_eq!(o["offset"], o["frames"][0]["offset"], "{o}");
+    assert!(o["offset"].as_u64().is_some_and(|x| x > 0), "{o}");
     assert!(o["value_before"].as_str().unwrap().len() >= 2 && o["value_after"].is_string(), "{o}");
     assert_ne!(o["value_before"], o["value_after"], "{o}");
     assert!(o["frames"].as_array().unwrap().len() >= 2, "{o}");

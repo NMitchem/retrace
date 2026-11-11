@@ -1779,6 +1779,9 @@ impl Exec<'_> {
         // The cursor is at the terminal.
         let mut bt = Vec::new();
         let frames = self.cmd_bt(None, &mut bt)?.into_iter().find(|(k, _)| *k == "frames").map_or(J::Arr(Vec::new()), |(_, v)| v);
+        // `bt`'s frame lines at the end, as a panic's are printed (a note line is left out, as it is there).
+        let end_text: Vec<String> = String::from_utf8_lossy(&bt).lines().filter(|l| l.starts_with('#')).map(str::to_string).collect();
+        let (end_pos, end_thread) = ((self.n, self.k), self.sess().current_thread());
         let (kind, ended, extra): (&str, String, Vec<(&'static str, J)>) = match &report.outcome {
             Outcome::Exit { code } => ("exit", format!("exited with {code}"), vec![("code", J::UInt(*code))]),
             Outcome::Crash { sig, far, .. } => {
@@ -1807,6 +1810,12 @@ impl Exec<'_> {
         let shown = if programs.iter().all(String::is_empty) { "(unknown)".to_string() } else { programs.join(" -> ") };
         line(out, format_args!("program: {shown}"))?;
         line(out, format_args!("ended: {ended}"))?;
+        // Where a crash or a signal stopped the program: the thread, the position and its backtrace. An exit's
+        // backtrace is the runtime's exit path, so it stays in JSON only.
+        if kind != "exit" {
+            line(out, format_args!("{kind} on thread {end_thread} at ({}, {})", end_pos.0, end_pos.1))?;
+            for l in &end_text { line(out, format_args!("  {l}"))?; }
+        }
         for (p, a) in panics.iter().zip(&asserts) {
             line(out, format_args!("panic on thread {} at ({}, {})", p.thread, p.pos.0, p.pos.1))?;
             for l in &p.text { line(out, format_args!("  {l}"))?; }
@@ -1934,10 +1943,10 @@ impl Exec<'_> {
     /// The cursor as JSON: `position`, `thread`, `pc`, `function`. The one place these are built.
     pub fn state_fields(&self) -> Vec<(&'static str, J)> {
         let pc = self.sess().pc();
-        let function = match self.syms_at(self.n).resolve(pc) {
-            Some((raw, 0)) => J::Str(self.readable_at(self.n, raw)),
-            Some((raw, off)) => J::Str(format!("{}+{off:#x}", self.readable_at(self.n, raw))),
-            None => J::Null,
+        // As a `bt` frame has them: the readable name alone, and the offset into it as its own field.
+        let (function, offset) = match self.syms_at(self.n).resolve(pc) {
+            Some((raw, off)) => (J::Str(self.readable_at(self.n, raw)), J::UInt(off)),
+            None => (J::Null, J::Null),
         };
         let (lines, note) = self.source_lines(&[pc]);
         let (file, line) = match lines.into_iter().next().flatten() {
@@ -1949,6 +1958,7 @@ impl Exec<'_> {
             ("thread", J::UInt(u64::from(self.sess().current_thread()))),
             ("pc", hex(pc)),
             ("function", function),
+            ("offset", offset),
             ("file", file),
             ("line", line),
         ];

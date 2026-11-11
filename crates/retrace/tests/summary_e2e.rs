@@ -128,6 +128,15 @@ fn crashy_summary_is_a_crash() {
     assert_eq!(s["panics"].as_array().unwrap().len(), 0, "{s}");
     let (_, text, _) = debug(trace.to_str().unwrap(), &[]);
     assert!(text.contains("ended: killed by SIGSEGV, fault at 0x4000dead0000"), "{text}");
+    // Where it stopped, in text too: the crashing thread and position, then its backtrace from the faulting pc, which
+    // is in crashy's `main` (`_main`, a C name printed as recorded).
+    let pos = &s["ending"]["position"];
+    let at = format!("crash on thread {} at ({}, {})", s["ending"]["thread"], pos[0], pos[1]);
+    assert!(text.lines().any(|l| l == at), "the ending's line `{at}`:\n{text}");
+    let pc = s["ending"]["pc"].as_str().unwrap();
+    assert!(text.lines().any(|l| l.trim_start().starts_with(&format!("#0 {pc} in _main+"))), "a #0 frame at {pc} in _main:\n{text}");
+    assert_eq!(s["ending"]["function"], "_main", "the JSON function is the name alone: {s}");
+    assert!(s["ending"]["offset"].as_u64().is_some_and(|o| o > 0), "and its offset: {s}");
 }
 
 #[test]
