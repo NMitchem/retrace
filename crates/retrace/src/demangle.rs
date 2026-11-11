@@ -67,6 +67,14 @@ fn cxx_batch_with(tool: &Path, raws: &[&str]) -> (Vec<Option<String>>, Option<St
     (raws.iter().zip(lines).map(|(r, l)| (l != *r && !l.is_empty()).then(|| l.to_string())).collect(), None)
 }
 
+/// Drop a trailing legacy Rust hash segment, `::h` and 16 hex digits, as lldb and `atos` print it.
+fn strip_hash(q: &str) -> &str {
+    match q.rsplit_once("::h") {
+        Some((head, h)) if !head.is_empty() && h.len() == 16 && h.bytes().all(|b| b.is_ascii_hexdigit()) => head,
+        _ => q,
+    }
+}
+
 /// Drop a C++ parameter list: `ns::f(int)` becomes `ns::f`, `ns::g(int) const` too.
 fn strip_params(r: &str) -> &str {
     let t = r.strip_suffix(" const").unwrap_or(r);
@@ -128,10 +136,12 @@ impl Readable {
 
     /// Addresses for a user's name, in order: (1) exact raw, (2) exact readable, (3) readable with a
     /// C++ parameter list stripped, (4) trailing `::` path segments. Each step only if the previous
-    /// found nothing. Steps 2 to 4 search the executable only.
+    /// found nothing. Steps 2 to 4 search the executable only, and take lldb's form of a legacy Rust
+    /// name too: its hash as a last segment (`ledger::tests::f::h0123456789abcdef`) is dropped.
     pub fn lookup(&self, syms: &Symbols, query: &str) -> Vec<u64> {
         let hits = syms.addrs_of(query);
         if !hits.is_empty() { return hits; }
+        let query = strip_hash(query);
         let Some(exe) = syms.exe() else { return Vec::new() };
         let named: Vec<(u64, String)> = exe.iter()
             .filter_map(|(a, n)| self.get(n).map(|r| (a, r))).collect();
@@ -224,6 +234,14 @@ mod tests {
     #[test] fn step4_ambiguous_suffix_reports_all() {
         let s = syms();
         assert_eq!(Readable::new(&s).lookup(&s, "tests::f"), vec![0x300, 0x400]);
+    }
+    #[test] fn lldb_s_hashed_form_is_found() {
+        let s = syms();
+        assert_eq!(Readable::new(&s).lookup(&s, "ledger::tests::solo::h0123456789abcdef"), vec![0x600]);
+        assert_eq!(Readable::new(&s).lookup(&s, "tests::solo::h0123456789abcdef"), vec![0x600]);
+        // Not a hash: too short, or not hex. Those stay part of the name, and match nothing here.
+        assert!(Readable::new(&s).lookup(&s, "ledger::tests::solo::h0123").is_empty());
+        assert!(Readable::new(&s).lookup(&s, "ledger::tests::solo::hzzzzzzzzzzzzzzzz").is_empty());
     }
     #[test] fn earlier_step_wins() {
         let s = Symbols::from_names(&[(0x1, "__ZN1a1fE"), (0x2, "__ZN3pkg1a1fE")]);

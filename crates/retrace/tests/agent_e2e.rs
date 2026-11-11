@@ -1,7 +1,11 @@
 //! M58 B7: the agent loop end to end, as the README shows it: record `cargo test` under retrace, ask
 //! `retrace debug <trace>` what happened, then `goto` the panic and `last-write` the assert's left operand. Each
-//! command runs as its own subprocess in the README's order and its stdout is saved under the SDD ledger's
-//! `readme-loop/`, so the README's transcripts come from a real run. Skips loudly without cargo.
+//! command runs as its own subprocess in the README's order, so the README's transcripts come from a real run.
+//! Skips loudly without cargo.
+//!
+//! `RETRACE_README_LOOP_DIR=<dir>`: when set, each command's output (and the commands themselves) is saved under
+//! `<dir>`, which is how the README's and the skill's transcripts are regenerated (the M58 ledger keeps them in
+//! `.superpowers/sdd/2026-11-10-retrace-m58-agent/readme-loop/`). Unset, the test writes nothing outside its scratch.
 mod util;
 use std::path::{Path, PathBuf};
 use util::cargo::{cargo_path, copy_fixture, readme_recipe_in, remove_fixture_copy, saved_after_running,
@@ -11,12 +15,13 @@ fn json_lines(s: &str) -> Vec<serde_json::Value> {
     s.lines().map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("not JSON ({e}): {l}"))).collect()
 }
 
-fn out_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.superpowers/sdd/2026-11-10-retrace-m58-agent/readme-loop")
+/// Where the outputs go: `RETRACE_README_LOOP_DIR`, or nowhere.
+fn out_dir() -> Option<PathBuf> {
+    std::env::var_os("RETRACE_README_LOOP_DIR").filter(|d| !d.is_empty()).map(PathBuf::from)
 }
 
 fn save(name: &str, body: &str) {
-    let d = out_dir();
+    let Some(d) = out_dir() else { return };
     let r = std::fs::create_dir_all(&d).and_then(|_| std::fs::write(d.join(name), body));
     if let Err(e) = r { util::announce(&format!("NOTE: could not save {name} under {}: {e}", d.display())); }
 }

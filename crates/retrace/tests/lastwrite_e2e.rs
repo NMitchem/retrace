@@ -100,7 +100,11 @@ fn chains() {
     assert_eq!((a["found"].clone(), b["found"].clone()), (true.into(), true.into()), "{a}\n{b}");
     let pos = |o: &serde_json::Value| (o["position"][0].as_u64().unwrap(), o["position"][1].as_u64().unwrap());
     assert!(pos(b) < pos(a), "the second write is earlier: {a}\n{b}");
+    // The write before the bad store is the test's `deposit(500)`: it leaves 500 (little-endian) on the deposit's line.
     assert!(b["file"].as_str().unwrap().ends_with("lib.rs"), "the deposit: {b}");
+    assert_eq!(b["line"].as_u64(), Some(line_of(LEDGER_MANIFEST, "lib.rs", "self.balance += amount;")), "the deposit's line: {b}");
+    assert_eq!(b["value_after"], "f401000000000000", "the deposit leaves 500: {b}");
+    assert_eq!(a["value_before"], "f401000000000000", "the bad store starts from 500: {a}");
 }
 
 #[test]

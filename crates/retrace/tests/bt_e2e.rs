@@ -174,4 +174,13 @@ fn bt_of_a_blocked_thread() {
     assert_eq!(at, b.len(), "lldb's frames, in order, are retrace's frames; retrace:\n{mine}\nlldb: {b:x?}");
     assert!(extra.len() <= 1 && extra.iter().all(|(_, t)| !t.contains(" in ")),
         "retrace's extra frames are at most one with no symbol: {extra:x?}\n{mine}");
+    // That one extra frame is the stub's caller: frame 1, the blocked thread's own saved x30 (PAC bits stripped).
+    if let Some((pc, _)) = extra.first() {
+        assert_eq!(blocked.get(1).map(|f| f.0), Some(*pc), "the extra frame is frame 1:\n{mine}");
+        let regs = debug_out(ts, &format!("watch {cell}; continue; regs 0"));
+        let x30 = regs.split("x30=").nth(1).and_then(|r| r.split_whitespace().next())
+            .and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok())
+            .unwrap_or_else(|| panic!("no x30 in `regs 0`:\n{regs}"));
+        assert_eq!(*pc, x30 & ((1 << 47) - 1), "frame 1 is thread 0's saved x30 ({x30:#x}):\n{mine}\n{regs}");
+    }
 }

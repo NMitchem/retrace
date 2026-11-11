@@ -964,6 +964,15 @@ impl<'a> Exec<'a> {
                 f.push(("found", J::Bool(true)));
                 f.push(("kind", J::Str("syscall".into())));
                 f.push(("thread", J::UInt(u64::from(thread))));
+                // pc, function, file and line are the writer's, as `thread` is: at (n, 0) the current thread is the
+                // one that runs next, which a call that blocked or switched leaves another. Null when the writer's
+                // context is not there. These replace the cursor's own fields; when the writer is another thread, a
+                // note the cursor's pc had is replaced too (by the writer's, or null).
+                let (fields, note) = self.pc_fields(self.sess().thread_ctx(thread as usize).map(|c| c.regs.pc));
+                f.extend(fields);
+                if note.is_some() || thread != self.sess().current_thread() {
+                    f.push(("source_note", note.map_or(J::Null, J::Str)));
+                }
                 f.push(("syscall", J::Obj(vec![("number", J::UInt(num)), ("name", J::Str(name))])));
                 f.push(("value_before", J::Null));
                 f.push(("value_after", hex_of(after)));
@@ -1743,7 +1752,9 @@ impl Exec<'_> {
                     } else { (Vec::new(), J::Null) };
                     hits.push(SumHit { pos: (self.n, self.k), thread, pc, x1, x2, text, frames: fr });
                 }
-                Halt::Exec { .. } => {}
+                // The addresses are the first image's: past an exec they name whatever the new image holds there, so
+                // nothing stays armed and an exec'd program never shows a false panic.
+                Halt::Exec { .. } => self.breakpoints.clear(),
                 Halt::Terminal(r) => return Ok((hits, truncated, r)),
                 h => return Err(format!("summary: unexpected stop {h:?}")),
             }
@@ -1973,8 +1984,23 @@ impl Exec<'_> {
 
     /// The cursor as JSON: `position`, `thread`, `pc`, `function`. The one place these are built.
     pub fn state_fields(&self) -> Vec<(&'static str, J)> {
-        let pc = self.sess().pc();
-        // As a `bt` frame has them: the readable name alone, and the offset into it as its own field.
+        let mut v = vec![
+            ("position", J::Arr(vec![J::UInt(self.n as u64), J::UInt(self.k)])),
+            ("thread", J::UInt(u64::from(self.sess().current_thread()))),
+        ];
+        let (fields, note) = self.pc_fields(Some(self.sess().pc()));
+        v.extend(fields);
+        if let Some(n) = note { v.push(("source_note", J::Str(n))); }
+        v
+    }
+
+    /// `pc`, `function`, `offset`, `file` and `line` for `pc` in the cursor's epoch (all null for `None`), and the
+    /// note explaining a missing line. As a `bt` frame has them: the readable name alone, and the offset into it as
+    /// its own field.
+    fn pc_fields(&self, pc: Option<u64>) -> (Vec<(&'static str, J)>, Option<String>) {
+        let Some(pc) = pc else {
+            return (vec![("pc", J::Null), ("function", J::Null), ("offset", J::Null), ("file", J::Null), ("line", J::Null)], None);
+        };
         let (function, offset) = match self.syms_at(self.n).resolve(pc) {
             Some((raw, off)) => (J::Str(self.readable_at(self.n, raw)), J::UInt(off)),
             None => (J::Null, J::Null),
@@ -1984,17 +2010,7 @@ impl Exec<'_> {
             Some((f, l)) => (J::Str(f), J::UInt(u64::from(l))),
             None => (J::Null, J::Null),
         };
-        let mut v = vec![
-            ("position", J::Arr(vec![J::UInt(self.n as u64), J::UInt(self.k)])),
-            ("thread", J::UInt(u64::from(self.sess().current_thread()))),
-            ("pc", hex(pc)),
-            ("function", function),
-            ("offset", offset),
-            ("file", file),
-            ("line", line),
-        ];
-        if let Some(n) = note { v.push(("source_note", J::Str(n))); }
-        v
+        (vec![("pc", hex(pc)), ("function", function), ("offset", offset), ("file", file), ("line", line)], note)
     }
 
     /// M58 B3: `(file, line)` per pc in the cursor's epoch, plus the note explaining an absence. The epoch's

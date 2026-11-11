@@ -423,17 +423,27 @@ fn finish(fall_throughs: u64, outcome: &retrace_core::Outcome) -> i32 {
     }
 }
 
-/// `debug <trace> --script '<cmd>; <cmd>; …'`. A missing trace, a missing `--script`, or a
-/// `--script` with no value is a usage error (exit 2), validated before any file I/O or VM work.
+/// `debug <trace> --script '<cmd>; <cmd>; …'`. A missing trace, a `--script` with no value, or an
+/// argument other than `--json` and `--script` is a usage error (exit 2), validated before any file
+/// I/O or VM work.
 fn debug_cmd(a: &[String]) -> i32 {
-    let json = a.iter().skip(3).any(|s| s == "--json");
-    let script = match a.iter().position(|s| s == "--script") {
-        None => Some("summary"),
-        Some(i) => a.get(i + 1).map(String::as_str),
-    };
-    let (Some(trace), Some(script)) = (a.get(2).filter(|t| *t != "--json" && *t != "--script"), script) else {
-        return bad_input("usage: retrace debug <trace> [--json] [--script '<cmds>']");
-    };
+    const DEBUG_USAGE: &str = "usage: retrace debug <trace> [--json] [--script '<cmds>']";
+    let Some(trace) = a.get(2).filter(|t| *t != "--json" && *t != "--script") else { return bad_input(DEBUG_USAGE) };
+    // Final review: an argument `debug` does not know (`--jsno`) is bad input, never silently a text-mode summary.
+    let unknown = |arg: &str| bad_input(&format!("unknown argument to debug: {arg} ({DEBUG_USAGE})"));
+    if trace.starts_with("--") { return unknown(trace); }
+    let (mut json, mut script) = (false, "summary");
+    let mut rest = a.iter().skip(3);
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--json" => json = true,
+            "--script" => match rest.next() {
+                Some(s) => script = s.as_str(),
+                None => return bad_input(DEBUG_USAGE),
+            },
+            other => return unknown(other),
+        }
+    }
     if let Err(e) = check_recording(trace) { return bad_input(&e); }
     if let Err(code) = vm_preflight() { return code; }
     if let Err(code) = host_pin(trace) { return code; }

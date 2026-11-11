@@ -163,7 +163,7 @@ the program's output (abridged):
 > summary
 program: /Users/you/ledger/target/debug/deps/ledger-844be10fb1d57b0c
 ended: exited with 101
-panic on thread 2 at (468, 12447)
+panic on thread 2 at (462, 12447)
   #0 0x100077ba8 in __rustc::rust_panic+0x0
   ...
   #8 0x100001198 in ledger::tests::settling_four_hundred_leaves_the_rest+0x14c at /Users/you/ledger/src/lib.rs:63
@@ -185,7 +185,7 @@ threads:
 ```
 
 Frame #8 is the failing assertion, `src/lib.rs` line 63. File paths are absolute, so an agent can open
-them as printed. `(468, 12447)` is the panic's position in the recording: event 468, then 12447
+them as printed. `(462, 12447)` is the panic's position in the recording: event 462, then 12447
 instructions into it. The line under the backtrace gives the addresses of the `assert_eq!`'s two
 sides. `left` is `l.balance`, the value that came out wrong. libtest prints a failing test's message
 on stdout, so it shows up in the stdout tail.
@@ -199,7 +199,7 @@ created. It isn't the `(1048578)` in libtest's message, which is Rust's `ThreadI
 Go to the panic and ask for the last write to `l.balance`. It is an `i64`, so the length is 8:
 
 ```sh
-retrace debug target/retrace/ledger-844be10fb1d57b0c.retrace --script 'goto 468 12447; last-write 0x304125c0 8'
+retrace debug target/retrace/ledger-844be10fb1d57b0c.retrace --script 'goto 462 12447; last-write 0x304125c0 8'
 ```
 
 `--script` runs debugger commands in order, separated by `;`. `last-write` runs backwards from the
@@ -207,10 +207,10 @@ cursor to the last instruction that wrote that memory, and prints it with the ba
 (abridged):
 
 ```
-> goto 468 12447
-at (468, 12447) pc=0x100077ba8 thread=2  in __rustc::rust_panic
+> goto 462 12447
+at (462, 12447) pc=0x100077ba8 thread=2  in __rustc::rust_panic
 > last-write 0x304125c0 8
-last write to 0x304125c0 (8 bytes): store at 0x100001ab4 in ledger::fees::charge+0x78 at /Users/you/ledger/src/fees.rs:14 on thread 2, (468, 2575)
+last write to 0x304125c0 (8 bytes): store at 0x100001ab4 in ledger::fees::charge+0x78 at /Users/you/ledger/src/fees.rs:14 on thread 2, (462, 2575)
 #0 0x100001ab4 in ledger::fees::charge+0x78 at /Users/you/ledger/src/fees.rs:14
 #1 0x100000d0c in ledger::Ledger::settle+0x1c at /Users/you/ledger/src/lib.rs:25
 #2 0x100001088 in ledger::tests::settling_four_hundred_leaves_the_rest+0x3c at /Users/you/ledger/src/lib.rs:59
@@ -247,14 +247,14 @@ Add `--json` and each command prints one JSON object on one line. The text is st
 
 ```sh
 retrace debug target/retrace/ledger-844be10fb1d57b0c.retrace --json
-retrace debug target/retrace/ledger-844be10fb1d57b0c.retrace --json --script 'goto 468 12447; last-write 0x304125c0 8'
+retrace debug target/retrace/ledger-844be10fb1d57b0c.retrace --json --script 'goto 462 12447; last-write 0x304125c0 8'
 ```
 
 From the summary's object and from `last-write`'s (excerpts):
 
 ```json
-"panics":[{"position":[468,12447],"thread":2,"frames":[…],"assert":{"left":"0x304125c0","right":"0x10007e3a0"}}]
-"position":[468,2575],"thread":2,"pc":"0x100001ab4","function":"ledger::fees::charge","offset":120,"file":"/Users/you/ledger/src/fees.rs","line":14,"found":true,"kind":"store","value_before":"f401000000000000","value_after":"6300000000000000"
+"panics":[{"position":[462,12447],"thread":2,"frames":[…],"assert":{"left":"0x304125c0","right":"0x10007e3a0"}}]
+"position":[462,2575],"thread":2,"pc":"0x100001ab4","function":"ledger::fees::charge","offset":120,"file":"/Users/you/ledger/src/fees.rs","line":14,"found":true,"kind":"store","value_before":"f401000000000000","value_after":"6300000000000000"
 ```
 
 `function` is the readable name alone, and `offset` is how far into it the instruction is (the text's
@@ -275,18 +275,18 @@ CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER="retrace record" RETRACE_DIR="$PWD/targ
 retrace debug target/retrace/inventory-b1201d35949b6a76.retrace
 ```
 
-The summary puts the panic on thread 1 at `(490, 10749)`, with the left operand at `0x302065c4`. The
+The summary puts the panic on thread 1 at `(493, 10749)`, with the left operand at `0x302065c4`. The
 count is a `u32`, so ask about 4 bytes:
 
 ```sh
-retrace debug target/retrace/inventory-b1201d35949b6a76.retrace --script 'goto 490 10749; last-write 0x302065c4 4'
+retrace debug target/retrace/inventory-b1201d35949b6a76.retrace --script 'goto 493 10749; last-write 0x302065c4 4'
 ```
 
 ```
-> goto 490 10749
-at (490, 10749) pc=0x10007c72c thread=1  in __rustc::rust_panic
+> goto 493 10749
+at (493, 10749) pc=0x10007c72c thread=1  in __rustc::rust_panic
 > last-write 0x302065c4 4
-last write to 0x302065c4 (4 bytes): store at 0x10000534c in inventory::restock::add+0x9c at /Users/you/inventory/src/restock.rs:6 on thread 4, (485, 1797)
+last write to 0x302065c4 (4 bytes): store at 0x10000534c in inventory::restock::add+0x9c at /Users/you/inventory/src/restock.rs:6 on thread 4, (488, 1797)
 #0 0x10000534c in inventory::restock::add+0x9c at /Users/you/inventory/src/restock.rs:6
 #1 0x100000944 in inventory::Shelf::receive::{{closure}}::{{closure}}+0x24 at /Users/you/inventory/src/lib.rs:20
 ...

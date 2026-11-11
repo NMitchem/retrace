@@ -87,7 +87,7 @@ With no other arguments, `retrace debug` prints a summary. On a failing `assert_
 > summary
 program: /Users/you/ledger/target/debug/deps/ledger-844be10fb1d57b0c
 ended: exited with 101
-panic on thread 2 at (468, 12447)
+panic on thread 2 at (462, 12447)
   #0 0x100077ba8 in __rustc::rust_panic+0x0
   ...
   #8 0x100001198 in ledger::tests::settling_four_hundred_leaves_the_rest+0x14c at /Users/you/ledger/src/lib.rs:63
@@ -129,11 +129,11 @@ of the size (`watch address 0x… must be 4-byte aligned`), with exit 5. A size 
 watches the bytes beside it, so it can report a write to a neighbour. A larger value (a `u128`, a struct)
 cannot be watched whole: print the address of one of its fields with `{:p}` and watch that.
 
-On the example above, `l.balance` is an `i64`, and `goto 468 12447; last-write 0x304125c0 8` prints:
+On the example above, `l.balance` is an `i64`, and `goto 462 12447; last-write 0x304125c0 8` prints:
 
 ```
 > last-write 0x304125c0 8
-last write to 0x304125c0 (8 bytes): store at 0x100001ab4 in ledger::fees::charge+0x78 at /Users/you/ledger/src/fees.rs:14 on thread 2, (468, 2575)
+last write to 0x304125c0 (8 bytes): store at 0x100001ab4 in ledger::fees::charge+0x78 at /Users/you/ledger/src/fees.rs:14 on thread 2, (462, 2575)
 #0 0x100001ab4 in ledger::fees::charge+0x78 at /Users/you/ledger/src/fees.rs:14
 #1 0x100000d0c in ledger::Ledger::settle+0x1c at /Users/you/ledger/src/lib.rs:25
 ...

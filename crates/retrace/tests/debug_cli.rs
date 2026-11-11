@@ -301,6 +301,21 @@ fn debug_arg_errors_are_usage_not_panics() {
 }
 
 #[test]
+fn an_unknown_debug_argument_is_bad_input() {
+    // A misspelt flag (`--jsno`) used to be ignored, giving a text summary where JSON was asked for. It is bad input:
+    // one `retrace:` line naming it, exit 2, before the trace is read (this one does not exist).
+    for args in [["debug", "/nonexistent-but-unread.bin", "--jsno"], ["debug", "--jsno", "/nonexistent-but-unread.bin"]] {
+        let out = std::process::Command::new(util::bin()).args(args).output().expect("spawn");
+        let err = String::from_utf8_lossy(&out.stderr).into_owned();
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {err}");
+        let lines: Vec<&str> = err.lines().collect();
+        assert_eq!(lines.len(), 1, "{args:?}: one line:\n{err}");
+        assert!(lines[0].starts_with("retrace: ") && lines[0].contains("--jsno") && !lines[0].contains("cannot read"), "{args:?}: {err}");
+        assert!(out.stdout.is_empty(), "{args:?}: nothing on stdout");
+    }
+}
+
+#[test]
 fn debug_of_a_missing_trace_is_bad_input() {
     // With no script `debug <trace>` runs `summary`; a trace that cannot be read is bad input, before any VM work.
     let out = std::process::Command::new(util::bin()).args(["debug", "/nonexistent-but-unread.bin"]).output().expect("spawn");
@@ -475,4 +490,35 @@ fn a_rebuilt_binary_gets_no_lines_and_says_why() {
     let last = objs.last().unwrap();
     assert!(last["file"].is_null() && last["line"].is_null(), "{last}");
     assert!(last["source_note"].as_str().is_some_and(|n| n.contains("changed since the recording")), "{last}");
+}
+
+/// M58 final review: `summary` and `last-write` set the user's breakpoints and watches aside and put them back. After
+/// either, from the start again, `continue` stops at the user's breakpoint and then at the user's watch.
+#[test]
+fn user_breakpoints_and_watches_survive_summary_and_last_write() {
+    let (rec, trace) = util::record_dynamic(retrace_guest::CRASHY);
+    assert_eq!(rec.code, 139, "record: {}", rec.stderr);
+    let (st, ptr) = util::discover_crashy_addrs(&trace);
+    let ts = trace.to_str().unwrap();
+    // The two continues after `goto 1 0`, in order: the breakpoint at main's entry, then main's store to `g.ptr`.
+    let after_goto = |out: &str| -> Vec<String> {
+        let (_, tail) = out.split_once("> goto 1 0").unwrap_or_else(|| panic!("no goto:\n{out}"));
+        tail.lines().filter(|l| l.starts_with("hit ")).map(str::to_string).collect()
+    };
+    let check = |what: &str, out: &str| {
+        let hits = after_goto(out);
+        assert!(hits.len() >= 2, "{what}: two hits after the goto:\n{out}");
+        assert!(hits[0].starts_with("hit 0x") && hits[0].contains(" in _main"), "{what}: the user's breakpoint first:\n{out}");
+        assert!(hits[1].starts_with(&format!("hit watch {ptr:#x} ")), "{what}: then the user's watch:\n{out}");
+    };
+    let (code, out, err) = debug_run(ts, &format!("break _main; watch {ptr:#x}; summary; goto 1 0; continue; continue"));
+    assert_eq!(code, 0, "{err}\n{out}");
+    assert!(out.contains("ended: killed by SIGSEGV"), "the summary ran:\n{out}");
+    check("summary", &out);
+    // `last-write` of `g.st`, which `fstat` wrote, from the crash: it finds the write, then the user's stops are back.
+    let (code, out, err) = debug_run(ts, &format!(
+        "break _main; watch {ptr:#x}; continue; continue; continue; last-write {st:#x}; goto 1 0; continue; continue"));
+    assert_eq!(code, 0, "{err}\n{out}");
+    assert!(out.contains(&format!("last write to {st:#x}: syscall ")), "the last-write found fstat's write:\n{out}");
+    check("last-write", &out);
 }

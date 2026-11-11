@@ -237,10 +237,10 @@ impl SymbolTable {
 }
 
 impl SymbolTable {
-    /// Every `(addr, raw name)` in `(addr, name)` order. Read-only presentation helper.
     /// The end of this image's `__TEXT`, slid: a pc from the image's base up to it is the image's own code.
     pub fn text_end(&self) -> u64 { self.text_end }
 
+    /// Every `(addr, raw name)` in `(addr, name)` order. Read-only presentation helper.
     pub fn iter(&self) -> impl Iterator<Item = (u64, &str)> {
         self.syms.iter().map(|(a, n)| (*a, n.as_str()))
     }
