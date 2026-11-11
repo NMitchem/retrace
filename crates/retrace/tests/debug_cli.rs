@@ -361,6 +361,11 @@ fn json_mode_escapes_program_text() {
     assert_eq!(objs.len(), 1);
     let tail = objs[0]["stderr_tail"].as_str().expect("stderr_tail");
     assert!(tail.contains(want), "the program's characters survive the round trip: {tail:?}");
+    // The text summary shows the same stderr under its header.
+    let text = std::process::Command::new(util::bin()).args(["debug", trace.to_str().unwrap()]).output().expect("spawn");
+    assert_eq!(text.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&text.stdout).into_owned();
+    assert!(text.contains("stderr (last") && text.contains(want), "{text}");
 }
 
 #[test]

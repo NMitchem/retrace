@@ -116,5 +116,9 @@ pub fn saved_after_running(stderr: &str) -> Vec<(String, String)> {
 /// it, so its recordings stay for debugging.
 pub fn remove_fixture_copy(dir: &Path) {
     // Safe: `copy_fixture` puts the copy at `<private fresh_dir>/<crate name>`, so its parent is that scratch dir alone.
-    let _ = std::fs::remove_dir_all(dir.parent().unwrap_or(dir));
+    // Guarded: only a directory `fresh_dir` made (its `retrace-cargo-` prefix) is ever removed.
+    match dir.parent() {
+        Some(p) if p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("retrace-cargo-")) => { let _ = std::fs::remove_dir_all(p); }
+        _ => super::announce(&format!("NOTE: not removing {}: its parent is not a retrace-cargo- scratch dir", dir.display())),
+    }
 }
