@@ -93,15 +93,15 @@ fn every_unmodelled_psynch_call_is_refused_by_value_with_nothing_changed() {
     let model = b.dbg_psynch().clone();
     for (num, name) in [(312, "psynch_cvclrprepost"), (306, "psynch_rw_rdlock"), (297, "psynch_rw_longrdlock")] {
         let e = b.guest_psynch(num, [CV, 0x100, 0, 0, 0, 0, 0, 0]).unwrap_err().unmark();
-        assert!(e.starts_with(&format!("M48: psynch {name} ({num}) is not modelled")), "{e}");
+        assert!(e.starts_with(&format!("psynch {name} ({num}) is not modelled")), "{e}");
     }
     let mut mutexed = wait(0x200, 0);
     mutexed[3] = 0x6000_1000;
     let e = b.guest_psynch(SYS_PSYNCH_CVWAIT, mutexed).unwrap_err().unmark();
-    assert!(e.starts_with("M48: psynch psynch_cvwait") && e.contains("with mutex 0x60001000"), "{e}");
+    assert!(e.starts_with("psynch psynch_cvwait") && e.contains("with mutex 0x60001000"), "{e}");
     b.threads_mut().pend(0, 30);
     let e = b.guest_psynch(SYS_PSYNCH_CVSIGNAL, signal(0x100, 0, 0)).unwrap_err().unmark();
-    assert!(e.starts_with("M48: a signal is pending on thread 0"), "{e}");
+    assert!(e.starts_with("a signal is pending on thread 0"), "{e}");
     assert_eq!(b.dbg_psynch(), &model, "no refusal touched the model");
     assert_eq!(b.threads().state_of(0), ThreadState::Blocked(BlockReason::Cv { addr: CV, deadline: None }));
     assert_eq!(b.threads().state_of(1), ThreadState::Runnable, "the caller never blocked");
@@ -172,7 +172,7 @@ fn a_mutexdrop_that_would_wake_a_thread_with_a_pending_signal_is_refused_and_cha
     let model = b.dbg_psynch().clone();
     b.threads_mut().pend(0, 30);
     let e = b.guest_psynch(SYS_PSYNCH_MUTEXDROP, mdrop()).unwrap_err().unmark();
-    assert!(e.starts_with("M48: a signal is pending on thread 0"), "{e}");
+    assert!(e.starts_with("a signal is pending on thread 0"), "{e}");
     assert_eq!(b.dbg_psynch(), &model);
     assert_eq!(b.threads().state_of(0), ThreadState::Blocked(BlockReason::Mutex { addr: MX }));
 }

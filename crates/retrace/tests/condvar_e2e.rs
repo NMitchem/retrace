@@ -162,7 +162,7 @@ fn a_cvwait_refused_on_replay_is_a_divergence_naming_it_not_a_panic() {
     let d = match s.advance() { Err(d) => d, Ok(_) => panic!("the cvwait at landmark {i} replayed over a planted waiter") };
     assert_eq!(d.landmark, i);
     assert!(d.detail.starts_with("psynch_cvwait refused on replay, though the recording accepted it")
-            && d.detail.contains(&format!("M48: psynch psynch_cvwait on cv {:#x} by thread 1", args[0]))
+            && d.detail.contains(&format!("psynch psynch_cvwait on cv {:#x} by thread 1", args[0]))
             && d.detail.contains(&format!("thread 7 already waits at sequence {lockseq:#x}")), "{}", d.detail);
 }
 

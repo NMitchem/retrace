@@ -142,7 +142,7 @@ fn tk_kill_mt_is_refused_at_the_raise_by_value() {
     let Some(exe) = prog("tk_kill_mt") else { return };
     let (rec, _) = record(&exe, &[]);
     assert!(rec.stderr.contains(
-        "retrace: unsupported: M55: a handled signal (SIGUSR1) to thread 0, blocked in psynch_cvwait"),
+        "retrace: unsupported: a handled signal (SIGUSR1) to thread 0, blocked in psynch_cvwait"),
         "the refusal names the signal and the call. stderr:\n{}", rec.stderr);
     assert_eq!(rec.code, Some(4), "a wall exits 4. stderr:\n{}", rec.stderr);
     assert!(!rec.stderr.contains("DEADLOCK"), "not the deadlock wall. stderr:\n{}", rec.stderr);

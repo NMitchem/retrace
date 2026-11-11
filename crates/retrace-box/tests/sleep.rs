@@ -36,12 +36,12 @@ fn every_refusal_changes_nothing_and_reads_no_clock() {
     let model = b.dbg_sleep().clone();
     let with = |i: usize, v: u64| { let mut a = nanosleep_on(0x1203); a[i] = v; a };
     for (num, args, want) in [
-        (SYS___SEMWAIT_SIGNAL_NOCANCEL, nanosleep_on(0x1203), "M49: semwait __semwait_signal_nocancel (423)"),
-        (SYS___SEMWAIT_SIGNAL, with(0, 0), "M49: semwait cond_sem 0"),
-        (SYS___SEMWAIT_SIGNAL, with(2, 0), "M49: semwait timeout 0"),
-        (SYS___SEMWAIT_SIGNAL, with(3, 0), "M49: semwait relative 0"),
-        (SYS___SEMWAIT_SIGNAL, with(1, 0x1403), "M49: semwait mutex_sem 0x1403"),
-        (SYS___SEMWAIT_SIGNAL, with(5, 1_000_000_000), "M49: semwait tv_nsec 1000000000"),
+        (SYS___SEMWAIT_SIGNAL_NOCANCEL, nanosleep_on(0x1203), "semwait __semwait_signal_nocancel (423)"),
+        (SYS___SEMWAIT_SIGNAL, with(0, 0), "semwait cond_sem 0"),
+        (SYS___SEMWAIT_SIGNAL, with(2, 0), "semwait timeout 0"),
+        (SYS___SEMWAIT_SIGNAL, with(3, 0), "semwait relative 0"),
+        (SYS___SEMWAIT_SIGNAL, with(1, 0x1403), "semwait mutex_sem 0x1403"),
+        (SYS___SEMWAIT_SIGNAL, with(5, 1_000_000_000), "semwait tv_nsec 1000000000"),
     ] {
         let e = b.guest_semwait_signal(num, args).expect_err(want).unmark();
         assert!(e.starts_with(want), "{want}: {e}");
@@ -63,7 +63,7 @@ fn a_port_either_semaphore_trap_touched_is_refused_as_a_sleep() {
     assert_eq!(b.guest_sem_signal([0x1303, 0, 0, 0, 0, 0, 0, 0]), (0, vec![]), "a signal nobody waits for");
     for port in [0x1403, 0x1303] {
         let e = b.guest_semwait_signal(SYS___SEMWAIT_SIGNAL, nanosleep_on(port)).unwrap_err().unmark();
-        assert!(e.starts_with(&format!("M49: semwait cond_sem {port:#x} was used with semaphore_wait_trap (-36)")), "{e}");
+        assert!(e.starts_with(&format!("semwait cond_sem {port:#x} was used with semaphore_wait_trap (-36)")), "{e}");
     }
     assert_eq!(b.dbg_sleep().admit(SYS___SEMWAIT_SIGNAL, nanosleep_on(0x1203)), Ok(24), "libc's clock_sem is admitted");
 }
@@ -80,7 +80,7 @@ fn a_semaphore_trap_on_a_cond_sem_an_admitted_sleep_used_is_refused_by_value() {
     assert!(matches!(b.threads().state_of(0), ThreadState::Blocked(BlockReason::Sleep { .. })), "main sleeps");
     let model = b.dbg_sleep().clone();
     let refusal = |call: &str| format!(
-        "M49: semwait {call} on port 0x1203, the cond_sem of an admitted __semwait_signal: the model's \
+        "semwait {call} on port 0x1203, the cond_sem of an admitted __semwait_signal: the model's \
          sleep has no semaphore wake, so what this does to the sleep is not modelled.");
     for call in ["semaphore_signal_trap (-33)", "semaphore_wait_trap (-36)"] {
         let args = [0x1203, 0, 0, 0, 0, 0, 0, 0];
@@ -105,13 +105,13 @@ fn a_semaphore_trap_on_a_cond_sem_an_admitted_sleep_used_is_refused_by_value() {
 fn clock_get_time_refuses_every_port_but_a_learned_system_clock_one() {
     let mut b = tb();
     let e = b.guest_clock_get_time(0x903).unwrap_err().unmark();
-    assert!(e.starts_with("M49: clock_get_time to port 0x903, which no host_get_clock_service (206) reply named"), "{e}");
+    assert!(e.starts_with("clock_get_time to port 0x903, which no host_get_clock_service (206) reply named"), "{e}");
     b.learn_clock_port(0x903, CALENDAR_CLOCK);
     let e = b.guest_clock_get_time(0x903).unwrap_err().unmark();
-    assert!(e.starts_with("M49: clock_get_time on port 0x903, a CALENDAR_CLOCK (1) port"), "{e}");
+    assert!(e.starts_with("clock_get_time on port 0x903, a CALENDAR_CLOCK (1) port"), "{e}");
     b.learn_clock_port(0x903, 2);
     let e = b.guest_clock_get_time(0x903).unwrap_err().unmark();
-    assert!(e.starts_with("M49: clock_get_time on port 0x903, clock id 2"), "{e}");
+    assert!(e.starts_with("clock_get_time on port 0x903, clock id 2"), "{e}");
     b.learn_clock_port(0x903, SYSTEM_CLOCK);
     assert_eq!(b.dbg_sleep().clock_of(0x903), Some(SYSTEM_CLOCK), "a name learned again takes its latest clock");
 }

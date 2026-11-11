@@ -64,7 +64,7 @@ fn an_unterminated_policy_is_refused_as_copyinstr_would() {
     let t = b.stack_top();
     b.poke_guest(t - 0x400, &[b'A'; 40]);
     let e = b.guest_mac_syscall(args(t - 0x400, 0x5a, t - 0x300)).unwrap_err().unmark();
-    assert!(e.starts_with("M47: __mac_syscall policy name: no NUL within 32 bytes"), "{e}");
+    assert!(e.starts_with("__mac_syscall policy name: no NUL within 32 bytes"), "{e}");
 }
 
 /// Review Focus 5: an unmodelled policy, and an unmeasured Sandbox operation, are refused by name.
@@ -74,10 +74,10 @@ fn an_unmodelled_policy_or_operation_is_refused_by_name() {
     let t = b.stack_top();
     b.poke_guest(t - 0x400, b"Quarantine\0");
     let e = b.guest_mac_syscall(args(t - 0x400, 2, t - 0x300)).unwrap_err().unmark();
-    assert!(e.starts_with("M47: unmodelled __mac_syscall policy \"Quarantine\" call 0x2"), "{e}");
+    assert!(e.starts_with("unmodelled __mac_syscall policy \"Quarantine\" call 0x2"), "{e}");
     let t = sandbox(&mut b, b"file-read-data");
     let e = b.guest_mac_syscall(args(t - 0x400, 2, t - 0x300)).unwrap_err().unmark();
-    assert!(e.starts_with("M47: unmeasured Sandbox operation \"file-read-data\""), "{e}");
+    assert!(e.starts_with("unmeasured Sandbox operation \"file-read-data\""), "{e}");
 }
 
 /// R4: the host's answer about THIS process (the test binary, ad-hoc signed by the cargo runner, as

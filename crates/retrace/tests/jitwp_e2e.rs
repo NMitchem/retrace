@@ -80,7 +80,7 @@ fn basic_runs_natives_jit_sequence_and_replays() {
     let want: Vec<String> = without_marker(&nat_out).into_iter().map(|l| {
         for who in ["main initial sprr=", "child initial sprr="] {
             if let Some(v) = l.strip_prefix(who) {
-                assert_eq!(v, protect, "native starts every thread protected (§2c): {l}");
+                assert_eq!(v, protect, "native starts every thread protected: {l}");
                 return format!("{who}0");
             }
         }
@@ -148,7 +148,7 @@ fn a_store_to_a_protected_jit_page_is_the_recorded_crash_native_takes() {
     assert!(nat.status.signal().is_some(), "natively the store kills the process with a signal: {:?}", nat.status);
     assert!(!String::from_utf8_lossy(&nat.stdout).contains("UNREACHED"));
     let (rec, trace) = util::record_dynamic_args(retrace_guest::JITWP_DYN, &["fault"]);
-    assert_eq!(rec.code, 138, "a store to a write-protected MAP_JIT page is SIGBUS natively (M51 §3c). stderr: {}", rec.stderr);
+    assert_eq!(rec.code, 138, "a store to a write-protected MAP_JIT page is SIGBUS natively. stderr: {}", rec.stderr);
     let out = String::from_utf8_lossy(&rec.stdout).into_owned();
     assert!(!out.contains("UNREACHED"), "the store must not succeed:\n{out}");
     let p = page(&out);
@@ -164,7 +164,7 @@ fn a_store_to_a_protected_jit_page_is_the_recorded_crash_native_takes() {
         "the signal this crash maps to is the one native died of (a permission fault is SIGBUS, M13)");
     for n in 1..=2 {
         let rp = util::replay(&trace);
-        assert_eq!(rp.code, 138, "a store to a write-protected MAP_JIT page is SIGBUS natively (M51 §3c). replay {n}: {}", rp.stderr);
+        assert_eq!(rp.code, 138, "a store to a write-protected MAP_JIT page is SIGBUS natively. replay {n}: {}", rp.stderr);
         assert_eq!(rp.stdout, rec.stdout, "replay {n} stdout");
     }
 }
@@ -257,7 +257,7 @@ fn sprrprobe_reads_zero_runs_ic_ivau_and_is_refused_at_its_write_by_value() {
     let (rec, trace) = util::record(retrace_guest::SPRRPROBE);
     let _ = std::fs::remove_file(&trace);
     assert!(!rec.stderr.contains("retrace: unsupported: exceptions") && !rec.stderr.contains("retrace: internal error"), "the ic ivau must run at EL0, not trap:\n{}", rec.stderr);
-    assert!(rec.stderr.contains("M48: SPRR write 0x1 at pc ") && rec.stderr.contains("no SPRR commpage"),
+    assert!(rec.stderr.contains("SPRR write 0x1 at pc ") && rec.stderr.contains("no SPRR commpage"),
         "the msr must be refused by value (code {}):\n{}", rec.code, rec.stderr);
     assert!(rec.code != 0 && rec.code != 2, "exit 2 would mean the mrs read nonzero; 0 that nothing was refused: {}", rec.code);
 }

@@ -222,14 +222,14 @@ fn the_wake_answers_etimedout_with_the_carry_set_after_exactly_the_request() {
 #[test]
 fn every_unmodelled_sleep_shape_stops_the_recorder_naming_it() {
     for (what, native_line, why) in [
-        ("relative0", "refuse relative0 r=-1 errno=60", "M49: semwait relative 0: an absolute deadline"),
-        ("timeout0", "refuse timeout0 r=0 errno=0", "M49: semwait timeout 0: only timeout 1 is modelled"),
-        ("mutex", "refuse mutex r=-1 errno=60", "M49: semwait mutex_sem 0x"),
-        ("nsec", "refuse nsec r=-1 errno=22", "M49: semwait tv_nsec 1000000000:"),
+        ("relative0", "refuse relative0 r=-1 errno=60", "semwait relative 0: an absolute deadline"),
+        ("timeout0", "refuse timeout0 r=0 errno=0", "semwait timeout 0: only timeout 1 is modelled"),
+        ("mutex", "refuse mutex r=-1 errno=60", "semwait mutex_sem 0x"),
+        ("nsec", "refuse nsec r=-1 errno=22", "semwait tv_nsec 1000000000:"),
         ("semtrap", "refuse semtrap r=0 errno=0", "was used with semaphore_wait_trap (-36) or semaphore_signal_trap (-33)"),
-        ("nosem", "refuse nosem r=-1 errno=22", "M49: semwait cond_sem 0: native answers EINVAL"),
-        ("nocancel", "refuse nocancel r=-1 errno=60", "M49: semwait __semwait_signal_nocancel (423) is not modelled"),
-        ("calendar", "refuse calendar kr=0", "M49: clock_get_time on port 0x"),
+        ("nosem", "refuse nosem r=-1 errno=22", "semwait cond_sem 0: native answers EINVAL"),
+        ("nocancel", "refuse nocancel r=-1 errno=60", "semwait __semwait_signal_nocancel (423) is not modelled"),
+        ("calendar", "refuse calendar kr=0", "clock_get_time on port 0x"),
     ] {
         let (code, out) = native(&["refuse", what]);
         assert_eq!((code, out), (0, format!("{native_line}\nrefuse {what} done\n")), "{what}: native returns");
@@ -307,7 +307,7 @@ fn a_sleep_refused_on_replay_is_a_divergence_naming_it_not_a_panic() {
     let d = match s.advance() { Err(d) => d, Ok(_) => panic!("the sleep at landmark {i} replayed over a planted semaphore") };
     assert_eq!(d.landmark, i);
     assert!(d.detail.starts_with("__semwait_signal refused on replay, though the recording accepted it")
-            && d.detail.contains(&format!("M49: semwait cond_sem {:#x} was used", args[0] as u32)), "{}", d.detail);
+            && d.detail.contains(&format!("semwait cond_sem {:#x} was used", args[0] as u32)), "{}", d.detail);
 }
 
 /// The same for `clock_get_time`: its port planted as a CALENDAR_CLOCK port before the 1000.

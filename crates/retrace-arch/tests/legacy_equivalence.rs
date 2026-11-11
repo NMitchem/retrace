@@ -115,7 +115,7 @@ pub const EXPECTED_DIFFS: &[(u64, View, &str)] = &[
     // sigreturn follows uctx->uc_mcontext64 for the mcontext (rule 1). Serviced above the trace
     // (M12) and asserted off the forward path by `is_signal_syscall`, so the view is consulted
     // for it by nothing — documentation, listed because the sweep must not be taught to lie.
-    (184, View::ReadsGuestBuffer, "sigreturn(uctx, …): a nested read, serviced above the trace (M12) — exercised (altstack, sigframe, segvy, …)"),
+    (184, View::ReadsGuestBuffer, "sigreturn(uctx, …): a nested read, serviced above the trace — exercised (altstack, sigframe, segvy, …)"),
     // map_with_linking_np reads link_info for a caller-chosen link_info_size whose only kernel
     // cap is 64 MiB (rule 4) — the first Source row that is not a write/send family member. It
     // has no destination, so the withheld canary costs nothing; measured sizes are ≤ 2920 bytes.
@@ -160,7 +160,7 @@ pub const EXPECTED_DIFFS: &[(u64, View, &str)] = &[
     // never had, and its optval is a caller-sized read (the `write` convention, Source). The psynch
     // rows (303-305) carry only Scalar/Ptr kinds, so by this file's own rule they differ in no view
     // and need no entry.
-    (363, View::FdOperands, "kevent(kq, …): the kqueue fd is operand 0 — emulated above the forward (M48), so the view is moot; exercised (node, kq_dyn)"),
+    (363, View::FdOperands, "kevent(kq, …): the kqueue fd is operand 0 — emulated above the forward, so the view is moot; exercised (node, kq_dyn)"),
     (105, View::FdOperands, "setsockopt(s, …): a descriptor the legacy table never had — M48; exercised (node: libuv SO_OOBINLINE on the stdout pipe)"),
     (105, View::ReadsGuestBuffer, "setsockopt reads optval for optlen bytes — M48; exercised (node)"),
     // M53 §3b (t1): the rows for the census's filesystem and process calls. Each takes a descriptor the

@@ -216,10 +216,10 @@ fn assert_checkpoint_parity(b: Box_, label: &str) {
     assert_eq!(r.pthread_size(), psize, "{label}: pthread struct size");
     assert_eq!(r.noaccess(), noaccess.as_slice(), "{label}: PROT_NONE map");
     assert_eq!(r.fall_throughs(), fts, "{label}: fall-through counter");
-    assert_eq!(r.dbg_excl(), excl, "{label}: exclusive-monitor shadow (M42)");
-    assert_eq!(r.dbg_kq(), &kq, "{label}: the workqueue kqueue (M46)");
-    assert_eq!(r.dbg_jit(), &jit, "{label}: the MAP_JIT set and its view (M48)");
-    assert_eq!(r.dbg_sleep(), &sleep, "{label}: the sleep model (M49)");
+    assert_eq!(r.dbg_excl(), excl, "{label}: exclusive-monitor shadow");
+    assert_eq!(r.dbg_kq(), &kq, "{label}: the workqueue kqueue");
+    assert_eq!(r.dbg_jit(), &jit, "{label}: the MAP_JIT set and its view");
+    assert_eq!(r.dbg_sleep(), &sleep, "{label}: the sleep model");
     let mut restored_backings = r.dbg_backings();
     restored_backings.sort_unstable();
     assert_eq!(restored_backings.len(), live_backings.len(), "{label}: backing count");

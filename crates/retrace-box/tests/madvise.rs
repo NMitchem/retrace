@@ -43,7 +43,7 @@ fn a_range_that_runs_past_the_guests_mappings_is_refused_naming_the_page() {
     let mut b = tb();
     let base = b.guest_vm_map(0, 2 * G, true, false);
     let e = b.guest_madvise(args(base, 3 * G, MADV_ZERO.into())).unwrap_err().unmark();
-    assert!(e.starts_with(&format!("M47: madvise range page {:#x} is neither backed nor reserved", base + 2 * G)), "{e}");
+    assert!(e.starts_with(&format!("madvise range page {:#x} is neither backed nor reserved", base + 2 * G)), "{e}");
 }
 
 /// t0 M1(d): native madvise accepts an address off a page (it answers 0), but no corpus call is
@@ -53,7 +53,7 @@ fn an_address_off_a_16k_page_is_refused() {
     let mut b = tb();
     let base = b.guest_vm_map(0, 2 * G, true, false);
     let e = b.guest_madvise(args(base + 0x1000, G, MADV_FREE_REUSABLE.into())).unwrap_err().unmark();
-    assert!(e.starts_with(&format!("M47: madvise range starts at {:#x}, not on a 16 KiB page", base + 0x1000)), "{e}");
+    assert!(e.starts_with(&format!("madvise range starts at {:#x}, not on a 16 KiB page", base + 0x1000)), "{e}");
 }
 
 /// Review Focus 3. `behav` is a C `int`; the kernel reads 32 bits of the register.

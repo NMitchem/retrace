@@ -70,7 +70,7 @@ impl SleepModel {
     /// sleep left, and a destroy would not end it, with record and replay agreeing.
     pub fn check_sleep_semaphore(&self, call: &str, port: u32) -> Result<(), String> {
         if !self.sleep_sems.contains(&port) { return Ok(()); }
-        Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("M49: semwait {call} on port {port:#x}, the cond_sem of an admitted __semwait_signal: \
+        Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("semwait {call} on port {port:#x}, the cond_sem of an admitted __semwait_signal: \
                      the model's sleep has no semaphore wake, so what this does to the sleep is not \
                      modelled.")))
     }
@@ -91,37 +91,37 @@ impl SleepModel {
                             args[0], args[1], args[2], args[3], args[4], args[5]);
         if num != retrace_arch::SYS___SEMWAIT_SIGNAL {
             return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
-                "M49: semwait {} ({num}) is not modelled: only __semwait_signal (334)'s relative-timeout \
-                 shape is, the one every measured sleep path issues (M49 §2e). {shown}", call_name(num))));
+                "semwait {} ({num}) is not modelled: only __semwait_signal (334)'s relative-timeout \
+                 shape is, the one every measured sleep path issues. {shown}", call_name(num))));
         }
         let (cond, mutex, timeout, relative) = (args[0] as u32, args[1] as u32, args[2] as u32, args[3] as u32);
         let (sec, nsec) = (args[4] as i64, args[5] as i32);
         if cond == 0 {
-            return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("M49: semwait cond_sem 0: native answers EINVAL (sleep-sw.c `nosem`), \
+            return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("semwait cond_sem 0: native answers EINVAL (sleep-sw.c `nosem`), \
                                 which is not modelled. {shown}")));
         }
         if mutex != 0 {
-            return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("M49: semwait mutex_sem {mutex:#x}: a signal-and-wait on two semaphores, \
+            return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("semwait mutex_sem {mutex:#x}: a signal-and-wait on two semaphores, \
                                 which is not modelled. {shown}")));
         }
         if timeout != 1 {
-            return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("M49: semwait timeout {timeout}: only timeout 1 is modelled; timeout 0 is an \
+            return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("semwait timeout {timeout}: only timeout 1 is modelled; timeout 0 is an \
                                 untimed wait that only a semaphore signal ends. {shown}")));
         }
         if relative != 1 {
-            return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("M49: semwait relative {relative}: an absolute deadline on the calendar \
+            return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("semwait relative {relative}: an absolute deadline on the calendar \
                                 clock (wall time, sleep-sw.c `abs(cal)`), which is not modelled. {shown}")));
         }
         if !(0..=u32::MAX as i64).contains(&sec) {
-            return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("M49: semwait tv_sec {sec}: outside 0..={} (mach_timespec_t's unsigned \
+            return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("semwait tv_sec {sec}: outside 0..={} (mach_timespec_t's unsigned \
                                 tv_sec); the kernel's answer is unmeasured. {shown}", u32::MAX)));
         }
         if !(0..NSEC_PER_SEC as i32).contains(&nsec) {
-            return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("M49: semwait tv_nsec {nsec}: outside 0..{NSEC_PER_SEC}; native answers \
+            return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("semwait tv_nsec {nsec}: outside 0..{NSEC_PER_SEC}; native answers \
                                 EINVAL (sleep_dyn `refuse nsec`), which is not modelled. {shown}")));
         }
         if self.sem_ports.contains(&cond) {
-            return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("M49: semwait cond_sem {cond:#x} was used with semaphore_wait_trap (-36) or \
+            return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("semwait cond_sem {cond:#x} was used with semaphore_wait_trap (-36) or \
                                 semaphore_signal_trap (-33): a semaphore a signal could wake early, which \
                                 is not modelled. {shown}")));
         }
@@ -157,29 +157,29 @@ mod tests {
         m.note_semaphore(0x1303);
         let with = |i: usize, v: u64| { let mut a = nanosleep(0, 1000); a[i] = v; a };
         let cases: [(u64, [u64; 8], &str); 10] = [
-            (SYS___SEMWAIT_SIGNAL_NOCANCEL, nanosleep(0, 1000), "M49: semwait __semwait_signal_nocancel (423) is not modelled"),
-            (SYS___SEMWAIT_SIGNAL, with(0, 0), "M49: semwait cond_sem 0: native answers EINVAL"),
-            (SYS___SEMWAIT_SIGNAL, with(2, 0), "M49: semwait timeout 0: only timeout 1 is modelled"),
-            (SYS___SEMWAIT_SIGNAL, with(2, 2), "M49: semwait timeout 2:"),
-            (SYS___SEMWAIT_SIGNAL, with(3, 0), "M49: semwait relative 0: an absolute deadline"),
-            (SYS___SEMWAIT_SIGNAL, with(1, 0x1403), "M49: semwait mutex_sem 0x1403:"),
-            (SYS___SEMWAIT_SIGNAL, with(4, u64::MAX), "M49: semwait tv_sec -1:"),
-            (SYS___SEMWAIT_SIGNAL, with(4, 1 << 32), "M49: semwait tv_sec 4294967296:"),
-            (SYS___SEMWAIT_SIGNAL, with(5, 1_000_000_000), "M49: semwait tv_nsec 1000000000:"),
-            (SYS___SEMWAIT_SIGNAL, with(0, 0x1303), "M49: semwait cond_sem 0x1303 was used with semaphore_wait_trap (-36)"),
+            (SYS___SEMWAIT_SIGNAL_NOCANCEL, nanosleep(0, 1000), "semwait __semwait_signal_nocancel (423) is not modelled"),
+            (SYS___SEMWAIT_SIGNAL, with(0, 0), "semwait cond_sem 0: native answers EINVAL"),
+            (SYS___SEMWAIT_SIGNAL, with(2, 0), "semwait timeout 0: only timeout 1 is modelled"),
+            (SYS___SEMWAIT_SIGNAL, with(2, 2), "semwait timeout 2:"),
+            (SYS___SEMWAIT_SIGNAL, with(3, 0), "semwait relative 0: an absolute deadline"),
+            (SYS___SEMWAIT_SIGNAL, with(1, 0x1403), "semwait mutex_sem 0x1403:"),
+            (SYS___SEMWAIT_SIGNAL, with(4, u64::MAX), "semwait tv_sec -1:"),
+            (SYS___SEMWAIT_SIGNAL, with(4, 1 << 32), "semwait tv_sec 4294967296:"),
+            (SYS___SEMWAIT_SIGNAL, with(5, 1_000_000_000), "semwait tv_nsec 1000000000:"),
+            (SYS___SEMWAIT_SIGNAL, with(0, 0x1303), "semwait cond_sem 0x1303 was used with semaphore_wait_trap (-36)"),
         ];
         for (num, args, want) in cases {
             let e = m.admit(num, args).expect_err(want).unmark();
             assert!(e.starts_with(want), "{want}: {e}");
         }
         let e = m.admit(SYS___SEMWAIT_SIGNAL, with(5, u32::MAX as u64)).unwrap_err().unmark();
-        assert!(e.starts_with("M49: semwait tv_nsec -1:"), "tv_nsec is the kernel's int32_t: {e}");
+        assert!(e.starts_with("semwait tv_nsec -1:"), "tv_nsec is the kernel's int32_t: {e}");
         assert_eq!(m.admit(SYS___SEMWAIT_SIGNAL, nanosleep(u32::MAX as u64, 0)), Ok(u32::MAX as u64 * 24_000_000),
                    "the largest tv_sec is accepted");
         let mut both = with(1, 0x1403);
         both[2] = 0;
         let e = m.admit(SYS___SEMWAIT_SIGNAL, both).unwrap_err().unmark();
-        assert!(e.starts_with("M49: semwait mutex_sem 0x1403:"), "argument order, mutex_sem before timeout: {e}");
+        assert!(e.starts_with("semwait mutex_sem 0x1403:"), "argument order, mutex_sem before timeout: {e}");
     }
 
     /// S2: SYSTEM_CLOCK's reply is the guest clock at 125/3 ns per tick, truncating.

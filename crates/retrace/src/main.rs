@@ -176,7 +176,7 @@ fn run(a: &[String]) -> i32 {
     // adds no bug path a program could take; the panic stands in for a broken internal invariant.
     #[cfg(debug_assertions)]
     if std::env::var_os("RETRACE_DEBUG_PANIC").is_some() {
-        panic!("RETRACE_DEBUG_PANIC is set: a deliberate internal error, the bug-banner control (M50 §3f)");
+        panic!("RETRACE_DEBUG_PANIC is set: a deliberate internal error, the bug-banner control");
     }
     match a.get(1).map(String::as_str) {
         Some("record") => record(a),

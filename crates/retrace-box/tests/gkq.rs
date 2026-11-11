@@ -201,7 +201,7 @@ fn an_event_list_reaching_into_an_untouched_reserved_page_is_accepted_and_an_unm
         "the second event, in the page the write committed");
     assert!(b.is_mapped(res + 0x4000), "the write committed it, as a guest store would");
     let e = b.guest_kevent([KQ, 0, 0, WILD, 1, zero, 0, 0]).unwrap_err().unmark();
-    assert!(e.starts_with("M48: kevent event list at 0xb00000000 ")
+    assert!(e.starts_with("kevent event list at 0xb00000000 ")
             && e.contains("0xb00000000 (ipa 0xb00000000) is neither backed nor reserved"), "{e}");
 }
 
@@ -293,7 +293,7 @@ fn a_pipe_write_wakes_a_reader_blocked_on_its_read_end() {
     b.note_fd_effects(SYS_READ, [r, base + 0x800, 64, 0, 0, 0, 0, 0], 5, 0, false).unwrap();
     assert_eq!(b.dbg_gkq().pipe_count(r), Some(0));
     let e = b.note_fd_effects(SYS_READ, [r, base + 0x800, 64, 0, 0, 0, 0, 0], 1, 0, false).unwrap_err().unmark();
-    assert!(e.starts_with(&format!("M48: pipe {r}: the byte count is unknown")), "{e}");
+    assert!(e.starts_with(&format!("pipe {r}: the byte count is unknown")), "{e}");
 }
 
 /// K8, box level: a trigger that would wake a thread with a signal pending is refused by value and
@@ -311,7 +311,7 @@ fn a_wake_with_a_signal_pending_is_refused_and_wakes_nobody() {
     let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||
         kevent(&mut b, base + 0x1000, &[kev(7, EVFILT_USER, 0, NOTE_TRIGGER, 0, 0)], 0, 0))).unwrap_err();
     let u = retrace_arch::Unsupported::from_panic(refused.as_ref()).expect("the refusal is a wall");
-    assert!(u.what.starts_with("M48: a signal is pending on thread 0 (set 0x20000000"), "{}", u.what);
+    assert!(u.what.starts_with("a signal is pending on thread 0 (set 0x20000000"), "{}", u.what);
     assert_eq!(b.threads().state_of(0), ThreadState::Blocked(BlockReason::Kevent { kq: KQ, deadline: None }), "woke nobody");
 }
 

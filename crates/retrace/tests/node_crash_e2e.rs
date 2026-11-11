@@ -103,7 +103,7 @@ fn node_crashes_in_a_real_script_and_reverse_debugs_into_its_jit_code() {
     assert!(di < ci && si_addr == TARGET && dthread == cthread,
         "node's handler must see this fault first: delivery #{di} si_addr {si_addr:#x} thread \
          {dthread}, crash #{ci} thread {cthread}");
-    assert_eq!(rec.code, 139, "a recorded crash exits 139 (M6). stderr:\n{}", rec.stderr);
+    assert_eq!(rec.code, 139, "a recorded crash exits 139. stderr:\n{}", rec.stderr);
 
     // 3. Replay agrees, twice.
     for i in 1..=2 {
@@ -133,6 +133,6 @@ fn node_crashes_in_a_real_script_and_reverse_debugs_into_its_jit_code() {
     // 5. The store is JIT code.
     assert!(jit.iter().any(|&(s, e)| (s..e).contains(&pc)),
         "the store's pc {pc:#x} must lie inside a MAP_JIT mapping {jit:x?}: an interpreter or \
-         builtin store passes 1–4 too (spec §4)");
+         builtin store passes 1–4 too");
     let _ = std::fs::remove_file(&trace);
 }

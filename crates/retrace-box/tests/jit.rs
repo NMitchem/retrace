@@ -92,7 +92,7 @@ fn an_inadmissible_sprr_value_is_refused_by_value() {
     let mut b = tb();
     let u = b.sprr_write(1).unwrap_err();
     assert_eq!(u.category, retrace_arch::WallCategory::Memory);
-    assert!(u.what.starts_with("M48: SPRR write 0x1 at pc "), "{}", u.what);
+    assert!(u.what.starts_with("SPRR write 0x1 at pc "), "{}", u.what);
 }
 
 /// Ruling T6-d: a munmap of a JIT range trims it, and the released pages go back to `ATTR_DATA`,
@@ -115,7 +115,7 @@ fn a_munmap_trims_a_jit_range_to_data_pages_and_a_fixed_map_over_one_is_refused(
         b.guest_mmap(a + 0x4000, 0x4000, 3, ANON | FIXED)
     })).expect_err("a FIXED map over a MAP_JIT range must be refused");
     let msg = retrace_arch::Unsupported::from_panic(refused.as_ref()).expect("a marked wall").what;
-    assert!(msg.starts_with(&format!("M48: MAP_JIT range [{:#x}, {:#x}) overlapped by a FIXED mapping at ",
+    assert!(msg.starts_with(&format!("MAP_JIT range [{:#x}, {:#x}) overlapped by a FIXED mapping at ",
         a + 0x4000, a + 0x1_0000)), "{msg}");
     assert_eq!(b.dbg_jit().ranges(), &[(a + 0x4000, 0xc000)], "a refusal changes nothing");
     assert!(b.ipa_is_exec(a + 0x4000), "and leaves the view stamped");
@@ -139,7 +139,7 @@ fn an_mprotect_over_a_committed_jit_page_is_refused_by_value_and_changes_nothing
         b.guest_mprotect(a + 0x8_0000, 0x4000, 0)
     })).expect_err("an mprotect over a committed MAP_JIT page must be refused");
     let msg = retrace_arch::Unsupported::from_panic(refused.as_ref()).expect("a marked wall").what;
-    assert!(msg.starts_with(&format!("M48: MAP_JIT mprotect [{:#x}, +0x4000) prot 0x0 over the committed extent \
+    assert!(msg.starts_with(&format!("MAP_JIT mprotect [{:#x}, +0x4000) prot 0x0 over the committed extent \
         [{:#x}, {:#x}): native answers EACCES (measured, t6-jitprobe), unmodelled", a + 0x8_0000, a + 0x4_0000,
         a + 0x10_0000)), "{msg}");
     assert_eq!(b.noaccess(), noaccess.as_slice(), "a refusal changes nothing: no page went PROT_NONE");

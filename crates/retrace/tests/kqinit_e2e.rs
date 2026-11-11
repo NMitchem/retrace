@@ -67,7 +67,7 @@ fn an_unmeasured_shape_stops_the_recorder_naming_what_differs() {
         let (rec, trace) = util::record_dynamic_args(retrace_guest::KQINIT_DYN, &[mode]);
         assert_eq!(rec.code, 4, "{mode}: the recorder must stop at the wall. stderr:\n{}", rec.stderr);
         let line = rec.stderr.lines().find(|l| l.starts_with("retrace: unsupported: ")).unwrap_or_else(|| panic!("{mode}: no wall line:\n{}", rec.stderr));
-        assert!(line.contains(&format!("M46: unmeasured kevent_qos shape: {why}")),
+        assert!(line.contains(&format!("unmeasured kevent_qos shape: {why}")),
             "{mode}: the refusal must name {why:?}. stderr:\n{}", rec.stderr);
         assert!(kevent_events(&trace).is_empty(), "{mode}: a refused call appends no landmark");
         assert!(rec.stdout.is_empty(), "{mode}: the guest must not run past the refused call");

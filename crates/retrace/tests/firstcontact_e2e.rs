@@ -130,7 +130,7 @@ const ROWS: &[Row] = &[
     Row { name: "fc_sw_gcd", bin: retrace_guest::FC_SW_GCD, args: &[],
           expect: Expect::Refused("retrace: unsupported: kevent_id (syscall 375)") },
     Row { name: "fc_sw_async", bin: retrace_guest::FC_SW_ASYNC, args: &[],
-          expect: Expect::Refused("retrace: unsupported: M18 Stage 2b: unmeasured workq_kernreturn opcode 0x30") },
+          expect: Expect::Refused("retrace: unsupported: unmeasured workq_kernreturn opcode 0x30") },
 ];
 
 /// Each run's bound. A phase that hangs fails its row rather than stalling the gate; t0 M1 measured

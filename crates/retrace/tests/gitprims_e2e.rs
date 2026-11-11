@@ -99,7 +99,7 @@ fn madv_free_reusable_and_reuse_are_no_ops_that_keep_the_bytes() {
 fn an_unmeasured_advice_stops_the_recorder_naming_the_value() {
     let (rec, _) = util::record_dynamic_args(retrace_guest::MADV_DYN, &["bad"]);
     assert_ne!(rec.code, 0, "an unmeasured advice must not record: stdout {:?}", String::from_utf8_lossy(&rec.stdout));
-    assert!(rec.stderr.contains("M47: unmeasured madvise advice 9."), "{}", rec.stderr);
+    assert!(rec.stderr.contains("unmeasured madvise advice 9."), "{}", rec.stderr);
 }
 
 /// Review Focus 4. A recording whose madvise landmark carries writes is not one this build wrote;

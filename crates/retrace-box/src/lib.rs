@@ -867,7 +867,7 @@ const GUEST_THREAD_PORT_BASE: u32 = 0x0BAD_7000;
 /// that spawns more than 1023 threads stops here by design, rather than aliasing.
 fn guest_thread_kport(tid: usize) -> u32 {
     if tid >= 0x400 {
-        retrace_arch::refuse!(Threads, "M46: a box-spawned thread id past 0x3ff reaches GUEST_THREAD_PORT_BASE's bits 12-14, so its \
+        retrace_arch::refuse!(Threads, "a box-spawned thread id past 0x3ff reaches GUEST_THREAD_PORT_BASE's bits 12-14, so its \
          mach port name would alias an earlier thread's (tid 0x401 would get tid 1's 0x0BAD7007) and \
          two threads would share one name. M18 never reuses a parked worker, so a guest that spawns \
          more than 1023 threads stops here by design; widen the name scheme before raising this bound.");
@@ -1679,10 +1679,10 @@ impl Box_ {
         }
         // M49 F3: invalidate STAGE1_UNMAPPED's pages. Block 0 is always promoted here: both loaders'
         // exec lists start with the trampoline (`load_with_pac`, `load_dynamic`).
-        assert!(l2[0] & 0x3 == DESC_TABLE, "M49 F3: block 0 must be promoted (the trampoline is the first exec range)");
+        assert!(l2[0] & 0x3 == DESC_TABLE, "block 0 must be promoted (the trampoline is the first exec range)");
         let l3_ipa = l2[0] & PT_ADDR;
         let l3_host = backings.iter().find(|b| b.ipa == l3_ipa).map(|b| b.host)
-            .expect("M49 F3: block 0's L3 table backing");
+            .expect("block 0's L3 table backing");
         let l3 = unsafe { std::slice::from_raw_parts_mut(l3_host as *mut u64, 2048) };
         for &(s, e) in &STAGE1_UNMAPPED {
             for p in (s..e).step_by(GRANULE) { l3[(p / GRANULE as u64) as usize] = 0; }
@@ -1712,7 +1712,7 @@ impl Box_ {
     /// [`flush_guest_tlb`](Self::flush_guest_tlb) after promoting.
     pub fn set_region_attr(&mut self, ipa: u64, len: u64, attr: u64) {
         assert!(!STAGE1_UNMAPPED.iter().any(|&(s, e)| ipa < e && s < ipa + len),
-            "M49 F3: set_region_attr over [{ipa:#x}, {:#x}) would map a page stage 1 leaves unmapped \
+            "set_region_attr over [{ipa:#x}, {:#x}) would map a page stage 1 leaves unmapped \
              (page 0, retrace's page tables, the L3 window)", ipa + len);
         let l2_host = self.l2_host;
         assert!(!l2_host.is_null(), "set_region_attr: no live L2 table (restore had no PT_L2 region)");
@@ -1816,11 +1816,11 @@ impl Box_ {
     pub fn sprr_write(&mut self, value: u64) -> Result<(), Unsupported> {
         let pc = self.vcpu.get_sys(sysreg::ELR_EL1).unwrap();
         let Some((we, pr)) = self.sprr_admitted() else {
-            return Err(Unsupported::new(WallCategory::Memory, format!("M48: SPRR write {value:#x} at pc {pc:#x}: this guest has no SPRR commpage \
+            return Err(Unsupported::new(WallCategory::Memory, format!("SPRR write {value:#x} at pc {pc:#x}: this guest has no SPRR commpage \
                     (+0x110 and +0x118 absent or equal), so no value is admissible (R2, Ruling T6-f)")));
         };
         if value != we && value != pr {
-            return Err(Unsupported::new(WallCategory::Memory, format!("M48: SPRR write {value:#x} at pc {pc:#x} is neither the commpage's write-enable word \
+            return Err(Unsupported::new(WallCategory::Memory, format!("SPRR write {value:#x} at pc {pc:#x} is neither the commpage's write-enable word \
              {we:#x} (+0x110) nor its protect word {pr:#x} (+0x118) (R2)")));
         }
         let tid = self.threads.current();
@@ -1890,7 +1890,7 @@ impl Box_ {
     /// flush (§11a item 3).
     fn assert_jit_stamped(&self) {
         let (view, mode) = (self.jit.view(), self.jit_mode());
-        assert_eq!(view, mode, "M48: a restored MAP_JIT view {view:?} is not thread {}'s mode {mode:?}",
+        assert_eq!(view, mode, "a restored MAP_JIT view {view:?} is not thread {}'s mode {mode:?}",
             self.threads.current());
         let attr = match view { jit::View::Rx => ATTR_CODE, jit::View::Rw => ATTR_DATA };
         for (s, l) in self.jit.stamped_extents(&self.noaccess) {
@@ -1900,7 +1900,7 @@ impl Box_ {
             for p in [s, s + l - GRANULE as u64] {
                 let got = self.leaf_desc(p).map(|d| d & !PT_ADDR & !0x3);
                 assert_eq!(got, Some(attr),
-                    "M48: restored MAP_JIT page {p:#x} carries stage-1 attributes {got:x?}, not the {view:?} view's {attr:#x}");
+                    "restored MAP_JIT page {p:#x} carries stage-1 attributes {got:x?}, not the {view:?} view's {attr:#x}");
             }
         }
     }
@@ -2960,7 +2960,7 @@ impl Box_ {
         let m = mask | (GRANULE as u64 - 1);
         let ipa = if anywhere {
             if mask >= 1 << 36 {
-                retrace_arch::refuse!(Memory, "M47: unmeasured mach_vm_map mask {mask:#x}: no measured guest passes a mask of 1 << 36 or more, and rounding the bump cursor to it would wrap in a release build");
+                retrace_arch::refuse!(Memory, "unmeasured mach_vm_map mask {mask:#x}: no measured guest passes a mask of 1 << 36 or more, and rounding the bump cursor to it would wrap in a release build");
             }
             // Kernel-faithful VM_FLAGS_ANYWHERE-with-hint: search FORWARD from a non-zero hint for
             // the first free gap, treating reservations as occupied (what vm_map_enter does). When
@@ -3038,7 +3038,7 @@ impl Box_ {
         let rounded = (size + GRANULE as u64 - 1) & !(GRANULE as u64 - 1);
         let base = if anywhere {
             if mask >= 1 << 36 {
-                retrace_arch::refuse!(Memory, "M47: unmeasured mach_vm_map mask {mask:#x}: no measured guest passes a mask of 1 << 36 or more, and rounding the bump cursor to it would wrap in a release build");
+                retrace_arch::refuse!(Memory, "unmeasured mach_vm_map mask {mask:#x}: no measured guest passes a mask of 1 << 36 or more, and rounding the bump cursor to it would wrap in a release build");
             }
             if mask != 0 {
                 let m = mask | (GRANULE as u64 - 1);
@@ -3108,7 +3108,7 @@ impl Box_ {
             else if dst_in < src + ssz && src < dst_in.saturating_add(dsz) { return Err(retrace_arch::KERN_INVALID_ADDRESS); }
         }
         if self.jit.refuse_overlap(src, dsz, "mach_vm_reallocate").is_err() {
-            retrace_arch::refuse!(Memory, "M57: mach_vm_reallocate over a MAP_JIT range: unmodelled (Ruling T6-c)");
+            retrace_arch::refuse!(Memory, "mach_vm_reallocate over a MAP_JIT range: unmodelled");
         }
         let Some(bytes) = usize::try_from(src_size).ok().and_then(|n| self.read_va_checked(src, n)) else {
             return Err(retrace_arch::KERN_INVALID_ADDRESS);
@@ -3784,7 +3784,7 @@ impl Box_ {
         // point, no path may change `current` until this window's trap is consumed, where
         // replay's `finish_event` (M41 §3a) or the next run()/step() entry settles it.
         debug_assert!(!self.threads.needs_reschedule(),
-            "M15 R1: a reschedule is still pending after schedule_after_block — a mid-window switch \
+            "a reschedule is still pending after schedule_after_block — a mid-window switch \
              would make position->thread ambiguous");
         // M42 §3e: entering the guest is an ERET, which clears the hardware monitor, so native
         // execution cannot resume inside a pair. Step until the shadow clears. What each stop does:
@@ -3960,7 +3960,7 @@ impl Box_ {
         // point, no path may change `current` until this window's trap is consumed, where
         // replay's `finish_event` (M41 §3a) or the next run()/step() entry settles it.
         debug_assert!(!self.threads.needs_reschedule(),
-            "M15 R1: a reschedule is still pending after schedule_after_block — a mid-window switch \
+            "a reschedule is still pending after schedule_after_block — a mid-window switch \
              would make position->thread ambiguous");
         // M42 §3b: inside a pair, retrace's own exits have cleared the hardware monitor, so a
         // store-exclusive is emulated rather than stepped, and a `clrex` is stepped and then clears
@@ -3972,7 +3972,7 @@ impl Box_ {
             // a set shadow means the guest is at EL0. Stepping at EL1 with one set would decode the
             // vector code as if it were the pair's.
             assert!((self.vcpu.get_reg(reg::CPSR).unwrap() >> 2) & 3 == 0,
-                "M42: the exclusive shadow is set with the guest at EL1 (pc {:#x}); every exception \
+                "the exclusive shadow is set with the guest at EL1 (pc {:#x}); every exception \
                  entry must clear it", self.pc());
             match self.insn_at(self.pc()).and_then(decode_excl) {
                 Some(st @ ExclInsn::Store { .. }) => return self.emulate_stx(st),
@@ -4040,7 +4040,7 @@ impl Box_ {
         };
         let len = excl::access_len(size, pair);
         let loaded = self.va_to_ipa(va).and_then(|ipa| self.read_guest_checked(ipa, len))
-            .unwrap_or_else(|| panic!("M42: the load-exclusive read {va:#x}, which does not map"));
+            .unwrap_or_else(|| panic!("the load-exclusive read {va:#x}, which does not map"));
         self.excl = Some(Excl { va, size, pair, loaded, by: SetBy::Stepped });
     }
 
@@ -4106,7 +4106,7 @@ impl Box_ {
                 self.excl = None;
                 return self.step();
             }
-            Err(why) => panic!("M42: unmodelled store-exclusive at pc {pc:#x}: {why} (shadow {ex:?})"),
+            Err(why) => panic!("unmodelled store-exclusive at pc {pc:#x}: {why} (shadow {ex:?})"),
         };
         if let Some(stop) = self.raise_debug_stop(pc, plan.va, len) { return stop; }
         let (ipa, _) = leaf.expect("plan_stx refuses an unmapped target");
@@ -4124,7 +4124,7 @@ impl Box_ {
     /// condition, is the pure `excl::infer` (Ruling T5-b), unit-tested per condition. This gathers
     /// its inputs: the scan's words, bounded at 16 and at P's page, and the vCPU and memory reads.
     fn infer_excl(&mut self, entry_pc: u64) {
-        debug_assert!(self.excl.is_none(), "run()'s native loop runs only with the shadow clear (§3e)");
+        debug_assert!(self.excl.is_none(), "run()'s native loop runs only with the shadow clear");
         let p = self.pc();
         let page = p & !(GRANULE as u64 - 1);
         let mut words = Vec::with_capacity(16);
@@ -4166,7 +4166,7 @@ impl Box_ {
                         match excl::classify_retire(e.syndrome, pre) {
                             Ok(Some((ld, va))) => self.set_excl_from_retire(ld, va),
                             Ok(None) => {}
-                            Err(why) => panic!("M42: at {:#x}: {why}", self.pc() - 4),
+                            Err(why) => panic!("at {:#x}: {why}", self.pc() - 4),
                         }
                         return Stop::Step;
                     }
@@ -5415,7 +5415,7 @@ impl Box_ {
             if (gargs[0], gargs[1], gargs[2]) != (1, 1, 0) {
                 // SAFETY: closing the two descriptors the forward just opened for the guest.
                 unsafe { libc::close(h0); libc::close(h1); }
-                retrace_arch::refuse!(Syscalls, "M55: socketpair of domain {} type {} protocol {} succeeded on the host and is not modelled. \
+                retrace_arch::refuse!(Syscalls, "socketpair of domain {} type {} protocol {} succeeded on the host and is not modelled. \
                                                  syscall 135 args=[{}]", gargs[0], gargs[1], gargs[2], Self::fmt_args(gargs));
             }
             let (g0, g1) = self.bind_returned_pair(h0, h1);
@@ -5549,7 +5549,7 @@ impl Box_ {
         let mut done = 0usize;
         while done < bytes.len() {
             let a = ipa + done as u64;
-            let (hp, avail) = self.host_span(a).unwrap_or_else(|| panic!("M51 §3h: write_guest at ipa {a:#x}, which \
+            let (hp, avail) = self.host_span(a).unwrap_or_else(|| panic!("write_guest at ipa {a:#x}, which \
                 nothing maps. Every pointer the program passes is checked before it gets here (prepare_forward_pointers, \
                 read_va_checked, prepare_reply), so this is retrace's bug, not the program's"));
             let n = avail.min(bytes.len() - done);
@@ -5884,7 +5884,7 @@ impl Box_ {
             retrace_arch::refuse!(Signals, "a handler's signal frame at {frame_base:#x} cannot be pushed (a page is unmapped or not writable); native kills the process with SIGILL, which retrace does not record for a raised signal yet");
         }
         self.write_va_committing(frame_base, &bytes)
-            .unwrap_or_else(|m| panic!("M51: the frame frame_pushable passed: {m}"));
+            .unwrap_or_else(|m| panic!("the frame frame_pushable passed: {m}"));
 
         // Block for the handler's duration, unless SA_NODEFER — on the RECEIVING thread.
         let mut newmask = self.threads.mask_of(tid) | act.mask;
@@ -5979,7 +5979,7 @@ impl Box_ {
             out.extend_from_slice(unsafe { std::slice::from_raw_parts(hp, n) });
         }
         if out.len() == len { return out; }
-        panic!("M51 §3h: read_guest of {len} bytes at ipa {ipa:#x}, which nothing maps. Every pointer the program \
+        panic!("read_guest of {len} bytes at ipa {ipa:#x}, which nothing maps. Every pointer the program \
             passes is checked before it gets here (prepare_forward_pointers, read_va_checked, prepare_reply), so this \
             is retrace's bug, not the program's");
     }
@@ -6273,7 +6273,7 @@ impl Box_ {
     /// BEFORE `workq_open`. A plausible-looking ordering assert would fire on the real sequence.
     pub fn guest_workq_open(&mut self, _args: [u64; 8]) -> u64 {
         if self.wq_thread_pc.is_none() {
-            retrace_arch::refuse!(Threads, "M18 Stage 2a: workq_open before bsdthread_register — refusing to bring up a workqueue \
+            retrace_arch::refuse!(Threads, "workq_open before bsdthread_register — refusing to bring up a workqueue \
              with no registered wqthread entry point. Every dynamic guest registers one at startup \
              (measured, M14 Task 2), so this means the guest took a path no measurement covers.");
         }
@@ -6330,15 +6330,15 @@ impl Box_ {
             // every later activation would be dropped in silence. Measured libpthread never does it.
             WQOPS_THREAD_RETURN if self.kq.manager() == kq::Manager::Bound(self.threads.current()) =>
                 Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
-                    "M46: workq_kernreturn THREAD_RETURN ({WQOPS_THREAD_RETURN:#x}) from thread {}, \
+                    "workq_kernreturn THREAD_RETURN ({WQOPS_THREAD_RETURN:#x}) from thread {}, \
                      which is the bound event manager: the bound manager returns through \
                      THREAD_KEVENT_RETURN ({:#x}), and measured libpthread never parks it with \
-                     THREAD_RETURN (M46 §3d). args=[{}]",
+                     THREAD_RETURN. args=[{}]",
                     self.threads.current(), retrace_arch::WQOPS_THREAD_KEVENT_RETURN, Self::fmt_args(args)))),
             WQOPS_THREAD_RETURN => Ok(self.guest_workq_park(args)),
             retrace_arch::WQOPS_THREAD_KEVENT_RETURN => self.guest_workq_kevent_return(args),
             other => Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
-                "M18 Stage 2b: unmeasured workq_kernreturn opcode {other:#x} — only \
+                "unmeasured workq_kernreturn opcode {other:#x} — only \
                  SETUP_DISPATCH ({WQOPS_SETUP_DISPATCH:#x}), REQTHREADS \
                  ({WQOPS_QUEUE_REQTHREADS:#x}), THREAD_RETURN ({WQOPS_THREAD_RETURN:#x}) and, since \
                  M46, THREAD_KEVENT_RETURN ({:#x}) have ever been observed (M18 Task 6; Stage 2b \
@@ -6403,7 +6403,7 @@ impl Box_ {
         // while dropping the events on the floor is exactly the silent corruption the refuse-by-
         // value posture exists to prevent.
         if (args[1], args[2], args[3]) != (0, 0, 0) {
-            retrace_arch::refuse!(Threads, "M18 Stage 2b: workq_kernreturn THREAD_RETURN with unmeasured arguments \
+            retrace_arch::refuse!(Threads, "workq_kernreturn THREAD_RETURN with unmeasured arguments \
              {:#x?} — the only measured park is (0x4, 0, 0, 0) (Task 1 §3d). Non-zero args here \
              are XNU's kevent-carrying variant, which must return events rather than merely park; \
              measure it before modelling it. args={args:#x?}",
@@ -6455,17 +6455,17 @@ impl Box_ {
     /// sequence, and both dispatch arms reach this through the same `guest_workq_kernreturn(args)`
     /// call — symmetry rule 1 holding by construction, exactly as it does for `bsdthread_create`.
     fn guest_workq_reqthreads(&mut self, args: [u64; 8]) -> u64 {
-        let entry = self.wq_thread_pc.unwrap_or_else(|| retrace_arch::refuse!(Threads, "M18 Stage 2b: REQTHREADS with no registered wqthread entry point — refusing to build \
+        let entry = self.wq_thread_pc.unwrap_or_else(|| retrace_arch::refuse!(Threads, "REQTHREADS with no registered wqthread entry point — refusing to build \
              a worker that would enter an invented address. Every dynamic guest registers one at \
              startup (measured, M14 Task 2), so this means the guest took a path no measurement \
              covers."));
         let pthsize = self.pthread_size.expect(
-            "M18 Stage 2b: REQTHREADS with no registered pthread size — captured by the same \
+            "REQTHREADS with no registered pthread size — captured by the same \
              bsdthread_register that captures the entry point, so this cannot happen without the \
              assert above firing first.") as u64;
         let count = args[2];
         if !(1..=WQ_MAX_WORKERS_PER_REQUEST).contains(&count) {
-            retrace_arch::refuse!(Threads, "M18 Stage 2b: REQTHREADS for {count} threads, outside 1..={WQ_MAX_WORKERS_PER_REQUEST}. \
+            retrace_arch::refuse!(Threads, "REQTHREADS for {count} threads, outside 1..={WQ_MAX_WORKERS_PER_REQUEST}. \
              `args[2]` is numthreads (§5 item 5). Zero is meaningless — libdispatch would wait \
              forever on work no worker was built to run — and anything near the ceiling means this \
              box is reading the wrong argument, not that the guest wants that many workers; each \
@@ -6582,12 +6582,12 @@ impl Box_ {
     pub fn guest_kevent_qos(&mut self, args: [u64; 8]) -> Result<u64, String> {
         let entry = self.read_va_prefix(args[1], retrace_arch::KEVENT_QOS_SIZE);
         let shape = retrace_arch::kevent_qos_shape(args, &entry).map_err(|why| retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
-            "M46: unmeasured kevent_qos shape: {why}. Modelled: libdispatch's workqueue-kqueue init, \
+            "unmeasured kevent_qos shape: {why}. Modelled: libdispatch's workqueue-kqueue init, \
              its memory-pressure registration and its manager poke (M46 §2a-§2b). Measure what \
              issues this one before modelling it; a guessed kevent silently corrupts libdispatch's \
              event state. args=[{}]", Self::fmt_args(args))))?;
         let table = |why: String| retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
-            "M46: kevent_qos against the knote table: {why}. args=[{}]", Self::fmt_args(args)));
+            "kevent_qos against the knote table: {why}. args=[{}]", Self::fmt_args(args)));
         match shape {
             retrace_arch::KeventShape::Init => self.kq.register_user().map_err(table)?,
             retrace_arch::KeventShape::MemoryStatusAdd { udata } => self.kq.register_memstatus(udata).map_err(table)?,
@@ -6635,18 +6635,18 @@ impl Box_ {
             let sec = i64::from_le_bytes(ts[..8].try_into().unwrap());
             let nsec = i64::from_le_bytes(ts[8..].try_into().unwrap());
             if sec < 0 || !(0..1_000_000_000).contains(&nsec) {
-                return Err(fail(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("M48: kevent timeout {{{sec}, {nsec}}} is not a valid timespec: \
+                return Err(fail(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("kevent timeout {{{sec}, {nsec}}} is not a valid timespec: \
                                          the kernel answers EINVAL, which is not modelled"))));
             }
             Some((sec as u64, nsec as u64))
         };
         // 2. The kqueue, the counts and the lists.
         if !self.gkq.is_kqueue(kq) {
-            return Err(fail(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("M48: kevent on fd {kq}, which is not a guest kqueue: the kernel \
+            return Err(fail(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("kevent on fd {kq}, which is not a guest kqueue: the kernel \
                                      answers EBADF, which is not modelled"))));
         }
         if !(0..=MAX_LIST).contains(&nchanges) || !(0..=MAX_LIST).contains(&nevents) {
-            return Err(fail(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("M48: kevent nchanges {nchanges} or nevents {nevents} is outside \
+            return Err(fail(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("kevent nchanges {nchanges} or nevents {nevents} is outside \
                                      0..={MAX_LIST}: a negative count is EINVAL, and a longer list is \
                                      unmeasured (P3)"))));
         }
@@ -6655,7 +6655,7 @@ impl Box_ {
         let bytes = self.read_va_prefix(clist, need);
         if nchanges > 0 && bytes.is_empty() { return Ok((EFAULT, true)); }
         if bytes.len() < need {
-            return Err(fail(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("M48: kevent change list maps {} of {need} bytes: the kernel applies \
+            return Err(fail(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("kevent change list maps {} of {need} bytes: the kernel applies \
                                      the mapped prefix before its EFAULT, which is not modelled (K5)", bytes.len()))));
         }
         let changes: Vec<retrace_arch::Kevent> = bytes.chunks_exact(gkq::KEVENT_BYTES)
@@ -6666,13 +6666,13 @@ impl Box_ {
         // Probed with the write's own condition (`check_writable_va`), not by reading: an event list
         // the guest has not written yet may reach into a reserved page no store has committed.
         if let Err(why) = self.check_writable_va(elist, nevents * gkq::KEVENT_BYTES) {
-            return Err(fail(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("M48: kevent event list at {elist:#x} does not translate for {nevents} \
+            return Err(fail(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("kevent event list at {elist:#x} does not translate for {nevents} \
                                      entries: {why}: the kernel applies the changes before its EFAULT, which \
                                      is not modelled (K5)"))));
         }
         let cur = self.threads.current();
         if let Some(w) = self.gkq.waiter(kq).filter(|_| nevents > 0) {
-            return Err(fail(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("M48: kevent on kq {kq}: thread {cur} scans it while thread {} is \
+            return Err(fail(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("kevent on kq {kq}: thread {cur} scans it while thread {} is \
                                      blocked on it; which thread takes an event is unmeasured (K2)", w.tid))));
         }
         // 3. The changes, then any waiter they readied.
@@ -6683,7 +6683,7 @@ impl Box_ {
         // the events already stored staying stored (T0-receipt).
         if !applied.events.is_empty() {
             let out: Vec<u8> = applied.events.iter().flat_map(|e| e.to_bytes()).collect();
-            self.write_va_committing(elist, &out).map_err(|m| fail(format!("M55: kevent event list: {m}")))?;
+            self.write_va_committing(elist, &out).map_err(|m| fail(format!("kevent event list: {m}")))?;
         }
         if let Some(errno) = applied.errno { return Ok((errno, true)); }
         if !applied.events.is_empty() { return Ok((applied.events.len() as u64, false)); }
@@ -6693,7 +6693,7 @@ impl Box_ {
         let events = self.gkq.take_events(kq, nevents).map_err(fail)?;
         if !events.is_empty() {
             let out: Vec<u8> = events.iter().flat_map(|e| e.to_bytes()).collect();
-            self.write_va_committing(elist, &out).map_err(|m| fail(format!("M48: kevent event list: {m}")))?;
+            self.write_va_committing(elist, &out).map_err(|m| fail(format!("kevent event list: {m}")))?;
             return Ok((events.len() as u64, false));
         }
         // 6. None found: poll, or block.
@@ -6763,7 +6763,7 @@ impl Box_ {
                         let g1 = u64::from(u32::from_le_bytes(raw[4..].try_into().unwrap()));
                         self.gkq.socket_pair(g0, g1)
                     }
-                    None => Err(format!("M55: socketpair: the descriptor pair at {:#x} is not readable after the call", args[si])),
+                    None => Err(format!("socketpair: the descriptor pair at {:#x} is not readable after the call", args[si])),
                 }
             }
             n if retrace_arch::is_close_syscall(n) => self.gkq.close(args[0]),
@@ -6788,7 +6788,7 @@ impl Box_ {
                     // The access mode (0x3) is ignored by the kernel, and `F_GETFL | O_NONBLOCK` is the
                     // idiom that passes it; any other bit is one the model cannot account for.
                     Err(retrace_arch::wall(retrace_arch::WallCategory::Syscalls, format!(
-                        "M55: fcntl(F_SETFL, {:#x}) on guest fd {}: a status flag beyond O_NONBLOCK, O_APPEND and \
+                        "fcntl(F_SETFL, {:#x}) on guest fd {}: a status flag beyond O_NONBLOCK, O_APPEND and \
                          O_ASYNC is not modelled", args[2] as u32, args[0])))
                 } else {
                     self.gkq.set_nonblock(args[0], args[2] as u32 & O_NONBLOCK != 0);
@@ -6801,7 +6801,7 @@ impl Box_ {
                         self.gkq.set_nonblock(args[0], u32::from_le_bytes(raw[..4].try_into().unwrap()) != 0);
                         Ok(())
                     }
-                    None => Err(format!("M55: ioctl(FIONBIO) on guest fd {}: the int at {:#x} is not readable after the call", args[0], args[2])),
+                    None => Err(format!("ioctl(FIONBIO) on guest fd {}: the int at {:#x} is not readable after the call", args[0], args[2])),
                 },
             retrace_arch::SYS_SETSOCKOPT if args[1] == 0xffff && args[2] == SO_NOSIGPIPE && self.gkq.io_end(args[0]).is_some() =>
                 match self.read_va_checked(args[3], 4) {
@@ -6832,7 +6832,7 @@ impl Box_ {
         self.threads.wake(tid)?;
         for (va, bytes) in events {
             self.write_va_committing(*va, bytes).unwrap_or_else(|m| panic!(
-                "M48: kevent event list of thread {tid} at {va:#x}: {m}. guest_kevent checked it at the call"));
+                "kevent event list of thread {tid} at {va:#x}: {m}. guest_kevent checked it at the call"));
         }
         let c = if err { retrace_arch::PSTATE_C } else { 0 };
         if tid == self.threads.current() {
@@ -6879,7 +6879,7 @@ impl Box_ {
         // `FD_SETSIZE`: `select` takes `nfds` up to it (t0 M7: 1025 is EINVAL).
         const FD_SETSIZE: i32 = 1024;
         let name = retrace_arch::syscall_display(num);
-        let wall = |why: String| retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("M53: {name} {why}"));
+        let wall = |why: String| retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("{name} {why}"));
         let fail = |why: String| format!("{why}. args=[{}]", Self::fmt_args(args));
         let is_poll = matches!(num, retrace_arch::SYS_POLL | retrace_arch::SYS_POLL_NOCANCEL);
         // 1. The arguments, and the timeout in nanoseconds (None: infinite).
@@ -7036,7 +7036,7 @@ impl Box_ {
     /// (K8's pending signal) panics with its text on both sides alike (R5).
     fn poll_timed_out(&mut self, tid: usize) {
         let spec = self.gkq.take_poll_waiter(tid).unwrap_or_else(|| panic!(
-            "M53: thread {tid} is blocked in poll or select, which records no such waiter"));
+            "thread {tid} is blocked in poll or select, which records no such waiter"));
         let writes = match spec {
             gkq::PollWait::Poll { va, mut raw } => {
                 for e in raw.chunks_exact_mut(8) { e[6..8].fill(0); }
@@ -7083,8 +7083,8 @@ impl Box_ {
             retrace_arch::SYS_PSYNCH_CVSIGNAL => (next.cvsignal(args)?, None),
             retrace_arch::SYS_PSYNCH_CVBROAD => (next.cvbroad(args, self.threads.len())?, None),
             _ => return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
-                "M48: psynch {} ({num}) is not modelled: only psynch_cvwait, psynch_cvsignal, \
-                 psynch_cvbroad and (M52) the firstfit psynch_mutexwait/psynch_mutexdrop are, the calls the \
+                "psynch {} ({num}) is not modelled: only psynch_cvwait, psynch_cvsignal, \
+                 psynch_cvbroad and the firstfit psynch_mutexwait/psynch_mutexdrop are, the calls the \
                  walks measured (plan P4). args {}",
                 psynch::call_name(num), Self::fmt_args(args)))),
         };
@@ -7095,7 +7095,7 @@ impl Box_ {
             let pending = self.threads.pending_of(w.tid);
             if pending != 0 {
                 return Err(retrace_arch::wall(retrace_arch::WallCategory::Signals, format!(
-                    "M48: a signal is pending on thread {} (set {pending:#x}), which this {} would wake. The \
+                    "a signal is pending on thread {} (set {pending:#x}), which this {} would wake. The \
                      saved context of a thread blocked in psynch_cvwait or psynch_mutexwait is unmeasured, so a delivery there \
                      would be a guess; measure it (the blockedctx.rs shape) before allowing this.",
                     w.tid, psynch::call_name(num))));
@@ -7205,7 +7205,7 @@ impl Box_ {
         if which as u64 == retrace_arch::ITIMER_REAL { return Ok(()); }
         let name = if which as u64 == retrace_arch::ITIMER_VIRTUAL { "ITIMER_VIRTUAL" } else { "ITIMER_PROF" };
         Err(retrace_arch::wall(retrace_arch::WallCategory::Signals, format!(
-            "M53: {call} with {name}: it counts CPU time, which the synthetic clock does not have; only \
+            "{call} with {name}: it counts CPU time, which the synthetic clock does not have; only \
              ITIMER_REAL is modelled")))
     }
 
@@ -7226,7 +7226,7 @@ impl Box_ {
     pub fn sigsuspend_block(&mut self) {
         let cur = self.threads.current();
         let saved_mask = self.threads.frame_mask_of(cur)
-            .expect("M53: sigsuspend_block without guest_sigsuspend: the frame mask is the pre-call mask");
+            .expect("sigsuspend_block without guest_sigsuspend: the frame mask is the pre-call mask");
         self.threads.block(thread::BlockReason::SigSuspend { saved_mask });
     }
 
@@ -7245,7 +7245,7 @@ impl Box_ {
             !matches!(self.threads.state_of(t), thread::ThreadState::Exited(_)) && !self.threads.is_blocked_for(t, sig));
         if let Some(t) = candidate { return t; }
         if matches!(self.threads.state_of(0), thread::ThreadState::Exited(_)) {
-            retrace_arch::refuse!(Signals, "M53: a process-directed signal ({}) with the main thread exited and every other \
+            retrace_arch::refuse!(Signals, "a process-directed signal ({}) with the main thread exited and every other \
                 thread masking it: natively it stays pending on the process, which retrace does not model",
                 retrace_arch::signal_name(sig));
         }
@@ -7314,7 +7314,7 @@ impl Box_ {
         let sem = match self.threads.state_of(tid) {
             thread::ThreadState::Blocked(thread::BlockReason::Kevent { kq, .. }) => {
                 self.gkq.take_waiter(kq).filter(|w| w.tid == tid).unwrap_or_else(|| panic!(
-                    "M55: thread {tid} is blocked in kevent on kq {kq}, which records no such waiter"));
+                    "thread {tid} is blocked in kevent on kq {kq}, which records no such waiter"));
                 false
             }
             thread::ThreadState::Blocked(thread::BlockReason::Sem { .. }) => true,
@@ -7376,7 +7376,7 @@ impl Box_ {
             RaiseKind::Ignore => {}
             RaiseKind::Terminate => self.itimer.set_terminal(sig),
             // M55 §3h: the timer's SIGALRM has no error channel here, so it is `refuse!`.
-            RaiseKind::Refuse => { let text = self.refuse_raise_text(target, sig); retrace_arch::refuse!(Signals, "M55: {}", text) }
+            RaiseKind::Refuse => { let text = self.refuse_raise_text(target, sig); retrace_arch::refuse!(Signals, "{}", text) }
             RaiseKind::Interrupt => {
                 self.interrupt_for_signal(target);
                 self.deliver_signal_to(target, sig, retrace_arch::SI_USER, 0, 0, 0);
@@ -7433,12 +7433,12 @@ impl Box_ {
         match self.sleep.clock_of(port) {
             Some(sleep::SYSTEM_CLOCK) => Ok(sleep::timespec_of_ticks(self.now_guest())),
             Some(sleep::CALENDAR_CLOCK) => Err(retrace_arch::wall(retrace_arch::WallCategory::MachMessages, format!(
-                "M49: clock_get_time on port {port:#x}, a CALENDAR_CLOCK (1) port: wall time is not \
+                "clock_get_time on port {port:#x}, a CALENDAR_CLOCK (1) port: wall time is not \
                  modelled (R7); only SYSTEM_CLOCK (0) is answered, from the guest clock"))),
             Some(id) => Err(retrace_arch::wall(retrace_arch::WallCategory::MachMessages, format!(
-                "M49: clock_get_time on port {port:#x}, clock id {id}: only SYSTEM_CLOCK (0) is answered (R7)"))),
+                "clock_get_time on port {port:#x}, clock id {id}: only SYSTEM_CLOCK (0) is answered (R7)"))),
             None => Err(retrace_arch::wall(retrace_arch::WallCategory::MachMessages, format!(
-                "M49: clock_get_time to port {port:#x}, which no host_get_clock_service (206) reply \
+                "clock_get_time to port {port:#x}, which no host_get_clock_service (206) reply \
                  named. Only a SYSTEM_CLOCK port the guest learned is answered (R7)"))),
         }
     }
@@ -7454,9 +7454,9 @@ impl Box_ {
         // none can be pending here; a MASKED one stays pending and the timeout answers as usual (t0 M8).
         let pending = self.threads.pending_of(tid) & !self.threads.mask_of(tid);
         if pending != 0 {
-            retrace_arch::refuse!(Threads, "M49: sleep of thread {tid} reached its deadline with a deliverable signal \
+            retrace_arch::refuse!(Threads, "sleep of thread {tid} reached its deadline with a deliverable signal \
                     pending (set {pending:#x}), which ending the sleep should have taken at its arrival. \
-                    A signal pended in a handler and unmasked by its `sigreturn` is not materialised there (M16), and a \
+                    A signal pended in a handler and unmasked by its `sigreturn` is not materialised there, and a \
                     later sleep of this thread then reaches its deadline with it still pending; that case is unmodelled.");
         }
         self.deliver_wake(tid, retrace_arch::ETIMEDOUT, true, &[]).unwrap_or_else(|m| panic!("{m}"));
@@ -7494,7 +7494,7 @@ impl Box_ {
     pub fn socket_refusal(&self, num: u64, args: [u64; 8]) -> Option<String> {
         const SOL_SOCKET: u64 = 0xffff;
         let wall = |why: String| retrace_arch::wall(retrace_arch::WallCategory::Syscalls, format!(
-            "M55: {why}. syscall {num} args=[{}]", Self::fmt_args(args)));
+            "{why}. syscall {num} args=[{}]", Self::fmt_args(args)));
         if num == retrace_arch::SYS_SOCKETPAIR && args[0] == 1 && args[1] == 2 {
             return Some(wall("socketpair of SOCK_DGRAM: only a stream pair is modelled".to_string()));
         }
@@ -7573,7 +7573,7 @@ impl Box_ {
         if len == 0 { return Ok(()); }
         let what = if e.socket { "socket" } else { "pipe" };
         let wall = |why: &str| retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
-            "M55: {why}: blocking I/O between threads is not modelled. syscall {num} args=[{}]", Self::fmt_args(args)));
+            "{why}: blocking I/O between threads is not modelled. syscall {num} args=[{}]", Self::fmt_args(args)));
         let fd = args[0];
         if read {
             let unread = e.unread.ok_or_else(|| gkq::lost_count(fd, e.socket))?;
@@ -7794,17 +7794,17 @@ impl Box_ {
             .map_err(|why| format!("{why}. args=[{}]", Self::fmt_args(args)))?;
         let g = GRANULE as u64;
         if addr % g != 0 {
-            return Err(retrace_arch::wall(retrace_arch::WallCategory::Memory, format!("M47: madvise range starts at {addr:#x}, not on a 16 KiB page (native accepts \
+            return Err(retrace_arch::wall(retrace_arch::WallCategory::Memory, format!("madvise range starts at {addr:#x}, not on a 16 KiB page (native accepts \
                 it; no corpus call is unaligned — t0 M1(d)). args=[{}]", Self::fmt_args(args))));
         }
         let end = addr.checked_add(len).and_then(|e| e.checked_add(g - 1)).map(|e| e & !(g - 1))
-            .ok_or_else(|| retrace_arch::wall(retrace_arch::WallCategory::Memory, format!("M47: madvise range {addr:#x}+{len:#x} overflows. args=[{}]", Self::fmt_args(args))))?;
+            .ok_or_else(|| retrace_arch::wall(retrace_arch::WallCategory::Memory, format!("madvise range {addr:#x}+{len:#x} overflows. args=[{}]", Self::fmt_args(args))))?;
         let mut writes = Vec::new();
         let mut page = addr;
         while page < end {
             let backed = self.host_span(page).is_some();
             if !backed && !self.reservations.iter().any(|&(s, l)| (s..s + l).contains(&page)) {
-                return Err(retrace_arch::wall(retrace_arch::WallCategory::Memory, format!("M47: madvise range page {page:#x} is neither backed nor reserved — the \
+                return Err(retrace_arch::wall(retrace_arch::WallCategory::Memory, format!("madvise range page {page:#x} is neither backed nor reserved — the \
                     range runs outside the guest's mappings. args=[{}]", Self::fmt_args(args))));
             }
             if backed && effect == retrace_arch::MadviseEffect::Zero {
@@ -7868,32 +7868,32 @@ impl Box_ {
     pub fn guest_mac_syscall(&mut self, args: [u64; 8]) -> Result<MacSyscall, String> {
         let fail = |why: String| format!("{why}. args=[{}]", Self::fmt_args(args));
         let policy = self.read_guest_cstr(args[0], retrace_arch::MAC_MAX_POLICY_NAME)
-            .map_err(|w| fail(retrace_arch::in_context("M47: __mac_syscall policy name", w)))?;
+            .map_err(|w| fail(retrace_arch::in_context("__mac_syscall policy name", w)))?;
         match retrace_arch::mac_syscall_model(&policy, args[1] as u32).map_err(fail)? {
             retrace_arch::MacCall::AmfiDyldPolicy => {
                 let a = self.read_va_prefix(args[2], 16);
                 if a.len() != 16 {
-                    return Err(fail(retrace_arch::wall(retrace_arch::WallCategory::Syscalls, format!("M47: AMFI argument struct at {:#x} is not mapped for 16 bytes", args[2]))));
+                    return Err(fail(retrace_arch::wall(retrace_arch::WallCategory::Syscalls, format!("AMFI argument struct at {:#x} is not mapped for 16 bytes", args[2]))));
                 }
                 let in_flags = u64::from_le_bytes(a[0..8].try_into().unwrap());
                 let out = u64::from_le_bytes(a[8..16].try_into().unwrap());
                 let out_ipa = self.va_to_ipa(out).filter(|&i| self.read_guest_checked(i, 8).is_some())
-                    .ok_or_else(|| fail(retrace_arch::wall(retrace_arch::WallCategory::Syscalls, format!("M47: AMFI outFlags {out:#x} is not mapped for 8 bytes"))))?;
+                    .ok_or_else(|| fail(retrace_arch::wall(retrace_arch::WallCategory::Syscalls, format!("AMFI outFlags {out:#x} is not mapped for 8 bytes"))))?;
                 Ok(MacSyscall::AmfiDyldPolicy { in_flags, out_ipa })
             }
             retrace_arch::MacCall::SandboxCheck => {
                 let p = self.read_va_prefix(args[2].wrapping_add(16), 8);
                 if p.len() != 8 {
-                    return Err(fail(retrace_arch::wall(retrace_arch::WallCategory::Syscalls, format!("M47: Sandbox argument struct at {:#x} is not mapped through +24", args[2]))));
+                    return Err(fail(retrace_arch::wall(retrace_arch::WallCategory::Syscalls, format!("Sandbox argument struct at {:#x} is not mapped through +24", args[2]))));
                 }
                 let op = self.read_guest_cstr(u64::from_le_bytes(p.try_into().unwrap()), retrace_arch::SANDBOX_OPERATION_MAX)
-                    .map_err(|w| fail(retrace_arch::in_context("M47: Sandbox operation name", w)))?;
+                    .map_err(|w| fail(retrace_arch::in_context("Sandbox operation name", w)))?;
                 let errno = retrace_arch::sandbox_check_continuity(&op).map_err(fail)?;
                 Ok(MacSyscall::SandboxCheck { errno })
             }
             retrace_arch::MacCall::SandboxContainerPath => {
                 if self.read_va_prefix(args[2], 32).len() != 32 {
-                    return Err(fail(retrace_arch::wall(retrace_arch::WallCategory::Syscalls, format!("M47: Sandbox container-path struct at {:#x} is not mapped for 32 bytes", args[2]))));
+                    return Err(fail(retrace_arch::wall(retrace_arch::WallCategory::Syscalls, format!("Sandbox container-path struct at {:#x} is not mapped for 32 bytes", args[2]))));
                 }
                 Ok(MacSyscall::SandboxContainerPath { errno: retrace_arch::ENOTSUP })
             }
@@ -7928,7 +7928,7 @@ impl Box_ {
     /// nothing recorded.
     fn spawn_manager(&mut self) {
         let pthsize = self.pthread_size.expect(
-            "M46: a knote activated with no registered pthread size — bsdthread_register captures it, \
+            "a knote activated with no registered pthread size — bsdthread_register captures it, \
              and every dynamic guest registers at startup") as u64;
         let (stack_base, stack_top, pthread) = self.place_worker_stack(pthsize);
         let tid = self.threads.len();
@@ -7952,7 +7952,7 @@ impl Box_ {
     /// exclusive shadow, so there is none to carry.
     fn enter_manager(&mut self, tid: usize, pthread: u64, stack_base: u64, flags: u64) {
         let entry = self.wq_thread_pc.expect(
-            "M46: a manager upcall with no registered wqthread entry — refusing to enter an invented \
+            "a manager upcall with no registered wqthread entry — refusing to enter an invented \
              address; bsdthread_register captures it at startup");
         let n = self.fill_manager_upcall(pthread);
         let list = pthread - WQ_KEVENT_LIST_OFF;
@@ -7984,12 +7984,12 @@ impl Box_ {
     /// reservation, so the write commits it.
     fn fill_manager_upcall(&mut self, pthread: u64) -> usize {
         let events = self.kq.take_events(retrace_arch::WQ_KEVENT_LIST_LEN);
-        assert!(!events.is_empty(), "M46: a manager upcall with no active knote — request_manager checks has_pending first");
+        assert!(!events.is_empty(), "a manager upcall with no active knote — request_manager checks has_pending first");
         let list = pthread - WQ_KEVENT_LIST_OFF;
         for (i, e) in events.iter().enumerate() {
             let at = list + (i * retrace_arch::KEVENT_QOS_SIZE) as u64;
             self.write_va_committing(at, &e.to_bytes())
-                .unwrap_or_else(|m| panic!("M46: writing the manager's event list: {m}"));
+                .unwrap_or_else(|m| panic!("writing the manager's event list: {m}"));
         }
         events.len()
     }
@@ -8215,14 +8215,14 @@ impl Box_ {
         let cur = self.threads.current();
         if self.kq.manager() != kq::Manager::Bound(cur) {
             return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
-                "M46: workq_kernreturn THREAD_KEVENT_RETURN (0x40) from thread {cur}, which is not the \
+                "workq_kernreturn THREAD_KEVENT_RETURN (0x40) from thread {cur}, which is not the \
                  bound event manager ({:?}): only a thread entered with WQ_FLAG_THREAD_EVENT_MANAGER \
-                 returns kevents here (M46 §3d). args=[{}]", self.kq.manager(), Self::fmt_args(args))));
+                 returns kevents here. args=[{}]", self.kq.manager(), Self::fmt_args(args))));
         }
         let n = (args[2] & 0xffff_ffff) as usize;
         if n > retrace_arch::WQ_KEVENT_LIST_LEN || args[3] & 0xffff_ffff != 0 {
             return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
-                "M46: workq_kernreturn THREAD_KEVENT_RETURN with {n} changes and x3 {:#x}; measured at \
+                "workq_kernreturn THREAD_KEVENT_RETURN with {n} changes and x3 {:#x}; measured at \
                  most {} changes and x3 0 (libpthread pthread.c:2581-2635). args=[{}]",
                 args[3], retrace_arch::WQ_KEVENT_LIST_LEN, Self::fmt_args(args))));
         }
@@ -8230,14 +8230,14 @@ impl Box_ {
         let bytes = self.read_va_prefix(args[1], n * size);
         if bytes.len() < n * size {
             return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
-                "M46: unmeasured KEVENT_RETURN change: the change list read {} of {} bytes: it does not \
+                "unmeasured KEVENT_RETURN change: the change list read {} of {} bytes: it does not \
                  fully translate. args=[{}]", bytes.len(), n * size, Self::fmt_args(args))));
         }
         let mut changes = Vec::with_capacity(n);
         for (i, e) in bytes.chunks_exact(size).enumerate() {
             let entry: &[u8; retrace_arch::KEVENT_QOS_SIZE] = e.try_into().expect("chunks_exact");
             changes.push(retrace_arch::kevent_return_change(entry).map_err(|why| retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
-                "M46: unmeasured KEVENT_RETURN change: changelist[{i}].{why}. args=[{}]",
+                "unmeasured KEVENT_RETURN change: changelist[{i}].{why}. args=[{}]",
                 Self::fmt_args(args))))?);
         }
         for c in changes {
@@ -8245,7 +8245,7 @@ impl Box_ {
                 retrace_arch::ChangeEntry::TimerAdd { ident, deadline, leeway, udata } =>
                     self.kq.add_timer(ident, deadline, leeway, udata),
                 retrace_arch::ChangeEntry::TimerDelete { ident } => self.kq.delete_timer(ident),
-            }.map_err(|why| retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("M46: KEVENT_RETURN against the knote table: {why}. args=[{}]",
+            }.map_err(|why| retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("KEVENT_RETURN against the knote table: {why}. args=[{}]",
                                     Self::fmt_args(args))))?;
         }
         if self.kq.armed_count() > 0 {
@@ -8292,7 +8292,7 @@ impl Box_ {
                 thread::ThreadState::Blocked(thread::BlockReason::Sleep { .. }) => self.sleep_timed_out(tid),
                 thread::ThreadState::Blocked(thread::BlockReason::Sem { .. }) => self.sem_timed_out(tid),
                 thread::ThreadState::Blocked(thread::BlockReason::Poll { .. }) => self.poll_timed_out(tid),
-                s => unreachable!("M48: due_waiters returned thread {tid} in {s:?}, which has no deadline"),
+                s => unreachable!("due_waiters returned thread {tid} in {s:?}, which has no deadline"),
             }
         }
     }
@@ -8303,7 +8303,7 @@ impl Box_ {
     /// panics with its text on both sides (R5).
     fn kevent_timed_out(&mut self, tid: usize, kq: u64) {
         let w = self.gkq.take_waiter(kq).filter(|w| w.tid == tid).unwrap_or_else(|| panic!(
-            "M48: thread {tid} is blocked in kevent on kq {kq}, which records no such waiter"));
+            "thread {tid} is blocked in kevent on kq {kq}, which records no such waiter"));
         self.deliver_kevent(kq, w).unwrap_or_else(|m| panic!("{m}"));
     }
 
@@ -8338,7 +8338,7 @@ impl Box_ {
     /// only a dynamic guest reads the guest clock through `mach_get_times` or arms a timer.
     fn timebase_offset(&self) -> u64 {
         let b = self.read_guest_checked(COMMPAGE_TIMEBASE_OFFSET_IPA, 8).expect(
-            "M46: the guest clock was read on a box with no commpage. Only a dynamic guest reaches \
+            "the guest clock was read on a box with no commpage. Only a dynamic guest reaches \
              mach_get_times's fallback or arms a timer.");
         u64::from_le_bytes(b.try_into().unwrap())
     }
@@ -8364,7 +8364,7 @@ impl Box_ {
         let now = self.now_guest().to_le_bytes();
         // An aligned u64 cannot straddle a page, so one translation covers all 8 bytes.
         let ipa = self.va_to_ipa(va).filter(|_| va.is_multiple_of(8)).unwrap_or_else(|| panic!(
-            "M46 R7: gettimeofday's mach-time out-parameter {va:#x} does not translate or is not \
+            "gettimeofday's mach-time out-parameter {va:#x} does not translate or is not \
              8-aligned, though the kernel has just written it"));
         self.write_guest(ipa, &now);
         Region { ipa, bytes: now.to_vec() }
@@ -8481,7 +8481,7 @@ impl Box_ {
         let placed = self.bump_fit(g + rounded, g - 1)
             .and_then(|a| self.guest_vm_reserve_masked(a + g, len, 0, 0).ok().map(|base| (a, base)));
         let Some((a, base)) = placed else {
-            retrace_arch::refuse!(Memory, "M57: no address space left for a worker thread's stack (the guest's address space is exhausted)");
+            retrace_arch::refuse!(Memory, "no address space left for a worker thread's stack (the guest's address space is exhausted)");
         };
         // The cursor ends past the stack, as every other bump placement leaves it.
         self.mmap_next = a + g + rounded;
@@ -8518,14 +8518,14 @@ impl Box_ {
         let byte = ((priority >> 8) & 0xff) as u32;
         // `is_power_of_two()` is false for 0, so this rejects "no QoS bit" as well as "several".
         if !byte.is_power_of_two() {
-            retrace_arch::refuse!(Threads, "M18 Stage 2b: REQTHREADS priority {priority:#x} has QoS byte {byte:#x}, which is not a \
-             single set bit. Every measured request carries exactly one (§1e), and the flags word \
+            retrace_arch::refuse!(Threads, "REQTHREADS priority {priority:#x} has QoS byte {byte:#x}, which is not a \
+             single set bit. Every measured request carries exactly one, and the flags word \
              libpthread demands encodes exactly one index — measure what issues this before \
              modelling it rather than picking a bit.");
         }
         let idx = byte.trailing_zeros() as u64 + 1;
         if !(1..=6).contains(&idx) {
-            retrace_arch::refuse!(Threads, "M18 Stage 2b: REQTHREADS priority {priority:#x} decodes to QoS index {idx}, outside \
+            retrace_arch::refuse!(Threads, "REQTHREADS priority {priority:#x} decodes to QoS index {idx}, outside \
              the 1..=6 libpthread accepts (`0x2e34 cmp w9, #0x5` after a `sub w9,w9,#1`). Outside \
              that range libpthread silently leaves the worker's priority 0 rather than failing, so \
              this refuses by value instead of shipping a worker at a priority nobody asked for.");
@@ -8549,7 +8549,7 @@ impl Box_ {
     /// page PROT_NONE (M13's first real caller) two traps before this one. M14 places no IPAs.
     pub fn guest_bsdthread_create(&mut self, args: [u64; 8]) -> u64 {
         let (func, arg, stack, pthread, flags) = (args[0], args[1], args[2], args[3], args[4]);
-        let start = self.thread_start_pc.unwrap_or_else(|| retrace_arch::refuse!(Threads, "M14: bsdthread_create before bsdthread_register — refusing to invent a thread entry \
+        let start = self.thread_start_pc.unwrap_or_else(|| retrace_arch::refuse!(Threads, "bsdthread_create before bsdthread_register — refusing to invent a thread entry \
              point. Every dynamic guest registers one at startup (measured, M14 Task 2), so this \
              means the guest took a path no measurement covers."));
 
@@ -8661,7 +8661,7 @@ impl Box_ {
         // resurface as the very "join returns without waiting" bug this write exists to prevent.
         let port = guest_thread_kport(tid);
         let ipa = self.va_to_ipa(pthread + PTHREAD_KPORT_OFF).unwrap_or_else(|| {
-            retrace_arch::refuse!(Threads, "M14: bsdthread_create pthread struct {pthread:#x} has no mapping for +0xf8")
+            retrace_arch::refuse!(Threads, "bsdthread_create pthread struct {pthread:#x} has no mapping for +0xf8")
         });
         self.write_guest(ipa, &port.to_le_bytes());
         0
@@ -8905,7 +8905,7 @@ impl Box_ {
         // M52 §3d (T3-dead-name): only a signal on a destroyed name was measured (it answers
         // KERN_INVALID_NAME); a wait on one is refused by value before anything moves.
         if self.sems.is_dead(port) {
-            retrace_arch::refuse!(Threads, "M52: semaphore_wait_trap (-36) on port {:#x}, a semaphore \
+            retrace_arch::refuse!(Threads, "semaphore_wait_trap (-36) on port {:#x}, a semaphore \
                  semaphore_destroy ended: only a signal on a destroyed name was measured \
                  (KERN_INVALID_NAME), not a wait.", port);
         }
@@ -8934,7 +8934,7 @@ impl Box_ {
         self.sleep.check_sleep_semaphore("semaphore_timedwait_trap (-38)", args[0] as u32)?;
         if self.sems.is_dead(port) {
             return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
-                "M52: semaphore_timedwait_trap (-38) on port {:#x}, a semaphore semaphore_destroy ended: only \
+                "semaphore_timedwait_trap (-38) on port {:#x}, a semaphore semaphore_destroy ended: only \
                  a signal on a destroyed name was measured (KERN_INVALID_NAME), not a wait.", port)));
         }
         self.sleep.note_semaphore(args[0] as u32);
@@ -8965,7 +8965,7 @@ impl Box_ {
                 | retrace_arch::SWITCH_OPTION_WAIT);
             if port != 0 || !measured {
                 return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
-                    "M52: thread_switch (mach trap -61) with thread {:#x}, option {} ({}): only MACH_PORT_NULL with \
+                    "thread_switch (mach trap -61) with thread {:#x}, option {} ({}): only MACH_PORT_NULL with \
                      SWITCH_OPTION_NONE (0), DEPRESS (1) and WAIT (2) are modelled, the options real callers pass (t0 M6)",
                     port, option as u32,
                     match option { 0 => "NONE", 1 => "DEPRESS", 2 => "WAIT", _ => "not in mach/thread_switch.h" })));
@@ -9166,7 +9166,7 @@ impl Box_ {
             // M50 D1: a wall, not a panic. Both causes are possible (a real deadlock in the guest, or
             // a wake retrace does not model), so the line names both.
             None => Err(Unsupported::new(WallCategory::Threads, format!(
-                "M14: DEADLOCK - every thread is blocked and nothing is left to wake one ({} live of {} \
+                "DEADLOCK - every thread is blocked and nothing is left to wake one ({} live of {} \
                  total; states {:?}). Natively this program would hang here; if it does not, this is a \
                  bug in retrace: please report it. Knotes: {:?}. Guest kqueues: {:?}",
                 self.threads.live(),

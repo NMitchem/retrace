@@ -95,7 +95,7 @@ pub fn timeout_ticks(sec: u64, nsec: u64) -> Result<Option<u64>, String> {
     let ns = ((sec as i64) >= 0).then_some(sec)
         .and_then(|s| s.checked_mul(1_000_000_000))
         .and_then(|n| n.checked_add(nsec as u64))
-        .ok_or_else(|| retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("M48: psynch psynch_cvwait timeout sec {} nsec {nsec:#x}: negative or past \
+        .ok_or_else(|| retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("psynch psynch_cvwait timeout sec {} nsec {nsec:#x}: negative or past \
                                 2^64 ns, which no guest was measured to pass", sec as i64)))?;
     Ok(Some((ns as u128 * 3 / 125) as u64))
 }
@@ -201,7 +201,7 @@ fn woken_word(psynchretval: u32) -> u32 {
 
 fn refuse_shared(call: &str, cv: u64, flags: u32) -> Result<(), String> {
     if flags & PSHARED_MASK == PSHARED {
-        return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("M48: psynch {call} on cv {cv:#x} with flags {flags:#x}: a process-shared cv is keyed \
+        return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("psynch {call} on cv {cv:#x} with flags {flags:#x}: a process-shared cv is keyed \
                             by its VM object (ksyn_findobj), not its address; every measured flags word is 0xa0 \
                             (plan P4)")));
     }
@@ -434,7 +434,7 @@ impl Mkwq {
 /// notify and lock count vary freely: user space owns them and the kernel never reads them.
 fn admit_mutex(call: &str, mutex: u64, flags: u32) -> Result<(), String> {
     let wall = |why: String| retrace_arch::wall(retrace_arch::WallCategory::Threads,
-        format!("M52: psynch {call} on mutex {mutex:#x} with flags {flags:#x}: {why}"));
+        format!("psynch {call} on mutex {mutex:#x} with flags {flags:#x}: {why}"));
     if flags & PSHARED_MASK == PSHARED {
         return Err(wall("a process-shared mutex is keyed by its VM object (ksyn_findobj), not its address".into()));
     }
@@ -535,14 +535,14 @@ impl Psynch {
         let (csgen, cgen) = ((args[1] >> 32) as u32, args[1] as u32);
         refuse_shared("psynch_cvwait", cv, flags)?;
         if mutex != 0 {
-            return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("M48: psynch psynch_cvwait on cv {cv:#x} with mutex {mutex:#x} (mugen {:#x}): the \
+            return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("psynch psynch_cvwait on cv {cv:#x} with mutex {mutex:#x} (mugen {:#x}): the \
                                 cv would drop a firstfit mutex that has a kernel waiter (plan F3), which needs the \
                                 unmodelled psynch_mutexwait/psynch_mutexdrop pair; every measured cvwait passes \
                                 mutex 0 (plan P4)", args[4])));
         }
         let lockseq = cgen & PTHRW_COUNT_MASK;
         if is_seqhigher_eq(csgen, lockseq) {
-            return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("M48: psynch psynch_cvwait on cv {cv:#x}: S {csgen:#x} is not below L {cgen:#x}, \
+            return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("psynch psynch_cvwait on cv {cv:#x}: S {csgen:#x} is not below L {cgen:#x}, \
                                 which _psynch_cvwait answers EINVAL; no guest was measured to pass it")));
         }
         let mut kwq = self.find(cv, cgen, cvugen, csgen);
@@ -551,7 +551,7 @@ impl Psynch {
         let ret = match kwq.find_cvpreposeq(lockseq) {
             None => {
                 kwq.insert(Kwe { state: KweState::InWait, lockseq, count: 1, thread: Some(tid) })
-                    .map_err(|e| retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("M48: psynch psynch_cvwait on cv {cv:#x} by thread {tid}: {e}")))?;
+                    .map_err(|e| retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("psynch psynch_cvwait on cv {cv:#x} by thread {tid}: {e}")))?;
                 Ret::Block
             }
             Some(i) => {
@@ -559,7 +559,7 @@ impl Psynch {
                 let kwe = kwq.queue[i];
                 match kwe.state {
                     KweState::InWait => return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
-                        "M48: psynch psynch_cvwait on cv {cv:#x} by thread {tid}: thread {} already waits at \
+                        "psynch psynch_cvwait on cv {cv:#x} by thread {tid}: thread {} already waits at \
                          sequence {lockseq:#x}, which _psynch_cvwait answers EBUSY",
                         kwe.thread.expect("an InWait entry names its thread")))),
                     // A prepost at our own sequence: consume one of its references.
@@ -573,7 +573,7 @@ impl Psynch {
                     // A prepost above our sequence can leave its own waiter unmatched, so the kernel
                     // converts it to a broadcast (kern_synch.c:1233-1244).
                     KweState::Prepost => kwq.broadcast(kwe.lockseq, &mut updatebits, &mut woken)
-                        .map_err(|e| retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("M48: psynch psynch_cvwait on cv {cv:#x} by thread {tid}: {e}")))?,
+                        .map_err(|e| retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("psynch psynch_cvwait on cv {cv:#x} by thread {tid}: {e}")))?,
                     KweState::Broadcast => {}
                 }
                 updatebits |= PTHRW_INC;
@@ -592,7 +592,7 @@ impl Psynch {
         let (cv, port, flags) = (args[0], args[3] as u32, args[7] as u32);
         refuse_shared("psynch_cvsignal", cv, flags)?;
         if port != 0 {
-            return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("M48: psynch psynch_cvsignal on cv {cv:#x} targets thread port {port:#x} \
+            return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("psynch psynch_cvsignal on cv {cv:#x} targets thread port {port:#x} \
                                 (pthread_cond_signal_thread_np): the targeted form was never measured (plan P4)")));
         }
         self.signal("psynch_cvsignal", cv, args[1] as u32, args[2] as u32, (args[1] >> 32) as u32, false)
@@ -608,7 +608,7 @@ impl Psynch {
         // guest's count is its unreleased waiters, fewer than its threads, so the guest's own thread
         // count refuses only a count no guest can produce (T5-d).
         if count as usize > nthreads {
-            return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("M48: psynch psynch_cvbroad on cv {cv:#x} releases {count} waiters, more than the \
+            return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("psynch psynch_cvbroad on cv {cv:#x} releases {count} waiters, more than the \
                                 guest's {nthreads} threads (the kernel answers EBUSY above task_threadmax)")));
         }
         self.signal("psynch_cvbroad", cv, args[1] as u32, (args[2] >> 32) as u32, (args[1] >> 32) as u32, true)
@@ -620,10 +620,10 @@ impl Psynch {
         let uptoseq = cgen & PTHRW_COUNT_MASK;
         let fromseq = (cugen & PTHRW_COUNT_MASK).wrapping_add(PTHRW_INC);
         if is_seqhigher(fromseq, uptoseq) || is_seqhigher(csgen, uptoseq) {
-            return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("M48: psynch {call} on cv {cv:#x}: L {cgen:#x}, U {cugen:#x}, S {csgen:#x} are out \
+            return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("psynch {call} on cv {cv:#x}: L {cgen:#x}, U {cugen:#x}, S {csgen:#x} are out \
                                 of order, which __psynch_cvsignal answers EINVAL; no guest was measured to pass them")));
         }
-        let at = |e: String| retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("M48: psynch {call} on cv {cv:#x}: {e}"));
+        let at = |e: String| retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("psynch {call} on cv {cv:#x}: {e}"));
         let mut kwq = self.find(cv, cgen, cugen, csgen);
         kwq.update(cgen, cugen, csgen);
         let (mut updatebits, mut woken) = (0, Vec::new());
@@ -649,9 +649,9 @@ impl Psynch {
     /// blocked on `cv` with a deadline, so that is a box defect, not a guest shape.
     pub fn time_out(&mut self, cv: u64, tid: usize) -> TimedOut {
         let mut kwq = self.kwqs.get(&cv).cloned()
-            .unwrap_or_else(|| panic!("M48: psynch deadline of thread {tid} on cv {cv:#x}, which has no queue"));
+            .unwrap_or_else(|| panic!("psynch deadline of thread {tid} on cv {cv:#x}, which has no queue"));
         let i = kwq.queue.iter().position(|k| k.state == KweState::InWait && k.thread == Some(tid))
-            .unwrap_or_else(|| panic!("M48: psynch deadline of thread {tid} on cv {cv:#x}, where it does not wait: {kwq:?}"));
+            .unwrap_or_else(|| panic!("psynch deadline of thread {tid} on cv {cv:#x}, where it does not wait: {kwq:?}"));
         kwq.queue.remove(i);
         let (mut word, mut woken) = (ETIMEDOUT, Vec::new());
         kwq.sword = kwq.sword.wrapping_add(PTHRW_INC);
@@ -848,7 +848,7 @@ mod tests {
         assert_eq!(timeout_ticks(0, 0x4000_0000), Ok(None), "nsec loses its top two bits before the zero test");
         assert_eq!(timeout_ticks(0, 0xffff_ffff_0000_0001), Ok(Some(0)), "the kernel's nsec is 32 bits");
         let e = timeout_ticks(u64::MAX, 0).unwrap_err().unmark();
-        assert!(e.starts_with("M48: psynch ") && e.contains("sec -1"), "{e}");
+        assert!(e.starts_with("psynch ") && e.contains("sec -1"), "{e}");
     }
 
     /// R5 and T5-d: every shape no walk measured is refused by value, naming it, and the model is
@@ -875,7 +875,7 @@ mod tests {
         ];
         for (want, got) in cases {
             let e = got.expect_err(want).unmark();
-            assert!(e.starts_with("M48: psynch ") && e.contains(want), "{want}: {e}");
+            assert!(e.starts_with("psynch ") && e.contains(want), "{want}: {e}");
         }
         assert_eq!(p, before, "a refusal leaves the model untouched");
     }
@@ -989,7 +989,7 @@ mod tests {
         ];
         for (want, got) in cases {
             let e = got.expect_err(want).unmark();
-            assert!(e.starts_with("M52: psynch psynch_mutex") && e.contains(want), "{want}: {e}");
+            assert!(e.starts_with("psynch psynch_mutex") && e.contains(want), "{want}: {e}");
         }
         assert_eq!(p, before, "a refusal leaves the model untouched");
     }

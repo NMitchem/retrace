@@ -26,7 +26,7 @@ fn an_alias_of_stdout_is_a_console_write_but_closes_the_generic_way() {
     assert_eq!(b.fds_mut().dup2(1, 17, Some(41)).unwrap(), (17, None));
     assert_eq!(b.fds().slots()[17], FdSlot::Console(1));
     for num in [SYS_WRITE, SYS_WRITE_NOCANCEL] {
-        assert!(b.is_console_write(num, 17), "a write to the alias is mirrored (spec §3a)");
+        assert!(b.is_console_write(num, 17), "a write to the alias is mirrored");
         assert!(b.is_console_write(num, 1), "and to stdout itself, still");
     }
     for num in [SYS_CLOSE, SYS_CLOSE_NOCANCEL] {
@@ -50,7 +50,7 @@ fn a_displaced_console_slot_is_neither_a_console_write_nor_a_console_close() {
     // displaced identity mapping, which guest_dup2 never closes.
     assert_eq!(b.fds_mut().dup2(f, 1, Some(32)).unwrap(), (1, Some(1)));
     assert_eq!(b.fds().slots()[1], FdSlot::Open);
-    assert!(!b.is_console_write(SYS_WRITE, 1), "a write to 1 now goes to the file (spec §3a)");
+    assert!(!b.is_console_write(SYS_WRITE, 1), "a write to 1 now goes to the file");
     assert!(!b.is_console_close(SYS_CLOSE, 1),
         "close(1) now closes the dup (32) through the generic path — not retrace's stdout");
     assert!(b.is_console_close(SYS_CLOSE, 2), "stderr's identity slot is untouched");

@@ -333,7 +333,7 @@ The debugger's commands, for `--script`:
 | Command | What it does |
 |---|---|
 | `summary` | what `retrace debug <trace>` prints. It leaves the cursor at the end of the recording |
-| `last-write <addr> [<len>]` | from the cursor, run back to the last write to `len` bytes at `addr` (1, 2, 4 or 8; 8 if omitted) and print the writer: a store with its function, file and line, thread, position and backtrace, or the system call that wrote it. The cursor moves to the write, so another `last-write` finds the one before. If nothing wrote it since the program started or since an exec, it says so and the cursor stays |
+| `last-write <addr> [<len>]` | from the cursor, run back to the last write to `len` bytes at `addr` (1, 2, 4 or 8; 8 if omitted) and print the writer: a store with its function, file and line, thread, position and backtrace, or the system call that wrote it. The cursor moves to the write, so another `last-write` finds the one before. If nothing wrote it since the program started or since an exec, it says so and the cursor stays. At the start of the recording it searches back from the end. In a C or C++ program built with `-g`, `addr` can be a global variable or a field or element of one (`app.insert`, `table[3]`), and its size is the length |
 | `bt [<thread>]` | the backtrace of the current thread or of another, a blocked one included, with file and line where the debug info has them |
 | `goto <n> <k>` | move to position `(n, k)`, as `summary`, `where` and `last-write` print it |
 | `where` | the cursor's position, pc, thread and function |

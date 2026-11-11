@@ -92,7 +92,7 @@ fn a_thread_directed_signal_interrupts_kevent() {
 fn a_handled_signal_to_a_condvar_waiter_is_refused_at_the_raise() {
     let (rec, _) = record("cv");
     assert!(rec.stderr.contains(
-        "retrace: unsupported: M55: a handled signal (SIGUSR1) to thread 0, blocked in psynch_cvwait"),
+        "retrace: unsupported: a handled signal (SIGUSR1) to thread 0, blocked in psynch_cvwait"),
         "the refusal names the signal and the call. stderr:\n{}", rec.stderr);
     assert_eq!(rec.code, Some(4), "a wall exits 4. stderr:\n{}", rec.stderr);
     assert!(!rec.stderr.contains("DEADLOCK"), "not the deadlock wall, whose text would be false. stderr:\n{}", rec.stderr);
@@ -161,7 +161,7 @@ fn a_default_sigpipe_ends_the_process_with_141() {
 fn a_refused_sigpipe_replays_to_the_incomplete_recording_line() {
     let (rec, trace) = record("cvpipe");
     assert_eq!(rec.code, Some(4), "stderr:\n{}", rec.stderr);
-    assert!(rec.stderr.contains("retrace: unsupported: M55: a handled signal (SIGPIPE) to thread 0, blocked in psynch_cvwait"),
+    assert!(rec.stderr.contains("retrace: unsupported: a handled signal (SIGPIPE) to thread 0, blocked in psynch_cvwait"),
         "stderr:\n{}", rec.stderr);
     let rp = util::run_bounded(util::bin(), &["replay", trace.to_str().unwrap()], &[], BOUND);
     assert_eq!(rp.code, Some(4), "replay stderr:\n{}", rp.stderr);

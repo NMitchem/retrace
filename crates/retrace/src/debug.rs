@@ -1224,7 +1224,7 @@ impl<'a> Exec<'a> {
             // presented as one. Calling a SIGABRT a fault is the same lie that got Event::Crash
             // reuse rejected in the spec, and the debug output would carry it forever.
             Outcome::Signal { sig } => line(out, format_args!("guest terminated by signal {sig}"))?,
-            Outcome::Refused(_) | Outcome::Incomplete(_) => unreachable!("M50 R5: a debugger opens only a complete recording, and replay never refuses one"),
+            Outcome::Refused(_) | Outcome::Incomplete(_) => unreachable!("a debugger opens only a complete recording, and replay never refuses one"),
         }
         let t = self.sess().landmark();
         let kf = self.probe_window_len(t)?; // drops the live session (one VM per process)
@@ -1587,7 +1587,7 @@ impl<'a> Exec<'a> {
                     Outcome::Exit { code } => format!("the guest exited (code {code}) on thread {by}"),
                     Outcome::Crash { pc, esr, far, .. } => format!("thread {by} crashed: pc={pc:#x} far={far:#x} esr={esr:#x}"),
                     Outcome::Signal { sig } => format!("the guest was terminated by signal {sig} on thread {by}"),
-                    Outcome::Refused(_) | Outcome::Incomplete(_) => unreachable!("M50 R5: a debugger opens only a complete recording, and replay never refuses one"),
+                    Outcome::Refused(_) | Outcome::Incomplete(_) => unreachable!("a debugger opens only a complete recording, and replay never refuses one"),
                 };
                 Halt::Refused(format!("the recording ended ({what}) before thread {} ran{}",
                     t + 1, if again { " again" } else { "" }))

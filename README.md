@@ -30,19 +30,21 @@ With retrace, record until a run fails, then ask who wrote the bad pointer:
 ```console
 $ while retrace record ./visits; do :; done
 ...
-retrace: the program was killed by SIGSEGV (fault at 0x6f48207961727275, pc 0x186f08d20 in a system library)
+retrace: the program was killed by SIGSEGV (fault at 0x6f48207961727275, pc 0x186f08d20 in vdbeUnbind+0x20 (libsqlite3.dylib))
 
-$ retrace debug visits.retrace --script 'summary; last-write 0x100008070'
-...
-last write to 0x100008070 (8 bytes): store at 0x185555f08 on thread 0, (546, 13428)
-#0 0x185555f08
+$ retrace debug visits.retrace --script 'last-write app.insert'
+> last-write app.insert
+at the start of the recording: searching back from its end
+last write to 0x100008070 (8 bytes): store at 0x185555f08 in _platform_memmove+0x1a8 (libsystem_platform.dylib) on thread 0, (546, 13428)
+#0 0x185555f08 in _platform_memmove+0x1a8 (libsystem_platform.dylib)
 #1 0x100000630 in _main+0x100 at /Users/you/visits.c:21
+#2 0x1804b8d7c in start+0x19fc (dyld)
 ```
 
-`0x100008070` is `&app.insert`, which `lldb --batch -o 'p &app.insert' ./visits` prints. Frame #0 is `memcpy`,
-and frame #1 is the line that called it. The fault address is text: `urray Ho`, from "Grace Brewster Murray
-Hopper", the one name too long for the 16-byte field. The recording keeps the run that failed, so you can ask it
-anything else, as often as you like.
+`last-write` runs the recording backwards to the last instruction that wrote `app.insert`: a `memcpy`, called
+from line 21. The fault address is text, `urray Ho`, from "Grace Brewster Murray Hopper", the one name too long
+for the 16-byte field. The recording keeps the run that failed, so you can ask it anything else, as often as you
+like.
 
 ## Install
 
@@ -68,7 +70,7 @@ For other agents, the [guide](docs/guide.md#telling-your-agent-about-retrace) ha
 ```sh
 retrace record ./prog args        # run it once, recorded, into prog.retrace
 retrace debug prog.retrace        # how it ended: the crash or panic, its thread and backtrace
-retrace debug prog.retrace --script 'summary; last-write <address> 8'   # which line last wrote those 8 bytes
+retrace debug prog.retrace --script 'last-write counter'   # which line last wrote a global (or an address)
 retrace lldb prog.retrace         # lldb, with reverse-continue and reverse-step
 CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER="retrace record" cargo test   # record every test binary
 ```

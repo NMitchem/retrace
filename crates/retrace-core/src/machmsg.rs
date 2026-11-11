@@ -582,7 +582,7 @@ pub fn decode_clock_service_reply(buf: &[u8]) -> Option<u32> {
 pub fn check_clock_get_time(m: &Msg2) -> Result<(), String> {
     if m.send_size != 24 || m.bits & MACH_MSGH_BITS_COMPLEX != 0 || m.rcv_size < 52 {
         return Err(retrace_arch::wall(retrace_arch::WallCategory::MachMessages, format!(
-            "M49: clock_get_time with send_size {} bits {:#x} rcv_size {}: only libc's shape (a bare \
+            "clock_get_time with send_size {} bits {:#x} rcv_size {}: only libc's shape (a bare \
              24-byte simple header, room for the 52-byte reply) is modelled", m.send_size, m.bits, m.rcv_size)));
     }
     Ok(())
@@ -1170,7 +1170,7 @@ mod tests {
         for (bits, send, rcv) in [(0x8000_1513, 24, 52), (0x1513, 28, 52), (0x1513, 24, 44)] {
             let mut m = Msg2::unpack(&[0x16d0, KOBJ, 0x18_0000_1513, 0x1103_0000_0903, 0x3e8_0000_0000, 0, 0x34, 0]);
             (m.bits, m.send_size, m.rcv_size) = (bits, send, rcv);
-            assert!(retrace_arch::Unsupported::from_marked(&check_clock_get_time(&m).unwrap_err()).unwrap().what.starts_with("M49: clock_get_time "), "{bits:#x} {send} {rcv}");
+            assert!(retrace_arch::Unsupported::from_marked(&check_clock_get_time(&m).unwrap_err()).unwrap().what.starts_with("clock_get_time "), "{bits:#x} {send} {rcv}");
         }
     }
 

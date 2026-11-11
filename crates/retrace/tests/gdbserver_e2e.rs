@@ -184,7 +184,7 @@ fn k_and_d_end_the_server_cleanly_and_so_does_a_dropped_connection() {
 #[test]
 fn a_peer_that_resets_the_connection_ends_the_server_cleanly() {
     // Before Ruling T2-a this exited 5, `GDBSERVER ERROR: socket: Connection reset by peer`.
-    assert_eq!(Rsp::spawn(watchsweep(), &[]).reset_connection(), 0, "an RST is the peer leaving too (§3a)");
+    assert_eq!(Rsp::spawn(watchsweep(), &[]).reset_connection(), 0, "an RST is the peer leaving too");
 }
 
 #[test]
@@ -201,7 +201,7 @@ fn a_second_connection_is_refused_while_the_first_is_served() {
     let second = TcpStream::connect(("127.0.0.1", port)).map_err(|e| e.kind());
     let _ = child.kill();
     let _ = child.wait();
-    assert_eq!(second.err(), Some(std::io::ErrorKind::ConnectionRefused), "one connection per server (§3a)");
+    assert_eq!(second.err(), Some(std::io::ErrorKind::ConnectionRefused), "one connection per server");
 }
 
 /// `&buf[40]`: the address watchsweep publishes in its write(1, …) (the watchsweep_e2e oracle).
