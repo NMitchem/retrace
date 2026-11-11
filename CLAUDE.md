@@ -42,14 +42,14 @@ just gate          # THE exit gate: cargo test --workspace + clippy -D warnings.
   cargo test -p retrace --bins -- --test-threads=1          # don't omit — see below
   ```
   **Do not omit the `--bins` chunk.** `--test <name>` selects integration-test targets only, so the
-  81 unit tests inside the `retrace` binary itself (as of M58: 23 in `crates/retrace/src/debug.rs`, 14 in
-  `crates/retrace/src/rsp.rs`, 13 in `crates/retrace/src/demangle.rs`, 8 each in `crates/retrace/src/main.rs` and
-  `crates/retrace/src/unwind.rs`, 6 each in `crates/retrace/src/image.rs` and `crates/retrace/src/source.rs`, 3 in
-  `crates/retrace/src/json.rs`) run in **none** of
+  93 unit tests inside the `retrace` binary itself (as of M58: 24 in `crates/retrace/src/debug.rs`, 14 each in
+  `crates/retrace/src/rsp.rs` and `crates/retrace/src/demangle.rs`, 12 in `crates/retrace/src/source.rs`, 8 each in
+  `crates/retrace/src/main.rs` and `crates/retrace/src/unwind.rs`, 6 in `crates/retrace/src/image.rs`, 4 in
+  `crates/retrace/src/tool.rs`, 3 in `crates/retrace/src/json.rs`) run in **none** of
   the other chunks; only the unchunked `--workspace` run, or a whole-package `cargo test -p retrace`
   with no `--test` filter, reaches them — which is why closes before M17 are not owed a
   correction. Leaving it out silently costs
-  81 tests and one binary — and nothing fails to warn you. Contrast `cargo test -p retrace --lib`,
+  93 tests and one binary — and nothing fails to warn you. Contrast `cargo test -p retrace --lib`,
   which is invalid for this crate (there is no lib target) and fails the whole invocation
   **loudly**: the trap is that the wrong flag is loud and the missing one is silent.
 

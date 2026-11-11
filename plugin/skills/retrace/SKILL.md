@@ -143,8 +143,8 @@ last write to 0x304125c0 (8 bytes): store at 0x100001ab4 in ledger::fees::charge
   The writer may be another thread than the one that failed: a worker's backtrace includes the closure
   it was spawned with.
 - Memory the kernel wrote (a `read` into a buffer) is named by its system call instead:
-  `last write to <address>: syscall read (3) on thread 0, (<n>, 0)`. A write retrace makes itself, for a call it answers
-  without the kernel (a `kevent` event list, a `poll` or `select` result), is not seen: it names an earlier write instead.
+  `last write to <address>: syscall read (3) on thread 0, (<n>, 0)`. A write retrace makes itself (an emulated call's
+  result such as a `kevent` event list or a `poll`/`select` result, or a signal handler's frame) is not seen: it names an earlier write instead.
 - With no earlier write it prints `no earlier write to <address>: it holds what it held when the program
   started`, or `no write to <address> since the exec at (<n>, 0)`, and the cursor stays where it was.
 - Otherwise the cursor moves to the write, so a second `last-write` finds the write before it. Without a
