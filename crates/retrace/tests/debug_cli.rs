@@ -402,3 +402,46 @@ fn break_by_readable_rust_name() {
     // And no mangled text leaks into either line.
     assert!(!out.contains("__ZN") && !out.contains("17h"), "{out}");
 }
+
+/// M58 B3: a stop in the program's own code has a source file and line, from `atos` over the executable on disk.
+#[test]
+fn json_where_has_file_and_line_in_the_program() {
+    if util::cargo::cargo_path().is_none() || !std::path::Path::new("/usr/bin/atos").exists() {
+        util::announce("SKIPPED: cargo or atos is not runnable (json_where_has_file_and_line_in_the_program)");
+        return;
+    }
+    let dir = util::cargo::fresh_dir("fileline");
+    let b = util::cargo::cargo_test_under_retrace(util::cargo::LEDGER_MANIFEST, &dir,
+        &["--no-fail-fast", "settling_four_hundred_leaves_the_rest"]);
+    assert_ne!(b.code, Some(0), "the failing test must fail: {}", b.stderr);
+    let trace = std::fs::read_dir(&dir).expect("recordings dir").filter_map(|e| e.ok()).map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|x| x == "retrace")).expect("a recording");
+    let out = std::process::Command::new(util::bin())
+        .args(["debug", trace.to_str().unwrap(), "--json", "--script",
+               "break ledger::tests::settling_four_hundred_leaves_the_rest; continue; where"]).output().expect("spawn");
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    let objs = json_lines(&String::from_utf8(out.stdout).unwrap());
+    let last = objs.last().unwrap();
+    assert!(last["file"].as_str().is_some_and(|f| f.starts_with('/') && f.ends_with("src/lib.rs")), "{last}");
+    assert!(last["line"].as_u64().is_some_and(|l| l > 0), "{last}");
+    assert!(last.get("source_note").is_none(), "{last}");
+}
+
+/// M58 B3: a program rebuilt since the recording is not trusted: no file, no line, and the note says why.
+#[test]
+fn a_rebuilt_binary_gets_no_lines_and_says_why() {
+    let d = std::env::temp_dir().join(format!("retrace-b3-rebuilt-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    std::fs::copy(retrace_guest::CRASHY, d.join("crashy")).unwrap();
+    let r = util::run_in(&d, &["record", "./crashy"], &[], 120);
+    assert_eq!(r.code, Some(139), "record crashy: {}", r.stderr);
+    std::fs::copy(retrace_guest::HELLO_DYN, d.join("crashy")).unwrap();
+    let out = std::process::Command::new(util::bin()).current_dir(&d)
+        .args(["debug", "crashy.retrace", "--json", "--script", "break _main; continue; where"]).output().expect("spawn");
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    let objs = json_lines(&String::from_utf8(out.stdout).unwrap());
+    let last = objs.last().unwrap();
+    assert!(last["file"].is_null() && last["line"].is_null(), "{last}");
+    assert!(last["source_note"].as_str().is_some_and(|n| n.contains("changed since the recording")), "{last}");
+}

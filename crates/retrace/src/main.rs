@@ -6,6 +6,8 @@ mod demangle;
 mod json;
 mod rsp;
 mod gdbserver;
+mod image;
+mod source;
 mod lldbcmd;
 
 /// Where the bug banner sends a report (M50 §3b).

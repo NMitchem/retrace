@@ -401,6 +401,11 @@ pub(crate) struct Exec<'a> {
     epochs: Vec<(Epoch, Symbols)>,
     /// M58 B2: readable names, one lazy cache per epoch (exec epochs have different images).
     readables: Vec<crate::demangle::Readable>,
+    /// M58 B3: file and line, one lazy `SourceMap` per epoch, built on the first pc that needs one so a session
+    /// that never asks for a line never runs `atos`. Host-derived and never written into a trace.
+    sources: std::cell::RefCell<Vec<Option<crate::source::SourceMap>>>,
+    /// M58 B3: epoch 0's candidate paths for its program, read from the opening start stack.
+    start_cands: Vec<String>,
 }
 
 impl<'a> Exec<'a> {
@@ -435,9 +440,12 @@ impl<'a> Exec<'a> {
             }).collect::<Vec<_>>()
         }).unwrap_or_default();
         let readables = epochs.iter().map(|(_, s)| crate::demangle::Readable::new(s)).collect();
+        let start_cands = crate::image::start_candidates(&session);
+        let sources = std::cell::RefCell::new((0..epochs.len().max(1)).map(|_| None).collect());
         Ok(Exec {
             trace, session: Some(session), n: 1, k: 0,
             breakpoints: Vec::new(), watches: Vec::new(), phase: Phase::Bp, cache, readables, epochs,
+            sources, start_cands,
         })
     }
 
@@ -1515,12 +1523,40 @@ impl Exec<'_> {
             Some((raw, off)) => J::Str(format!("{}+{off:#x}", self.readable_at(self.n, raw))),
             None => J::Null,
         };
-        vec![
+        let (lines, note) = self.source_lines(&[pc]);
+        let (file, line) = match lines.into_iter().next().flatten() {
+            Some((f, l)) => (J::Str(f), J::UInt(u64::from(l))),
+            None => (J::Null, J::Null),
+        };
+        let mut v = vec![
             ("position", J::Arr(vec![J::UInt(self.n as u64), J::UInt(self.k)])),
             ("thread", J::UInt(u64::from(self.sess().current_thread()))),
             ("pc", hex(pc)),
             ("function", function),
-        ]
+            ("file", file),
+            ("line", line),
+        ];
+        if let Some(n) = note { v.push(("source_note", J::Str(n))); }
+        v
+    }
+
+    /// M58 B3: `(file, line)` per pc in the cursor's epoch, plus the note explaining an absence. The epoch's
+    /// `SourceMap` is built on the first call that reaches it, from the image `resolve_image` trusts (the
+    /// recorded `LC_UUID`; candidates are the recorded path, then the trace's directory). At most one note
+    /// comes back per call, and only when a pc inside the executable got no line.
+    pub(crate) fn source_lines(&self, pcs: &[u64]) -> (Vec<Option<(String, u32)>>, Option<String>) {
+        let e = self.epoch_index();
+        let mut maps = self.sources.borrow_mut();
+        let Some(slot) = maps.get_mut(e) else { return (vec![None; pcs.len()], None) };
+        if slot.is_none() {
+            let cands: Vec<String> = if e == 0 { self.start_cands.clone() }
+                else { self.epochs.get(e).map(|(ep, _)| String::from_utf8_lossy(&ep.path).into_owned()).into_iter().collect() };
+            let trace_dir = match self.trace.parent() { Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(), _ => std::path::PathBuf::from(".") };
+            let image = crate::image::resolve_for_source(&cands, &trace_dir, crate::image::recorded_uuid(self.sess()));
+            let text_end = self.syms_at(self.n).exe().map_or(0, |t| t.text_end());
+            *slot = Some(crate::source::SourceMap::new(image, text_end));
+        }
+        slot.as_ref().map_or((vec![None; pcs.len()], None), |m| m.lines(pcs))
     }
 }
 
