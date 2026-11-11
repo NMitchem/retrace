@@ -1439,7 +1439,15 @@ pub fn run_script_mode(trace: &Path, script: &str, mode: Mode, out: &mut impl Wr
         }
     };
     let segs: Vec<&str> = segments(script).collect(); // echo the exact source segment text
-    let mut ex = Exec::new(trace)?;
+    let mut ex = match Exec::new(trace) {
+        Ok(ex) => ex,
+        Err(e) => {
+            if mode == Mode::Json {
+                emit(out, J::Obj(vec![("command", J::Null), ("ok", J::Bool(false)), ("error", J::Str(e.clone()))]))?;
+            }
+            return Err(e);
+        }
+    };
     for (seg, cmd) in segs.iter().zip(&cmds) {
         match mode {
             Mode::Text => {

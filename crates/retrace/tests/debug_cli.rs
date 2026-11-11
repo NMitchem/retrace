@@ -345,3 +345,26 @@ fn json_mode_error_is_a_json_line_and_exit_5() {
 fn json_mode_escapes_program_text() {
     // B6 wires `summary`, which carries the program's own stderr text; the escaping itself is unit-tested in json.rs.
 }
+
+#[test]
+fn json_mode_incomplete_recording_is_a_json_line_and_exit_5() {
+    let (rec, trace) = util::record_dynamic(retrace_guest::CRASHY);
+    assert_eq!(rec.code, 139, "record: {}", rec.stderr);
+    // The same recording without its terminal event: incomplete.
+    let mut ev = retrace_trace::Reader::open(&trace).unwrap();
+    let end = ev.iter().position(|e| matches!(e, retrace_trace::Event::Crash { .. } | retrace_trace::Event::Exit { .. })).expect("a terminal event");
+    ev.truncate(end);
+    let cut = trace.with_extension("cut.bin");
+    let mut w = retrace_trace::Writer::create(&cut).unwrap();
+    for e in &ev { w.append(e).unwrap(); }
+    drop(w);
+    let out = std::process::Command::new(util::bin())
+        .args(["debug", cut.to_str().unwrap(), "--json", "--script", "where"]).output().expect("spawn");
+    assert_eq!(out.status.code(), Some(5), "{}", String::from_utf8_lossy(&out.stderr));
+    let objs = json_lines(&String::from_utf8(out.stdout).unwrap());
+    assert_eq!(objs.len(), 1);
+    assert_eq!(objs[0]["ok"], false);
+    assert!(objs[0]["command"].is_null());
+    assert!(objs[0]["error"].as_str().unwrap().contains("incomplete recording"), "{}", objs[0]);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("DEBUG ERROR:"));
+}
