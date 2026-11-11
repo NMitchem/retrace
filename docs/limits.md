@@ -77,3 +77,9 @@ most of `/bin` and `/usr/bin`. These are the limits you'll hit first:
   wakes) and a signal handler's frame. A Mach reply retrace answers is recorded, and is seen. Under lldb, each `process continue -R`
   replays forward from the start of the recording, and `process interrupt` can't stop a long reverse
   motion.
+- A wild pointer can crash later under retrace than natively, or not at all. Some addresses that are unmapped
+  natively are backed by memory retrace reserved for the program, so a read there returns zeros instead of
+  faulting. Measured: a pointer of `0x726570706f` faults natively and reads 0 under retrace. A pointer that is
+  not a valid address at all, such as one overwritten by text, faults in both.
+- `retrace debug` and lldb name functions in the program itself, not in system libraries: a frame in
+  `libsqlite3.dylib` or `libsystem` shows as a bare address.

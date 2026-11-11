@@ -304,7 +304,7 @@ lldb runs to the crash, goes back to the `str` that wrote the bad pointer, then 
 instruction. The `lldb_e2e` test drives this session, and the same one on CPython crashing inside a
 script.
 
-Run in batch mode, the session needs `-k` for everything after the crash. Once the program stops on a
+Run in batch mode, the session needs `-k` for everything after the crash, and stdin should be `/dev/null`: after a crash stop, lldb otherwise waits for input on stdin. Once the program stops on a
 crash, lldb drops the remaining `-o` commands and exits 0 without saying so, while commands given with
 `-k` run:
 

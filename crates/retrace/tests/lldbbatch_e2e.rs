@@ -260,10 +260,10 @@ fn c_and_cpp_built_with_debug_info_get_file_and_line() {
     }
 }
 
-/// The README shows these commands; this file runs them. A README edit that changes one must change this file.
+/// The guide shows these commands; this file runs them. A guide edit that changes one must change this file.
 #[test]
-fn the_readme_shows_the_commands_this_file_runs() {
-    let readme = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../README.md")).unwrap();
+fn the_guide_shows_the_commands_this_file_runs() {
+    let readme = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/guide.md")).unwrap();
     let flags = |cmds: &[&str]| cmds.iter().map(|c| format!("-o '{c}'")).collect::<Vec<_>>().join(" ");
     for want in [
         "CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER=\"retrace record\" RETRACE_DIR=\"$PWD/target/retrace\" cargo test --no-fail-fast".to_string(),
@@ -273,6 +273,6 @@ fn the_readme_shows_the_commands_this_file_runs() {
         "-- --batch -o 'process continue' -k 'bt' -k 'watchpoint set expression -w write -s 8 -- 0x".to_string(),
         "-k 'process continue -R' -k 'bt'".to_string(),
     ] {
-        assert!(readme.contains(&want), "README.md does not show `{want}`");
+        assert!(readme.contains(&want), "docs/guide.md does not show `{want}`");
     }
 }

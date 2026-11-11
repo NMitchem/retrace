@@ -28,6 +28,7 @@ class Retrace < Formula
     # step keeps it.
     system "codesign", "-s", "-", "-f", "--entitlements", "retrace.entitlements", bin/"retrace"
     pkgshare.install "retrace.entitlements"
+    (pkgshare/"examples").install "examples/visits.c"
     (pkgshare/"examples").install "crates/retrace-guest/c/crashy.c"
     (pkgshare/"skills/retrace").install "plugin/skills/retrace/SKILL.md"
     (pkgshare/"examples").install "crates/retrace-guest/agent/ledger"
@@ -36,20 +37,16 @@ class Retrace < Formula
 
   def caveats
     <<~EOS
-      retrace's lldb front door (retrace lldb) needs the Command Line Tools:
+      retrace uses the Command Line Tools for file and line numbers and for lldb:
         xcode-select --install
 
-      The README's example program is installed here:
-        #{pkgshare}/examples/crashy.c
+      The README's demo and the guide's examples are in:
+        #{pkgshare}/examples
 
-      The Claude Code skill that teaches an agent to use retrace, and two Rust example crates with a
-      failing test each to practise on, are installed here:
-        #{pkgshare}/skills/retrace/SKILL.md
-        #{pkgshare}/examples/ledger
-        #{pkgshare}/examples/inventory
-      Copy the skill into ~/.claude/skills/retrace/, or install it as a plugin:
+      To teach Claude Code when and how to use retrace, install the skill as a plugin:
         claude plugin marketplace add NMitchem/retrace
         claude plugin install retrace@retrace
+      or copy #{pkgshare}/skills/retrace/SKILL.md into ~/.claude/skills/retrace/.
 
       The first run of a freshly signed binary can pause for a few seconds in macOS's
       code-signing check.
