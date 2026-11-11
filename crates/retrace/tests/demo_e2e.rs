@@ -4,9 +4,10 @@
 //!
 //! - natively, some runs pass and some crash, so a plain rerun does not reliably reproduce it;
 //! - AddressSanitizer reports only a SEGV, never an overflow (the write stays inside the struct);
-//! - recording until a run crashes, then `last-write` on `app.insert`, names `visits.c:21`, the `memcpy`.
+//! - recording until a run crashes names the SQLite function it crashed in, and `last-write app.insert`, from the
+//!   start of the recording, names the `memcpy` and `visits.c:21`, the line that called it.
 //!
-//! Every run is bounded and every recording is deleted. It skips loudly without clang.
+//! Every run is bounded and every recording is deleted. It skips loudly without clang, or lldb for the variable.
 mod util;
 
 use std::path::{Path, PathBuf};
@@ -44,8 +45,8 @@ fn line_of(text: &str) -> usize {
     src.lines().position(|l| l.contains(text)).unwrap_or_else(|| panic!("`{text}` is not in visits.c")) + 1
 }
 
-/// `&app.insert`: the symbol `_app` from `nm`, plus 16 for `last_visitor[16]`. The program is loaded
-/// unslid under retrace, so the file's address is the recording's.
+/// `&app.insert`: the symbol `_app` from `nm`, plus 16 for `last_visitor[16]`. The program runs at its own file
+/// addresses under retrace, so the file's address is the recording's.
 fn app_insert(exe: &Path) -> String {
     let nm = Command::new("nm").arg(exe).output().expect("nm");
     let out = String::from_utf8_lossy(&nm.stdout).into_owned();
@@ -116,21 +117,36 @@ fn the_recording_of_the_crash_names_the_memcpy() {
     }
     let rec = rec.unwrap_or_else(|| panic!("no recorded run crashed in {TRIES}"));
     assert!(rec.stderr.contains(&format!("killed by SIGSEGV (fault at {FAULT}")), "{}", rec.stderr);
+    assert!(rec.stderr.contains(" (libsqlite3.dylib))"), "the crash line names SQLite: {}", rec.stderr);
 
     let trace = dir.join("visits.retrace");
-    let addr = app_insert(&dir.join("visits"));
-    let script = format!("summary; last-write {addr}");
-    let (code, out, err) = util::debug_bounded(trace.to_str().unwrap(), &script, BOUND);
-    assert_eq!(code, Some(0), "debug: {err}\n{out}");
-    let (summary, write) = out.split_once("> last-write").unwrap_or_else(|| panic!("no last-write:\n{out}"));
-    // The crash is in SQLite, called from the bind on line 18 or the finalize on line 24.
+    let t = trace.to_str().unwrap();
+    // The summary: the crash is in SQLite, called from the bind on line 18 or the finalize on line 24.
+    let (code, summary, err) = util::debug_bounded(t, "summary", BOUND);
+    assert_eq!(code, Some(0), "summary: {err}\n{summary}");
     let (bind, fin) = (line_of("sqlite3_bind_text"), line_of("sqlite3_finalize"));
     assert!(summary.contains(&format!("fault at {FAULT}")), "{summary}");
+    assert!(summary.lines().any(|l| l.trim_start().starts_with("#0 ") && l.ends_with(" (libsqlite3.dylib)")), "{summary}");
     assert!(summary.contains(&format!("visits.c:{bind}")) || summary.contains(&format!("visits.c:{fin}")),
         "the crash is called from line {bind} or {fin}:\n{summary}");
+
+    // The README's one command, from the start of the recording.
+    let addr = app_insert(&dir.join("visits"));
     let memcpy = line_of("memcpy(app.last_visitor");
-    assert!(write.contains(&format!("last write to {addr} (8 bytes): store")), "{write}");
-    assert!(write.contains(&format!("visits.c:{memcpy}")), "last-write names the memcpy on line {memcpy}:\n{write}");
+    let (code, write, err) = util::debug_bounded(t, "last-write app.insert", BOUND);
+    if code == Some(5) && err.contains("lldb is not installed") {
+        util::announce("SKIPPED the_recording_of_the_crash_names_the_memcpy (last-write app.insert): lldb is not installed. This row did NOT run.");
+    } else {
+        assert_eq!(code, Some(0), "last-write: {err}\n{write}");
+        assert!(write.contains("searching back from its end"), "{write}");
+        assert!(write.contains(&format!("last write to {addr} (8 bytes): store")), "{write}");
+        assert!(write.lines().any(|l| l.starts_with("#0 ") && l.ends_with(" (libsystem_platform.dylib)")), "the store is memcpy's:\n{write}");
+        assert!(write.contains(&format!("visits.c:{memcpy}")), "last-write names the memcpy on line {memcpy}:\n{write}");
+    }
+    // The same answer by address, which needs no lldb.
+    let (code, by_addr, err) = util::debug_bounded(t, &format!("last-write {addr}"), BOUND);
+    assert_eq!(code, Some(0), "last-write {addr}: {err}\n{by_addr}");
+    assert!(by_addr.contains(&format!("visits.c:{memcpy}")), "{by_addr}");
 
     let rp = util::run_bounded(util::bin(), &["replay", trace.to_str().unwrap()], &[], BOUND);
     assert_eq!(rp.code, Some(139), "replay: {}", rp.stderr);

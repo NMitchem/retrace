@@ -102,7 +102,7 @@ impl SourceMap {
 
 /// The `-arch` name of the slice `resolve_image` checked (`try_slice_native`: arm64e when the file has one, else
 /// arm64), from that slice's `cpusubtype`.
-fn arch_of(bytes: &[u8]) -> Option<&'static str> {
+pub(crate) fn arch_of(bytes: &[u8]) -> Option<&'static str> {
     let thin = retrace_guest::try_slice_native(bytes).ok()?;
     let sub = u32::from_le_bytes(thin.get(8..12)?.try_into().ok()?);
     Some(if sub & 0x00ff_ffff == retrace_arch::CPU_SUBTYPE_ARM64E { "arm64e" } else { "arm64" })

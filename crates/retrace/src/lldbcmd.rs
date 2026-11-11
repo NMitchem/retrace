@@ -38,7 +38,7 @@ fn code_of(st: ExitStatus) -> i32 {
 
 /// T0-3. Without developer tools `/usr/bin/lldb` is a shim that opens an installer dialog, so it is
 /// never run unless `xcode-select -p` succeeds; then `--version` must exit 0 and print `lldb-...`.
-fn lldb_usable() -> Result<PathBuf, String> {
+pub(crate) fn lldb_usable() -> Result<PathBuf, String> {
     let path = PathBuf::from(std::env::var_os("RETRACE_LLDB").unwrap_or_else(|| "/usr/bin/lldb".into()));
     let unusable = || Err(NOT_INSTALLED.to_string());
     match Command::new("xcode-select").arg("-p").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status() {

@@ -393,22 +393,95 @@ impl Symbols {
 }
 
 /// M51 §3c (C2): where a crash's pc is, for the closing line, from the recording's final snapshot.
-/// The executable's or dyld's symbol, `name+0xoff` (`name` at offset 0); `a system library` inside
-/// the shared-cache window, whose symbols the recording does not hold (`Symbols::from_snapshot`);
-/// otherwise empty, and the line leaves the place out rather than guess. ASCII only (R7): any other
-/// character of a symbol name becomes `?`.
+/// The executable's or dyld's symbol, `name+0xoff` (`name` at offset 0); inside the shared-cache
+/// window, whose symbols the recording does not hold, the system library's function as
+/// [`system_symbol`] names it, or `a system library` when it names none; otherwise empty, and the
+/// line leaves the place out rather than guess. ASCII only (R7): any other character of a symbol
+/// name becomes `?`.
 ///
 /// Presentation only, like the rest of this module: it runs once per crash, after the run, and
 /// nothing it returns reaches the trace.
 pub fn crash_site(mem: &[Region], pc: u64, shared_region_end: u64) -> String {
+    crash_site_with(mem, pc, shared_region_end, system_symbol)
+}
+
+fn crash_site_with(mem: &[Region], pc: u64, shared_region_end: u64, system: impl Fn(u64) -> Option<SystemSymbol>) -> String {
     if let Some((name, off)) = Symbols::from_snapshot(mem).resolve(pc) {
-        let name: String = name.chars().map(|c| if c.is_ascii_graphic() { c } else { '?' }).collect();
+        let name = ascii(name);
         return if off == 0 { name } else { format!("{name}+{off:#x}") };
     }
     if (retrace_box::SHARED_REGION_START..shared_region_end).contains(&pc) {
-        return "a system library".to_owned();
+        return system(pc).map_or_else(|| "a system library".to_owned(), |s| s.describe());
     }
     String::new()
+}
+
+/// `s` with every character that is not printable ASCII replaced by `?` (R7).
+fn ascii(s: &str) -> String {
+    s.chars().map(|c| if c.is_ascii_graphic() { c } else { '?' }).collect()
+}
+
+/// A function in a system library: its name (none when the library has no symbol before the address), the offset
+/// into it, and the library's file name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemSymbol {
+    pub name: Option<String>,
+    pub offset: u64,
+    pub library: String,
+}
+
+impl SystemSymbol {
+    /// `name+0xoff (library)`, `name (library)` at offset 0, or the library alone.
+    pub fn describe(&self) -> String {
+        match &self.name {
+            Some(n) if self.offset == 0 => format!("{n} ({})", self.library),
+            Some(n) => format!("{n}+{:#x} ({})", self.offset, self.library),
+            None => self.library.clone(),
+        }
+    }
+}
+
+/// The system-library function at `pc`, a guest address in the dyld shared cache.
+///
+/// The guest maps the cache at its unslid address. This process maps the same cache at the boot's slide (a
+/// recording made on another cache is refused), so `pc` moved by that slide is the same instruction here, and
+/// `dladdr` names it, static functions included. `None` outside the cache, or when `dladdr` finds no image.
+///
+/// Presentation only: it reads this process's own dyld tables and nothing it returns reaches the trace.
+pub fn system_symbol(pc: u64) -> Option<SystemSymbol> {
+    use std::ffi::{c_char, c_int, c_void, CStr};
+    #[repr(C)]
+    struct DlInfo { fname: *const c_char, fbase: *mut c_void, sname: *const c_char, saddr: *mut c_void }
+    extern "C" {
+        fn _dyld_get_shared_cache_range(length: *mut usize) -> *const c_void;
+        fn dladdr(addr: *const c_void, info: *mut DlInfo) -> c_int;
+    }
+    let mut len = 0usize;
+    // SAFETY: dyld's query writes `len` and returns where the cache starts in this process, or null.
+    let base = unsafe { _dyld_get_shared_cache_range(&mut len) } as u64;
+    if base == 0 || len == 0 { return None; }
+    // The cache header's `mappingOffset` (the u32 at 0x10) locates its first mapping, whose first field is the
+    // cache's unslid address.
+    // SAFETY: the header is mapped read-only for the life of the process.
+    let unslid = unsafe {
+        let hdr = base as *const u8;
+        let mapping = std::ptr::read_unaligned(hdr.add(0x10).cast::<u32>()) as usize;
+        std::ptr::read_unaligned(hdr.add(mapping).cast::<u64>())
+    };
+    if !(unslid..unslid.checked_add(len as u64)?).contains(&pc) { return None; }
+    let here = pc - unslid + base;
+    let mut info = DlInfo { fname: std::ptr::null(), fbase: std::ptr::null_mut(), sname: std::ptr::null(), saddr: std::ptr::null_mut() };
+    // SAFETY: `here` lies inside this process's mapped cache, and dladdr only reads dyld's tables.
+    if unsafe { dladdr(here as *const c_void, &mut info) } == 0 || info.fname.is_null() { return None; }
+    // SAFETY: dladdr's strings are NUL-terminated and live as long as the image.
+    let text = |p: *const c_char| ascii(&unsafe { CStr::from_ptr(p) }.to_string_lossy());
+    let path = text(info.fname);
+    let library = path.rsplit('/').next().unwrap_or(&path).to_owned();
+    let saddr = info.saddr as u64;
+    if info.sname.is_null() || saddr == 0 || saddr > here {
+        return Some(SystemSymbol { name: None, offset: here - info.fbase as u64, library });
+    }
+    Some(SystemSymbol { name: Some(text(info.sname)), offset: here - saddr, library })
 }
 
 #[cfg(test)]
@@ -752,15 +825,39 @@ mod tests {
         const MIN: u64 = retrace_box::SHARED_REGION_END_MIN;
         let base = retrace_box::EXE_BASE;
         let mem = Img::new(base, 0).sym(base + 0x460, "_main").sym(base + 0x500, "_caf\u{e9}").build();
-        assert_eq!(crash_site(&mem, base + 0x468, MIN), "_main+0x8");
-        assert_eq!(crash_site(&mem, base + 0x460, MIN), "_main", "at the symbol itself, no offset");
-        assert!(crash_site(&mem, base + 0x504, MIN).is_ascii(), "R7: the line is ASCII");
-        assert_eq!(crash_site(&mem, retrace_box::SHARED_REGION_START + 0x1234, MIN), "a system library",
-                   "the cache's symbols are not in the recording");
+        let none = |_| None;
+        assert_eq!(crash_site_with(&mem, base + 0x468, MIN, none), "_main+0x8");
+        assert_eq!(crash_site_with(&mem, base + 0x460, MIN, none), "_main", "at the symbol itself, no offset");
+        assert!(crash_site_with(&mem, base + 0x504, MIN, none).is_ascii(), "R7: the line is ASCII");
+        assert_eq!(crash_site_with(&mem, retrace_box::SHARED_REGION_START + 0x1234, MIN, none), "a system library",
+                   "the cache's symbols are not in the recording, and the host named none");
+        let named = |_| Some(SystemSymbol { name: Some("vdbeUnbind".into()), offset: 0x20, library: "libsqlite3.dylib".into() });
+        assert_eq!(crash_site_with(&mem, retrace_box::SHARED_REGION_START + 0x1234, MIN, named), "vdbeUnbind+0x20 (libsqlite3.dylib)");
         // M57: a pc past the constant is the cache's only when the box's window reaches it.
-        assert_eq!(crash_site(&mem, 0x3_1000_0000, MIN), "");
-        assert_eq!(crash_site(&mem, 0x3_1000_0000, 0x3_4c00_0000), "a system library");
-        assert_eq!(crash_site(&mem, 0x4000_dead_0000, MIN), "", "nothing claims it, so nothing is guessed");
+        assert_eq!(crash_site_with(&mem, 0x3_1000_0000, MIN, none), "");
+        assert_eq!(crash_site_with(&mem, 0x3_1000_0000, 0x3_4c00_0000, none), "a system library");
+        assert_eq!(crash_site_with(&mem, 0x4000_dead_0000, MIN, named), "", "nothing claims it, so nothing is guessed");
+    }
+
+    #[test]
+    fn a_system_symbol_is_the_host_cache_s_name_for_a_guest_address() {
+        // `strlen`'s own address in this process, moved back by the cache's slide, is the guest's address for it.
+        let mut len = 0usize;
+        extern "C" { fn _dyld_get_shared_cache_range(length: *mut usize) -> *const std::ffi::c_void; }
+        // SAFETY: as in `system_symbol`.
+        let base = unsafe { _dyld_get_shared_cache_range(&mut len) } as u64;
+        let unslid = unsafe {
+            let hdr = base as *const u8;
+            let mapping = std::ptr::read_unaligned(hdr.add(0x10).cast::<u32>()) as usize;
+            std::ptr::read_unaligned(hdr.add(mapping).cast::<u64>())
+        };
+        extern "C" { fn strlen(s: *const std::ffi::c_char) -> usize; }
+        let host = strlen as usize as u64;
+        let s = system_symbol(host - base + unslid + 4).expect("strlen is in the shared cache");
+        assert!(s.name.as_deref().is_some_and(|n| n.contains("strlen")), "{s:?}");
+        assert_eq!(s.offset, 4, "{s:?}");
+        assert!(s.library.starts_with("libsystem_") && s.library.ends_with(".dylib"), "{s:?}");
+        assert_eq!(system_symbol(0x4000_dead_0000), None, "outside the cache");
     }
 
     #[test]

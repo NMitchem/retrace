@@ -250,8 +250,8 @@ fn a_fatal_abort_ends_with_one_closing_line_naming_sigabrt() {
 }
 
 /// Review Focus 3: `strlen(NULL)` faults inside the shared cache, whose symbols the recording does
-/// not hold (C2). The line says "a system library" rather than guess a name, and the exit code is
-/// native's.
+/// not hold (C2). The line names the function and its library from this host's own copy of the cache,
+/// which is the recording's (another is refused), and the exit code is native's.
 #[test]
 fn a_crash_inside_a_system_library_says_so() {
     let native = util::run_bounded(retrace_guest::FID_OUTPUT, &["crashlib"], &[], BOUND);
@@ -264,7 +264,7 @@ fn a_crash_inside_a_system_library_says_so() {
         let lines = retrace_lines(&run.stderr);
         assert_eq!(lines.len(), 1, "{what}: {}", run.stderr);
         assert!(lines[0].starts_with("retrace: the program was killed by SIGSEGV (fault at 0x0, pc 0x")
-            && lines[0].ends_with(" in a system library)"), "{what}: {}", lines[0]);
+            && lines[0].contains(" in _platform_strlen") && lines[0].ends_with(" (libsystem_platform.dylib))"), "{what}: {}", lines[0]);
     }
     let _ = std::fs::remove_file(&t);
 }
