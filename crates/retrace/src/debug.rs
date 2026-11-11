@@ -751,10 +751,10 @@ impl<'a> Exec<'a> {
     /// M58 B4: `bt [tid]`. A frame-pointer walk of `tid` (default: the current thread) from its own registers:
     /// `ThreadCtx` is the live vCPU for the current thread and the saved context for any other.
     ///
-    /// `at_entry` is decided from the pc alone: frame 0 sits at offset 0 of its symbol, or at offset 4 right after a
-    /// `pacibsp`/`paciasp`, so `stp x29, x30, [sp, #-N]!` has not run and `x29` is still the caller's. Then frame 1
-    /// is `x30`. A pc deeper in a prologue (after a `sub sp`, before the `stp`) or in a frameless leaf is walked as if
-    /// `x29` were this function's, and skips the caller; lldb, which reads unwind info, does not.
+    /// Whether `lr` is frame 1 is `unwind::walk`'s rule: `at_entry` (pc at offset 0 of its symbol, or at offset 4
+    /// right after a `pacibsp`/`paciasp`), or `lr` differs from the record's return address at `fp` and does not
+    /// point back into pc's own function. That covers a frameless leaf, a pc between `sub sp` and `stp`, and a
+    /// syscall stub's `svc`. A leaf whose caller's own `lr`-equal record cannot be told apart is the residual limit.
     ///
     /// Frames from index 1 are return addresses: printed as such, but symbol and line are looked up at `pc - 4`, the
     /// call. One `atos` call covers every frame. Returns the JSON fields `frames` and, when there is one, `source_note`.
@@ -775,7 +775,15 @@ impl<'a> Exec<'a> {
                 let b = sess.read_mem(a, 16)?;
                 Some((u64::from_le_bytes(b[..8].try_into().ok()?), u64::from_le_bytes(b[8..].try_into().ok()?)))
             };
-            crate::unwind::walk(pc, fp, lr, at_entry, read, crate::unwind::MAX_FRAMES)
+            // Same function as pc: the same resolved symbol, or, when either is unresolved (shared-cache stubs),
+            // an address below pc within a small window.
+            let syms = self.syms_at(n);
+            let here = syms.resolve(pc).map(|(r, _)| r);
+            let same_fn = |a: u64| match (here, syms.resolve(a)) {
+                (Some(h), Some((r, _))) => h == r,
+                _ => a < pc && pc - a < 0x400,
+            };
+            crate::unwind::walk(pc, fp, lr, at_entry, same_fn, read, crate::unwind::MAX_FRAMES)
         };
         // Where each frame is looked up: its pc for frame 0, the call (pc - 4) for a return address.
         let probes: Vec<u64> = frames.iter().enumerate().map(|(i, f)| if i == 0 { f.pc } else { f.pc.saturating_sub(4) }).collect();
