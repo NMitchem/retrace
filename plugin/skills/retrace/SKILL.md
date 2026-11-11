@@ -1,15 +1,15 @@
 ---
 name: retrace
-description: Use when a Rust, C or C++ test or program on an Apple Silicon Mac crashes or fails because a value is wrong, and you need to know what set that value, from which line and on which thread, or a crash happens far from its cause, or a failure is rare and you want to keep the one run that showed it. retrace records the run once and replays it identically every time, so you can stop at the failure and run backwards to the last write of a value. Do not use it for logic errors that reading the code and one rerun will solve, for Python or JavaScript bugs, or for programs that serve or wait on network sockets, start child processes or need a GUI.
+description: Use when a Rust, C or C++ test or program on an Apple Silicon Mac crashes or fails because a value is wrong, and you need to know what set that value, from which line and on which thread, or a crash happens far from its cause, or a failure is rare and you want to keep the one run that showed it. retrace records the run once and replays it identically every time; retrace debug then says how the run ended and finds the last write to a value, with its function, file and line, thread and backtrace, as text or JSON. Do not use it for logic errors that reading the code and one rerun will solve, for Python or JavaScript bugs, or for programs that serve or wait on network sockets, start child processes or need a GUI.
 ---
 
 # Debugging a recorded run with retrace
 
 retrace runs a program inside a small virtual machine, records everything the outside world gave it
-(system calls, signals, the kernel's writes to memory), and can replay the run bit for bit. In the
-replay you can stop at the failure and step or run backwards: "who last wrote this value?" has one
-answer, and it is the same every time. It is the macOS counterpart of rr on Linux. It needs Apple
-Silicon and macOS 26 or 27.
+(system calls, signals, the kernel's writes to memory), and can replay the run bit for bit. Each
+question about the recording is one command: how did the run end, which instruction last wrote this
+value, from which line, on which thread. A recording gives the same answer every time. It is the
+macOS counterpart of rr on Linux. It needs Apple Silicon and macOS 26 or 27.
 
 ## When to use it
 
@@ -23,9 +23,10 @@ Silicon and macOS 26 or 27.
 - A logic error that reading the code and one rerun will solve. Recording costs more than a rerun.
 - Python or JavaScript bugs. retrace records the interpreter, so you would be debugging its machine
   code, not your script.
-- Network servers: a listener stops at `bind`, a wall (see "Exit codes"). A program that waits on a
-  network socket through kqueue, `poll` or `select` is refused too (this is from reading retrace's
-  code; no network client has been run).
+- Network servers. `bind`, `listen` and `accept` are walls (see "Read the result"), and tokio's TCP and
+  Unix listener tests stop at `bind`. `socket` and `connect` are forwarded, but waiting on such a socket
+  through kqueue, `poll` or `select` is refused (this is from reading retrace's code; no network client
+  has been run).
 - Programs that start other processes: `posix_spawn`, `system()` and `popen()` stop at a wall, and
   `fork` fails with `EAGAIN` (retrace prints a `retrace: refused:` line and the program goes on).
 - GUI programs.
@@ -44,7 +45,8 @@ retrace record -o crash.retrace ./prog
 ```
 
 Options go before the program. The program's output is unchanged and its exit code is yours.
-Build with debug info (`-g`, or a Cargo dev profile) so the debugger can show file and line.
+Build with debug info (`-g`, or a Cargo dev profile) so the debugger can show file and line, and leave
+the binary in place: file and line are read from the binary on disk, and a rebuilt one gives names only.
 
 A Cargo test suite, through cargo's runner. Set it in the environment, not in
 `.cargo/config.toml`, where it would also apply to `cargo run`:
@@ -55,9 +57,8 @@ CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER="retrace record" RETRACE_DIR="$PWD/targ
 
 `RETRACE_DIR` is where a recording made without `-o` goes (created if missing). It is absolute so
 that in a workspace, where cargo runs each member's tests in that member's directory, every member
-records into the root's `target/`. Use
-`--no-fail-fast`: without it cargo stops after the first failing test binary and the rest are never
-recorded. Facts about this form:
+records into the root's `target/`. Use `--no-fail-fast`: without it cargo stops after the first
+failing test binary and the rest are never recorded. Facts about this form:
 
 - Every test binary is recorded as `<name>-<hash>.retrace`: unit tests, each file in `tests/`.
 - retrace prints `retrace: saved the recording to <path>` on stderr, under the `Running ...` line of
@@ -67,81 +68,153 @@ recorded. Facts about this form:
 - A test filter still records every binary, including those the filter matches nothing in.
 - Cargo's exit code is the test run's. A failing test gives 101, as without retrace.
 
-## Query a recording
+## Ask the recording
 
-`retrace lldb <trace>` serves the recording to lldb and starts it. Run it in batch mode with
-`--batch -o` commands after `--` so one command gives the whole answer.
-
-Where did it stop, and with what call stack (file and line):
+### What happened
 
 ```sh
-retrace lldb target/retrace/ledger-1a2b3c4d5e6f7a8b.retrace -- --batch -o 'breakpoint set -n rust_panic' -o 'process continue' -o 'bt'
+retrace debug target/retrace/ledger-844be10fb1d57b0c.retrace
 ```
 
-For a C program, break on the failing function or `abort`. `bt` prints each frame with its file and
-line, and `frame select N` followed by `frame variable` shows that frame's locals at the failure.
+With no other arguments, `retrace debug` prints a summary. On a failing `assert_eq!` (abridged):
 
-For a crash, `process continue` alone stops at the fault, and every command after it goes in a `-k`
-flag instead of `-o`. Once the program stops on a crash, lldb's batch mode drops the remaining `-o`
-commands and still exits 0; `-k` commands run after a crash:
+```
+> summary
+program: /Users/you/ledger/target/debug/deps/ledger-844be10fb1d57b0c
+ended: exited with 101
+panic on thread 2 at (467, 12447)
+  #0 0x100077ba8 in __rustc::rust_panic+0x0
+  ...
+  #8 0x100001198 in ledger::tests::settling_four_hundred_leaves_the_rest+0x14c at /Users/you/ledger/src/lib.rs:63
+  ...
+  assert_eq! left operand at 0x304125c0, right at 0x10007e3a0
+stdout (last 20 lines):
+  ...
+```
+
+- `ended:` is `exited with <code>`, `killed by <signal>`, or for a crash `killed by <signal>, fault at <address>`.
+- Each Rust panic, a caught one included and up to 16, comes with its position `(n, k)`, its thread
+  and its backtrace. A frame in the program's own code has its file and line; paths are absolute.
+- A failing `assert_eq!` adds the addresses of the two values it compared. For `assert_eq!(x.field, 100)`,
+  `left` is the field itself.
+- The last 20 lines of the program's stdout and stderr follow. libtest prints a failing test's panic
+  message on stdout.
+- `summary` leaves the cursor at the end of the recording. For a crash that is the faulting
+  instruction, so `--script 'summary; bt'` prints the crashing thread's backtrace. `goto` goes back to a
+  panic.
+- Only the program the recording started as is searched for panics. If it execs another program, the
+  new program's panics are not listed.
+
+### Who wrote this value
 
 ```sh
-retrace lldb crash.retrace -- --batch -o 'process continue' -k 'bt' -k 'watchpoint set expression -w write -s 8 -- <address>' -k 'process continue -R' -k 'bt'
+retrace debug <trace> --script 'goto <n> <k>; last-write <address> <size>'
 ```
 
-Who last wrote this value. Stop at the failure, put a write watchpoint on the value's address, and
-run backwards. The watchpoint stops at the instruction that stored to it, and `bt` there names the
-line and thread:
+`<n> <k>` is the panic's position and `<address>` the left operand's address, both from the summary.
+`<size>` is the value's size in bytes, 1, 2, 4 or 8 (8 if omitted), and the address must be a multiple
+of it. On the example above, `goto 467 12447; last-write 0x304125c0 8` prints:
 
-```sh
-retrace lldb <trace> -- --batch -o 'breakpoint set -n rust_panic' -o 'process continue' -o 'watchpoint set expression -w write -s 8 -- <address>' -o 'process continue -R' -o 'bt' -o 'thread list'
+```
+> last-write 0x304125c0 8
+last write to 0x304125c0 (8 bytes): store at 0x100001ab4 in ledger::fees::charge+0x78 at /Users/you/ledger/src/fees.rs:14 on thread 2, (467, 2575)
+#0 0x100001ab4 in ledger::fees::charge+0x78 at /Users/you/ledger/src/fees.rs:14
+#1 0x100000d0c in ledger::Ledger::settle+0x1c at /Users/you/ledger/src/lib.rs:25
+...
 ```
 
-`-s` is the size in bytes. Run `process continue -R` again for the write before that one. If the
-watchpoint's stop is not the one you want, `bt` shows who made it.
+- The first line names the store's function, file and line, thread and position. The backtrace at the
+  store follows.
+- The writing thread may not be the one that failed. A value written by a worker thread names the
+  worker, and its backtrace includes the closure the worker was spawned with.
+- Memory the kernel wrote (a `read` into a buffer) is named by its system call instead:
+  `last write to <address>: syscall read (3) on thread 0, (<n>, 0)`.
+- With no earlier write it prints `no earlier write to <address>: it holds what it held when the program
+  started`, or `no write to <address> since the exec at (<n>, 0)`, and the cursor stays where it was.
+- Otherwise the cursor moves to the write, so a second `last-write` in the same script finds the write
+  before it.
+- Without a position, `break rust_panic; continue` stops at the first panic.
+- `last-write` uses one of the four hardware watch slots. With four `watch`es armed it is an error.
 
-### The address of a Rust value
+Positions can differ between two recordings of the same test, so take them from the recording you are
+asking. One recording answers the same question the same way every time.
 
-When the failure is an `assert_eq!`, the backtrace at `rust_panic` already has it: the
-`core::panicking::assert_failed` frame shows `left=0x…`, the address of the assertion's left side.
-For a variable or a field, that is the value's own address, so watch it in the same recording.
+### JSON
 
-Otherwise a Rust local has no stable name in the debugger, so print its address from the test and
-record again. The recording is deterministic, so the same address holds in the replay:
+Add `--json` (`retrace debug <trace> --json [--script '<cmds>']`) and each command prints one JSON object on
+its own line: `command`, `ok`, `output` (the text lines), and after any motion `position`, `thread`,
+`pc`, `function`, `file` and `line`. Beyond those:
+
+- `summary`: `programs`; `ending` (`kind` is `exit`, `crash` or `signal`, with `code` or `signal`, a
+  crash's `fault_address`, and its `frames`); `panics` (each with `position`, `thread`, `frames` and,
+  for an `assert_eq!`, `assert` with `left` and `right`); `threads`; `stdout_tail`; `stderr_tail`.
+- `last-write`: `found`. When true, `kind` (`store` or `syscall`), `value_before`, `value_after`, and
+  `frames` for a store or `syscall` (`number`, `name`) for a kernel write. When false, `reason` (`start`
+  or `exec`).
+- `bt`: `frames`, each with `index`, `pc`, `function`, `offset`, `file` and `line`.
+- `value_before` and `value_after` are the bytes in memory order, in hex. Apple Silicon is
+  little-endian, so `f401000000000000` is 500.
+- `file` and `line` are `null` where there is no line information, and `source_note` says why:
+  `no line information at this address`, `the binary changed since the recording`, or that the binary
+  was not found.
+- A command that fails prints `{"command":…,"ok":false,"error":"…"}`, and retrace exits 5.
+
+### Other commands
+
+`where`, `bt [<thread>]`, `goto <n> <k>` (also `goto (n, k)`), `continue`, `reverse-continue`,
+`stepi [n]`, `reverse-stepi [n]`, `break <name or address>`, `delete <name or address>`,
+`watch <address> [size] [thread <n>]`, `unwatch <address>`, `threads`, `regs [thread]`,
+`x <address> <length>`. Function names are readable (Rust and C++ demangled, the Rust hash dropped),
+and `break` takes them: `break rust_panic`, `break ledger::tests::settling_four_hundred_leaves_the_rest`.
+There are at most six breakpoints. Commands are separated by `;` and run in order.
+
+### The address of a value no assertion names
+
+A Rust local has no name in `retrace debug`, so print its address from the test and record again. The
+address it prints is the address in that recording:
 
 ```rust
 eprintln!("{:p}", &account.balance);
 assert_eq!(account.balance, 100);
 ```
 
-Run the recording recipe again, read the address from the output, and use it as `<address>`. For a C
-variable, `lldb` can use the expression directly: `watchpoint set expression -w write -s 4 -- &counter`.
+Read the address from the recording's output and use it with `last-write`.
 
-### The scripted debugger
+### Variables: lldb
 
-`retrace debug <trace> --script '<commands>'` runs `;`-separated commands without lldb. It has no
-file and line, so use it for positions and raw memory:
+For variables by name, use lldb: `retrace lldb <trace>` serves the same recording to lldb and starts
+it. Run it in batch mode, with `-o` commands after `--`:
 
 ```sh
-retrace debug <trace> --script 'where; continue; regs; threads'
+retrace lldb <trace> -- --batch -o 'breakpoint set -n rust_panic' -o 'process continue' -o 'bt'
 ```
 
-The commands: `where`, `continue`, `reverse-continue`, `stepi [n]`, `reverse-stepi [n]`,
-`break <symbol or address>`, `delete <symbol or address>`, `watch <address> [...]`, `unwatch <address>`,
-`regs [thread]`, `threads`, `x <address> <length>`. Every position is `(n, k)`: event n, k instructions
-into it. Output is the same on every run of the same trace.
+For a C program, break on the failing function or on `abort` instead. `frame select N` followed by
+`frame variable` shows that frame's locals. lldb has no Rust language plugin, so it shows Rust
+variables only in part.
+
+For a crash, `process continue` alone stops at the fault, and every command after it goes in a `-k`
+flag instead of `-o`. Once the program stops on a crash, lldb's batch mode drops the remaining `-o`
+commands and still exits 0; `-k` commands run after a crash:
+
+```sh
+retrace lldb crash.retrace -- --batch -o 'process continue' -k 'bt' -k 'frame variable'
+```
 
 ## Read the result
 
 | Exit | Meaning | What to do |
 |---|---|---|
 | the program's own | The program ran to its end. | Its code is what the program returned. |
-| 128 + signal | The program died of a signal, as natively (139 is a segfault, 134 an abort). | Query the recording. |
-| 2 | Bad input to retrace: a missing file, a file that is not an arm64 program, a missing entitlement. | Read the line retrace printed. |
+| 128 + signal | The program died of a signal, as natively (139 is a segfault, 134 an abort). | Ask the recording. |
+| 2 | Bad input to retrace: a missing file, a file that is not an arm64 program or not a recording, a missing entitlement. | Read the line retrace printed. |
 | 3 | The replay did not match its recording. | A retrace bug. Report it with the trace. |
 | 4 | A wall: the program did something retrace cannot run yet. | See below. |
-| 5 | The debugger could not run, including on an incomplete recording. | Read the line retrace printed. |
+| 5 | A debugger error: a `retrace debug` command that failed (`DEBUG ERROR: …`, or the `"ok":false` line), a `gdbserver` error, or an incomplete recording. | Read the line retrace printed. |
 | 70 | An internal error in retrace. | A retrace bug. Report it. |
+
+`retrace lldb` exits with lldb's own status once lldb has started, and under `--batch` that is 0 even
+when a crash stop made lldb drop the remaining `-o` commands.
 
 A wall prints the program's output so far, then one line:
 
@@ -152,8 +225,8 @@ retrace: unsupported: posix_spawn of a child process (syscall 244) - see https:/
 The line names what the program did and links the section of `docs/walls.md` that explains it. That is
 retrace's limit, not a fault in the program: stop and debug by other means, or change the program
 so it does not do that under test. The recording up to the wall stays on disk: `retrace replay`
-runs it to the wall and exits 4, but `retrace lldb` and `retrace debug` refuse it with exit 5, because
-debugging up to a wall is not supported.
+runs it to the wall and exits 4, but `retrace debug`, `retrace gdbserver` and `retrace lldb` refuse it
+with exit 5 (`retrace lldb` before it starts lldb), because debugging up to a wall is not supported.
 
 ## Clean up
 

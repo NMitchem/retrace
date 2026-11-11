@@ -37,6 +37,7 @@ class Retrace < Formula
     (pkgshare/"examples").install "crates/retrace-guest/c/crashy.c"
     (pkgshare/"skills/retrace").install "plugin/skills/retrace/SKILL.md"
     (pkgshare/"examples").install "crates/retrace-guest/agent/ledger"
+    (pkgshare/"examples").install "crates/retrace-guest/agent/inventory"
   end
 
   def caveats
@@ -47,10 +48,11 @@ class Retrace < Formula
       The README's example program is installed here:
         #{pkgshare}/examples/crashy.c
 
-      The Claude Code skill that teaches an agent to use retrace, and a Rust example crate with a
-      failing test to practise on, are installed here:
+      The Claude Code skill that teaches an agent to use retrace, and two Rust example crates with a
+      failing test each to practise on, are installed here:
         #{pkgshare}/skills/retrace/SKILL.md
         #{pkgshare}/examples/ledger
+        #{pkgshare}/examples/inventory
       Copy the skill into ~/.claude/skills/retrace/, or install it as a plugin:
         claude plugin marketplace add NMitchem/retrace
         claude plugin install retrace@retrace
