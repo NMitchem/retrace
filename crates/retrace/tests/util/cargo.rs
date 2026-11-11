@@ -115,5 +115,6 @@ pub fn saved_after_running(stderr: &str) -> Vec<(String, String)> {
 /// Remove a fixture copy (and the scratch directory above it) after a test passed; a failing test never reaches
 /// it, so its recordings stay for debugging.
 pub fn remove_fixture_copy(dir: &Path) {
+    // Safe: `copy_fixture` puts the copy at `<private fresh_dir>/<crate name>`, so its parent is that scratch dir alone.
     let _ = std::fs::remove_dir_all(dir.parent().unwrap_or(dir));
 }

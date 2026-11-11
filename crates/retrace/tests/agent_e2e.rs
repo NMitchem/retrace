@@ -60,7 +60,7 @@ fn the_loop(manifest: &str, tag: &str, name: &str, size: u32, file: &str, bad: &
     let p = s["panics"].as_array().unwrap().iter().find(|x| x.get("assert").is_some()).unwrap().clone();
     let (n, k) = (p["position"][0].as_u64().unwrap(), p["position"][1].as_u64().unwrap());
     let left = p["assert"]["left"].as_str().unwrap();
-    let script = format!("goto {n} {k}; last-write {left} {size}; bt");
+    let script = format!("goto {n} {k}; last-write {left} {size}");
     let lw_json = debug(&trace, &["--json", "--script", &script]);
     let lw_text = debug(&trace, &["--script", &script]);
     save(&format!("{name}-4-lastwrite-json.txt"), &lw_json);
@@ -97,7 +97,10 @@ fn the_same_loop_on_inventory() {
     if skip_no_cargo("the_same_loop_on_inventory") { return; }
     let (o, p) = the_loop(INVENTORY_MANIFEST, "agent-inventory", "inventory", 4, "restock.rs", INVENTORY_BAD_STORE);
     // The worker wrote the slot; the panic is on the test thread.
-    let (w, t) = (o["thread"].as_u64().unwrap(), p["thread"].as_u64());
+    let w = o["thread"].as_u64().unwrap();
+    let t = p["thread"].as_u64().expect("the summary's panic names its thread");
     assert_ne!(w, 0, "{o}");
-    if let Some(t) = t { assert_ne!(w, t, "the writer is not the panicking thread: {o} / {p}"); }
+    assert_ne!(w, t, "the writer is not the panicking thread: {o} / {p}");
+    assert!(o["frames"].as_array().unwrap().iter().any(|f| f["function"].as_str().is_some_and(|n| n.contains("Shelf::receive::{{closure}}"))),
+        "the writer's frames include the spawned closure: {o}");
 }

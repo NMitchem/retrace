@@ -1819,8 +1819,10 @@ impl Exec<'_> {
             line(out, format_args!("stdout (last {SUMMARY_TAIL_LINES} lines):"))?;
             for l in &out_tail { line(out, format_args!("  {l}"))?; }
         }
-        line(out, format_args!("stderr (last {SUMMARY_TAIL_LINES} lines):"))?;
-        for l in &tail { line(out, format_args!("  {l}"))?; }
+        if !tail.is_empty() {
+            line(out, format_args!("stderr (last {SUMMARY_TAIL_LINES} lines):"))?;
+            for l in &tail { line(out, format_args!("  {l}"))?; }
+        }
         line(out, format_args!("threads:"))?;
         for (t, s, cur) in &threads { line(out, format_args!("  {}thread {t}: {s}", if *cur { "* " } else { "  " }))?; }
 

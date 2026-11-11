@@ -112,7 +112,8 @@ fn text_summary_reads() {
     assert!(out.contains("panic on thread "), "{out}");
     assert!(out.contains(&format!("lib.rs:{}", failing_assert_line())), "{out}");
     assert!(out.contains("assert_eq! left operand at 0x") && out.contains(", right at 0x"), "{out}");
-    assert!(out.contains("stderr (last 20 lines):") && out.contains("threads:"), "{out}");
+    assert!(out.contains("threads:"), "{out}");
+    assert!(!out.contains("stderr (last"), "an empty stderr prints no block: {out}");
 }
 
 #[test]
