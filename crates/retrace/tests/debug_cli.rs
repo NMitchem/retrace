@@ -368,3 +368,37 @@ fn json_mode_incomplete_recording_is_a_json_line_and_exit_5() {
     assert!(objs[0]["error"].as_str().unwrap().contains("incomplete recording"), "{}", objs[0]);
     assert!(String::from_utf8_lossy(&out.stderr).contains("DEBUG ERROR:"));
 }
+
+/// M58 B2: a Rust name breaks by its readable form, without its hash, and prints readable.
+#[test]
+fn break_by_readable_rust_name() {
+    if util::cargo::cargo_path().is_none() {
+        util::announce("SKIPPED: cargo is not runnable (break_by_readable_rust_name)");
+        return;
+    }
+    let dir = util::cargo::fresh_dir("readable");
+    let b = util::cargo::cargo_test_under_retrace(util::cargo::LEDGER_MANIFEST, &dir,
+        &["--no-fail-fast", "settling_four_hundred_leaves_the_rest"]);
+    assert_ne!(b.code, Some(0), "the failing test must fail: {}", b.stderr);
+    let trace = std::fs::read_dir(&dir).expect("recordings dir").filter_map(|e| e.ok()).map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|x| x == "retrace")).expect("a recording");
+    let t = trace.to_str().unwrap();
+
+    let (code, out, err) = debug_run(t, "break rust_panic; continue; where");
+    assert_eq!(code, 0, "{err}\n{out}");
+    assert!(out.contains("(__rustc::rust_panic)"), "{out}");
+    assert!(out.contains("breakpoint at 0x"), "{out}");
+    assert!(out.contains("hit 0x"), "{out}");
+    assert!(out.contains("in __rustc::rust_panic"), "{out}");
+
+    let (code, out, err) = debug_run(t, "break ledger::tests::settling_four_hundred_leaves_the_rest");
+    assert_eq!(code, 0, "{err}\n{out}");
+    assert!(out.contains("(ledger::tests::settling_four_hundred_leaves_the_rest)"), "{out}");
+    // The suffix form finds the same function.
+    let (_, out2, _) = debug_run(t, "break tests::settling_four_hundred_leaves_the_rest");
+    let bp = |s: &str| s.lines().find(|l| l.starts_with("breakpoint at")).map(str::to_string);
+    assert!(bp(&out).is_some());
+    assert_eq!(bp(&out), bp(&out2));
+    // And no mangled text leaks into either line.
+    assert!(!out.contains("__ZN") && !out.contains("17h"), "{out}");
+}

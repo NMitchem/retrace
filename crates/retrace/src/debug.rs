@@ -399,6 +399,8 @@ pub(crate) struct Exec<'a> {
     /// path, the host's own symbols, or anything timing- or iteration-order-dependent. An empty
     /// table (static guest, stripped binary) simply formats every address as bare hex.
     epochs: Vec<(Epoch, Symbols)>,
+    /// M58 B2: readable names, one lazy cache per epoch (exec epochs have different images).
+    readables: Vec<crate::demangle::Readable>,
 }
 
 impl<'a> Exec<'a> {
@@ -432,9 +434,10 @@ impl<'a> Exec<'a> {
                 (e, syms)
             }).collect::<Vec<_>>()
         }).unwrap_or_default();
+        let readables = epochs.iter().map(|(_, s)| crate::demangle::Readable::new(s)).collect();
         Ok(Exec {
             trace, session: Some(session), n: 1, k: 0,
-            breakpoints: Vec::new(), watches: Vec::new(), phase: Phase::Bp, cache, epochs,
+            breakpoints: Vec::new(), watches: Vec::new(), phase: Phase::Bp, cache, readables, epochs,
         })
     }
 
@@ -448,8 +451,8 @@ impl<'a> Exec<'a> {
     /// intact, which is why this returns an annotation rather than a replacement for the address.
     fn annot(&self, n: usize, addr: u64) -> String {
         match self.syms_at(n).resolve(addr) {
-            Some((n, 0)) => format!("  in {n}"),
-            Some((n, off)) => format!("  in {n}+{off:#x}"),
+            Some((raw, 0)) => format!("  in {}", self.readable_at(n, raw)),
+            Some((raw, off)) => format!("  in {}+{off:#x}", self.readable_at(n, raw)),
             None => String::new(),
         }
     }
@@ -467,6 +470,24 @@ impl<'a> Exec<'a> {
 
     /// The symbols of the epoch at landmark count `n`. Empty when the trace could not be decoded.
     fn syms_at(&self, n: usize) -> &Symbols {
+        self.syms_at_inner(n)
+    }
+
+    /// M58 B2: the readable form of a raw symbol name in the epoch at `n` (the raw name when none).
+    fn readable_at(&self, n: usize, raw: &str) -> String {
+        match self.readables.get(self.epoch_of(n)) { Some(r) => r.name(raw), None => raw.to_string() }
+    }
+
+    /// M58 B2: `Symbols::format` with the readable name.
+    fn format_at(&self, n: usize, addr: u64) -> String {
+        match self.syms_at(n).resolve(addr) {
+            Some((raw, 0)) => format!("{addr:#x} ({})", self.readable_at(n, raw)),
+            Some((raw, off)) => format!("{addr:#x} ({}+{off:#x})", self.readable_at(n, raw)),
+            None => format!("{addr:#x}"),
+        }
+    }
+
+    fn syms_at_inner(&self, n: usize) -> &Symbols {
         static EMPTY: std::sync::OnceLock<Symbols> = std::sync::OnceLock::new();
         match self.epochs.get(self.epoch_of(n)) { Some((_, s)) => s, None => EMPTY.get_or_init(Symbols::default) }
     }
@@ -591,7 +612,10 @@ impl<'a> Exec<'a> {
         match op {
             Operand::Addr(a) => Ok(*a),
             Operand::Sym(name) => {
-                let hits = self.syms_at(self.n).addrs_of(name);
+                let hits = match self.readables.get(self.epoch_of(self.n)) {
+                    Some(r) => r.lookup(self.syms_at(self.n), name),
+                    None => self.syms_at(self.n).addrs_of(name),
+                };
                 match hits.len() {
                     0 => Err(format!("no symbol \"{name}\"")),
                     1 => Ok(hits[0]),
@@ -618,7 +642,7 @@ impl<'a> Exec<'a> {
         // feedback, and it makes the ambiguity error above actionable. Safe by inspection — both
         // existing assertions on this line use `contains("breakpoint at 0x…")`, never `ends_with`,
         // which is the check M19's four broken assertions earned.
-        line(out, format_args!("breakpoint at {}", self.syms_at(self.n).format(addr)))
+        line(out, format_args!("breakpoint at {}", self.format_at(self.n, addr)))
     }
 
     pub(crate) fn cmd_delete<W: Write>(&mut self, addr: u64, out: &mut W) -> Result<(), String> {
@@ -1487,8 +1511,8 @@ impl Exec<'_> {
     pub fn state_fields(&self) -> Vec<(&'static str, J)> {
         let pc = self.sess().pc();
         let function = match self.syms_at(self.n).resolve(pc) {
-            Some((name, 0)) => J::Str(name.to_string()),
-            Some((name, off)) => J::Str(format!("{name}+{off:#x}")),
+            Some((raw, 0)) => J::Str(self.readable_at(self.n, raw)),
+            Some((raw, off)) => J::Str(format!("{}+{off:#x}", self.readable_at(self.n, raw))),
             None => J::Null,
         };
         vec![

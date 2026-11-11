@@ -16,6 +16,8 @@ retrace-guest = { path = "../retrace-guest" }
 retrace-trace = { path = "../retrace-trace" }
 # M50: the CLI's panic hook and its top-level catch tell a wall from a bug by `Unsupported`.
 retrace-arch = { path = "../retrace-arch" }
+# M58 B2: Rust legacy and v0 names, readable.
+rustc-demangle = "0.1.28"
 
 [dev-dependencies]
 serde_json = "1"

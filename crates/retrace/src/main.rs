@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::exit;
 
 mod debug;
+mod demangle;
 mod json;
 mod rsp;
 mod gdbserver;
