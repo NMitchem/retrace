@@ -41,6 +41,8 @@ pub enum Cmd {
     Unwatch(u64),
     Threads,
     RegsOf(u32),
+    /// M58 B4: a frame-pointer backtrace of a thread (the current one when omitted).
+    Bt(Option<u32>),
 }
 
 /// The non-empty, trimmed command segments of a script, in order. `break;;continue;` → the two
@@ -192,6 +194,13 @@ fn parse_one(seg: &str) -> Result<Cmd, String> {
             }
         }
         "where"           => expect_none(Cmd::Where, &ops),
+        "bt"              => {
+            at_most_one(verb, &ops)?;
+            match ops.first() {
+                None => Ok(Cmd::Bt(None)),
+                Some(t) => Ok(Cmd::Bt(Some(t.parse::<u32>().map_err(|_| format!("bad thread id: {t}"))?))),
+            }
+        }
         "x"               => {
             if ops.len() != 2 { return Err(format!("`x` takes <addr> <len>; got {} operand(s)", ops.len())); }
             Ok(Cmd::Examine(parse_addr(ops[0])?, parse_len(ops[1])?))
@@ -594,6 +603,7 @@ impl<'a> Exec<'a> {
             Cmd::Unwatch(a)       => self.cmd_unwatch(*a, out),
             Cmd::Threads          => self.cmd_threads(out),
             Cmd::RegsOf(tid)      => self.cmd_regs_of(*tid, out),
+            Cmd::Bt(tid)          => self.cmd_bt(*tid, out).map(|_| ()),
         }
     }
 
@@ -736,6 +746,63 @@ impl<'a> Exec<'a> {
             Some(dump) => line(out, format_args!("{dump}")),
             None => Err(format!("no such thread: {tid}")),
         }
+    }
+
+    /// M58 B4: `bt [tid]`. A frame-pointer walk of `tid` (default: the current thread) from its own registers:
+    /// `ThreadCtx` is the live vCPU for the current thread and the saved context for any other.
+    ///
+    /// `at_entry` is decided from the pc alone: frame 0 sits at offset 0 of its symbol, or at offset 4 right after a
+    /// `pacibsp`/`paciasp`, so `stp x29, x30, [sp, #-N]!` has not run and `x29` is still the caller's. Then frame 1
+    /// is `x30`. A pc deeper in a prologue (after a `sub sp`, before the `stp`) or in a frameless leaf is walked as if
+    /// `x29` were this function's, and skips the caller; lldb, which reads unwind info, does not.
+    ///
+    /// Frames from index 1 are return addresses: printed as such, but symbol and line are looked up at `pc - 4`, the
+    /// call. One `atos` call covers every frame. Returns the JSON fields `frames` and, when there is one, `source_note`.
+    fn cmd_bt<W: Write>(&mut self, tid: Option<u32>, out: &mut W) -> Result<Vec<(&'static str, J)>, String> {
+        let tid = tid.unwrap_or_else(|| self.sess().current_thread());
+        let ctx = self.sess().thread_ctx(tid as usize).ok_or_else(|| format!("no such thread: {tid}"))?;
+        let (pc, fp, lr) = (ctx.regs.pc, ctx.regs.x[29], ctx.regs.x[30]);
+        let n = self.n;
+        let at_entry = match self.syms_at(n).resolve(pc) {
+            Some((_, 0)) => true,
+            Some((_, 4)) => self.sess().read_mem(pc - 4, 4)
+                .is_some_and(|b| matches!(u32::from_le_bytes([b[0], b[1], b[2], b[3]]), 0xd503_237f | 0xd503_233f)),
+            _ => false,
+        };
+        let frames = {
+            let sess = self.sess();
+            let read = |a: u64| -> Option<(u64, u64)> {
+                let b = sess.read_mem(a, 16)?;
+                Some((u64::from_le_bytes(b[..8].try_into().ok()?), u64::from_le_bytes(b[8..].try_into().ok()?)))
+            };
+            crate::unwind::walk(pc, fp, lr, at_entry, read, crate::unwind::MAX_FRAMES)
+        };
+        // Where each frame is looked up: its pc for frame 0, the call (pc - 4) for a return address.
+        let probes: Vec<u64> = frames.iter().enumerate().map(|(i, f)| if i == 0 { f.pc } else { f.pc.saturating_sub(4) }).collect();
+        let (lines, note) = self.source_lines(&probes);
+        let mut jf = Vec::new();
+        for (i, f) in frames.iter().enumerate() {
+            let sym = self.syms_at(n).resolve(probes[i]).map(|(raw, off)| (self.readable_at(n, raw), off + (f.pc - probes[i])));
+            let loc = lines.get(i).cloned().flatten();
+            let mut text = format!("#{i} {:#x}", f.pc);
+            if let Some((name, off)) = &sym { text += &format!(" in {name}+{off:#x}"); }
+            if let Some((file, l)) = &loc { text += &format!(" at {file}:{l}"); }
+            line(out, format_args!("{text}"))?;
+            jf.push(J::Obj(vec![
+                ("index", J::UInt(i as u64)),
+                ("pc", hex(f.pc)),
+                ("function", sym.as_ref().map_or(J::Null, |(n, _)| J::Str(n.clone()))),
+                ("offset", sym.as_ref().map_or(J::Null, |(_, o)| J::UInt(*o))),
+                ("file", loc.as_ref().map_or(J::Null, |(f, _)| J::Str(f.clone()))),
+                ("line", loc.as_ref().map_or(J::Null, |(_, l)| J::UInt(u64::from(*l)))),
+            ]));
+        }
+        let mut v = vec![("frames", J::Arr(jf))];
+        if let Some(nt) = note {
+            line(out, format_args!("{nt}"))?;
+            v.push(("source_note", J::Str(nt)));
+        }
+        Ok(v)
     }
 
     fn cmd_where<W: Write>(&mut self, out: &mut W) -> Result<(), String> {
@@ -1511,6 +1578,7 @@ pub fn run_script_mode(trace: &Path, script: &str, mode: Mode, out: &mut impl Wr
 impl Exec<'_> {
     /// Today's `exec` into `out`, plus the extra fields a command contributes (none yet; B2-B6 add them).
     pub fn exec_structured(&mut self, cmd: &Cmd, out: &mut Vec<u8>) -> Result<Vec<(&'static str, J)>, String> {
+        if let Cmd::Bt(tid) = cmd { return self.cmd_bt(*tid, out); }
         self.exec(cmd, out)?;
         Ok(Vec::new())
     }
@@ -1643,6 +1711,8 @@ mod tests {
         assert_eq!(parse_script("threads").unwrap(), vec![Cmd::Threads]);
         assert_eq!(parse_script("regs").unwrap(), vec![Cmd::Regs]);
         assert_eq!(parse_script("regs 3").unwrap(), vec![Cmd::RegsOf(3)]);
+        assert_eq!(parse_script("bt; bt 2").unwrap(), vec![Cmd::Bt(None), Cmd::Bt(Some(2))]);
+        assert!(parse_script("bt x").is_err() && parse_script("bt 1 2").is_err());
         assert!(parse_script("regs 1 2").is_err(), "`regs` takes at most one operand");
         assert!(parse_script("regs abc").is_err(), "a thread id must parse as u32");
         assert!(parse_script("threads x").is_err(), "`threads` takes no arguments");
