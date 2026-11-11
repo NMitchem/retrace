@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::exit;
 
 mod debug;
+mod json;
 mod rsp;
 mod gdbserver;
 mod lldbcmd;
@@ -419,13 +420,15 @@ fn finish(fall_throughs: u64, outcome: &retrace_core::Outcome) -> i32 {
 /// `debug <trace> --script '<cmd>; <cmd>; …'`. A missing trace, a missing `--script`, or a
 /// `--script` with no value is a usage error (exit 2), validated before any file I/O or VM work.
 fn debug_cmd(a: &[String]) -> i32 {
+    let json = a.iter().skip(3).any(|s| s == "--json");
     let script = a.iter().position(|s| s == "--script").and_then(|i| a.get(i + 1));
-    let (Some(trace), Some(script)) = (a.get(2), script) else {
-        return bad_input("usage: retrace debug <trace> --script '<cmds>'");
+    let (Some(trace), Some(script)) = (a.get(2).filter(|t| *t != "--json" && *t != "--script"), script) else {
+        return bad_input("usage: retrace debug <trace> [--json] --script '<cmds>'");
     };
     if let Err(code) = vm_preflight() { return code; }
     if let Err(code) = host_pin(trace) { return code; }
-    match debug::run_script(Path::new(trace), script, &mut std::io::stdout()) {
+    let mode = if json { debug::Mode::Json } else { debug::Mode::Text };
+    match debug::run_script_mode(Path::new(trace), script, mode, &mut std::io::stdout()) {
         Ok(()) => 0,
         Err(e) => { say(&format!("DEBUG ERROR: {e}")); 5 }
     }

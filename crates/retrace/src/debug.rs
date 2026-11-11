@@ -4,6 +4,7 @@
 //! timing, no map-iteration order — so a transcript is bit-reproducible (the Task 6 e2e contract).
 
 use std::io::Write;
+use crate::json::{hex, J};
 use std::path::Path;
 use retrace_core::{checkpointed_seek, Advance, Armed, CheckpointCache, Outcome, ReplayReport, ReplaySession, Stepped, ThreadState};
 use retrace_core::symbols::Symbols;
@@ -1406,18 +1407,89 @@ impl<'a> Exec<'a> {
     }
 }
 
+/// Output mode of a script run (M58 B1).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mode { Text, Json }
+
 /// Execute a `;`-separated debugger script against `trace`, writing the transcript to `out`. Parses
 /// the whole script up front (a syntax error aborts before any output/VM work → the CLI exits 5),
 /// then echoes and runs each command in order.
+#[allow(dead_code)] // kept as the text-mode entry (M58 B1)
 pub fn run_script(trace: &Path, script: &str, out: &mut impl Write) -> Result<(), String> {
-    let cmds = parse_script(script)?;
+    run_script_mode(trace, script, Mode::Text, out)
+}
+
+fn emit(out: &mut impl Write, j: J) -> Result<(), String> {
+    let mut s = j.render();
+    s.push('\n');
+    out.write_all(s.as_bytes()).map_err(|e| format!("write error: {e}"))
+}
+
+/// `run_script` with a mode. In JSON mode each command is one line: its captured text lines in
+/// `output`, then `state_fields`, then the command's extra fields. A failure prints its own
+/// `ok:false` line before the error is returned.
+pub fn run_script_mode(trace: &Path, script: &str, mode: Mode, out: &mut impl Write) -> Result<(), String> {
+    let cmds = match parse_script(script) {
+        Ok(c) => c,
+        Err(e) => {
+            if mode == Mode::Json {
+                emit(out, J::Obj(vec![("command", J::Null), ("ok", J::Bool(false)), ("error", J::Str(e.clone()))]))?;
+            }
+            return Err(e);
+        }
+    };
     let segs: Vec<&str> = segments(script).collect(); // echo the exact source segment text
     let mut ex = Exec::new(trace)?;
     for (seg, cmd) in segs.iter().zip(&cmds) {
-        line(out, format_args!("> {seg}"))?;
-        ex.exec(cmd, out)?;
+        match mode {
+            Mode::Text => {
+                line(out, format_args!("> {seg}"))?;
+                ex.exec(cmd, out)?;
+            }
+            Mode::Json => {
+                let mut buf = Vec::new();
+                match ex.exec_structured(cmd, &mut buf) {
+                    Ok(extra) => {
+                        let text = String::from_utf8_lossy(&buf);
+                        let lines = text.lines().map(|l| J::Str(l.to_string())).collect();
+                        let mut o = vec![("command", J::Str(seg.to_string())), ("ok", J::Bool(true)), ("output", J::Arr(lines))];
+                        o.extend(ex.state_fields());
+                        o.extend(extra);
+                        emit(out, J::Obj(o))?;
+                    }
+                    Err(e) => {
+                        emit(out, J::Obj(vec![("command", J::Str(seg.to_string())), ("ok", J::Bool(false)), ("error", J::Str(e.clone()))]))?;
+                        return Err(e);
+                    }
+                }
+            }
+        }
     }
     Ok(())
+}
+
+impl Exec<'_> {
+    /// Today's `exec` into `out`, plus the extra fields a command contributes (none yet; B2-B6 add them).
+    pub fn exec_structured(&mut self, cmd: &Cmd, out: &mut Vec<u8>) -> Result<Vec<(&'static str, J)>, String> {
+        self.exec(cmd, out)?;
+        Ok(Vec::new())
+    }
+
+    /// The cursor as JSON: `position`, `thread`, `pc`, `function`. The one place these are built.
+    pub fn state_fields(&self) -> Vec<(&'static str, J)> {
+        let pc = self.sess().pc();
+        let function = match self.syms_at(self.n).resolve(pc) {
+            Some((name, 0)) => J::Str(name.to_string()),
+            Some((name, off)) => J::Str(format!("{name}+{off:#x}")),
+            None => J::Null,
+        };
+        vec![
+            ("position", J::Arr(vec![J::UInt(self.n as u64), J::UInt(self.k)])),
+            ("thread", J::UInt(u64::from(self.sess().current_thread()))),
+            ("pc", hex(pc)),
+            ("function", function),
+        ]
+    }
 }
 
 #[cfg(test)]

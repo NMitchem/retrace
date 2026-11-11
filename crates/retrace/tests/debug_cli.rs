@@ -300,3 +300,48 @@ fn debug_arg_errors_are_usage_not_panics() {
             "usage text for {args:?}");
     }
 }
+
+fn json_lines(s: &str) -> Vec<serde_json::Value> {
+    s.lines().map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("not JSON ({e}): {l}"))).collect()
+}
+
+#[test]
+fn json_mode_one_object_per_command() {
+    let (rec, trace) = util::record_dynamic(retrace_guest::CRASHY);
+    assert_eq!(rec.code, 139, "record: {}", rec.stderr);
+    let ts = trace.to_str().unwrap();
+    let script = "where; break _main; continue; where; regs";
+    let out = std::process::Command::new(util::bin())
+        .args(["debug", ts, "--json", "--script", script]).output().expect("spawn");
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    let objs = json_lines(&String::from_utf8(out.stdout).unwrap());
+    assert_eq!(objs.len(), 5);
+    for o in &objs { assert_eq!(o["ok"], true, "{o}"); }
+    let (code, text, err) = debug_run(ts, script);
+    assert_eq!(code, 0, "{err}");
+    let where_line = text.lines().rfind(|l| l.starts_with("at (")).unwrap();
+    assert_eq!(objs[3]["output"], serde_json::json!([where_line]));
+    let pos = objs[3]["position"].as_array().unwrap();
+    assert!(pos.len() == 2 && pos.iter().all(|v| v.is_u64()));
+    assert!(objs[3]["pc"].as_str().unwrap().starts_with("0x"));
+}
+
+#[test]
+fn json_mode_error_is_a_json_line_and_exit_5() {
+    let (rec, trace) = util::record_dynamic(retrace_guest::CRASHY);
+    assert_eq!(rec.code, 139, "record: {}", rec.stderr);
+    let out = std::process::Command::new(util::bin())
+        .args(["debug", trace.to_str().unwrap(), "--script", "break nosuchsym", "--json"]).output().expect("spawn");
+    assert_eq!(out.status.code(), Some(5));
+    let objs = json_lines(&String::from_utf8(out.stdout).unwrap());
+    assert_eq!(objs.len(), 1);
+    assert_eq!(objs[0]["ok"], false);
+    assert!(objs[0]["error"].is_string());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("DEBUG ERROR:"));
+}
+
+#[test]
+#[ignore = "M58 B6 wires summary"]
+fn json_mode_escapes_program_text() {
+    // B6 wires `summary`, which carries the program's own stderr text; the escaping itself is unit-tested in json.rs.
+}
