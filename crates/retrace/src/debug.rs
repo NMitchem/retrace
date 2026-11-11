@@ -43,6 +43,10 @@ pub enum Cmd {
     RegsOf(u32),
     /// M58 B4: a frame-pointer backtrace of a thread (the current one when omitted).
     Bt(Option<u32>),
+    /// M58 B5: move the cursor to position (n, k).
+    Goto(usize, u64),
+    /// M58 B5: the last write to `len` bytes at an address or symbol, before the cursor.
+    LastWrite(Operand, u64),
 }
 
 /// The non-empty, trimmed command segments of a script, in order. `break;;continue;` → the two
@@ -201,12 +205,42 @@ fn parse_one(seg: &str) -> Result<Cmd, String> {
                 Some(t) => Ok(Cmd::Bt(Some(t.parse::<u32>().map_err(|_| format!("bad thread id: {t}"))?))),
             }
         }
+        "goto"            => {
+            // `goto 3 5`, `goto (3, 5)` and `goto 3:5` are one command.
+            let joined = ops.join(" ").replace(['(', ')', ',', ':'], " ");
+            let nums: Vec<&str> = joined.split_whitespace().collect();
+            if nums.len() != 2 { return Err("`goto` takes <n> <k>, (n, k) or n:k".to_string()); }
+            let n = nums[0].parse::<usize>().map_err(|_| format!("bad landmark: {}", nums[0]))?;
+            let k = nums[1].parse::<u64>().map_err(|_| format!("bad step: {}", nums[1]))?;
+            if n == 0 { return Err("landmarks start at 1".to_string()); }
+            Ok(Cmd::Goto(n, k))
+        }
+        "last-write"      => {
+            if ops.is_empty() || ops.len() > 2 {
+                return Err(format!("`last-write` takes <addr|symbol> [len]; got {} operand(s)", ops.len()));
+            }
+            let len = match ops.get(1) {
+                Some(l) => l.parse::<u64>().map_err(|_| format!("bad watch len: {l}"))?,
+                None => 8,
+            };
+            check_watch_len(len)?;
+            let op = parse_operand(ops[0]);
+            if let Operand::Addr(a) = &op { check_watch_align(*a, len)?; }
+            Ok(Cmd::LastWrite(op, len))
+        }
         "x"               => {
             if ops.len() != 2 { return Err(format!("`x` takes <addr> <len>; got {} operand(s)", ops.len())); }
             Ok(Cmd::Examine(parse_addr(ops[0])?, parse_len(ops[1])?))
         }
         other             => Err(format!("unknown command: {other}")),
     }
+}
+
+fn check_watch_len(len: u64) -> Result<(), String> {
+    if matches!(len, 1 | 2 | 4 | 8) { Ok(()) } else { Err(format!("watch len must be 1, 2, 4, or 8; got {len}")) }
+}
+fn check_watch_align(addr: u64, len: u64) -> Result<(), String> {
+    if addr.is_multiple_of(len) { Ok(()) } else { Err(format!("watch address {addr:#x} must be {len}-byte aligned")) }
 }
 
 fn one_operand(verb: &str, ops: &[&str]) -> Result<(), String> {
@@ -604,6 +638,8 @@ impl<'a> Exec<'a> {
             Cmd::Threads          => self.cmd_threads(out),
             Cmd::RegsOf(tid)      => self.cmd_regs_of(*tid, out),
             Cmd::Bt(tid)          => self.cmd_bt(*tid, out).map(|_| ()),
+            Cmd::Goto(n, k)       => self.cmd_goto(*n, *k, out),
+            Cmd::LastWrite(op, l) => self.cmd_last_write(op, *l, out).map(|_| ()),
         }
     }
 
@@ -811,6 +847,112 @@ impl<'a> Exec<'a> {
             v.push(("source_note", J::Str(nt)));
         }
         Ok(v)
+    }
+
+    /// M58 B5: move to (n, k) with phase `Bp` and print `where`'s line. A position the recording does not reach is
+    /// an error naming the last one; the cursor stays where it was.
+    fn cmd_goto<W: Write>(&mut self, n: usize, k: u64, out: &mut W) -> Result<(), String> {
+        let at = (self.n, self.k, self.phase);
+        if let Err(e) = self.reseek(n, k) {
+            self.recover(at)?;
+            let last = self.last_position()?;
+            return Err(format!("goto ({n}, {k}): {e}; the recording's last position is ({}, {})", last.0, last.1));
+        }
+        self.cmd_where(out)
+    }
+
+    /// The recording's last position, the terminal's park. The cursor is restored.
+    fn last_position(&mut self) -> Result<(usize, u64), String> {
+        let at = (self.n, self.k, self.phase);
+        let (bps, ws) = (std::mem::take(&mut self.breakpoints), std::mem::take(&mut self.watches));
+        let r = self.cmd_continue(&mut std::io::sink());
+        let pos = (self.n, self.k);
+        self.breakpoints = bps;
+        self.watches = ws;
+        self.recover(at)?;
+        match r? {
+            Halt::Terminal(_) => Ok(pos),
+            h => Err(format!("goto: no end of the recording was reached ({h:?})")),
+        }
+    }
+
+    /// M58 B5: who wrote `len` bytes at `op` last, before the cursor. It arms a temporary unscoped watch (with the
+    /// user's other watches and breakpoints off, so only this write can stop it), runs `reverse-continue`, and
+    /// reads its `Halt`. Whatever happens the user's breakpoints and watches come back.
+    fn cmd_last_write<W: Write>(&mut self, op: &Operand, len: u64, out: &mut W) -> Result<Vec<(&'static str, J)>, String> {
+        let addr = self.addr_of(op)?;
+        check_watch_align(addr, len)?;
+        if self.watches.len() >= 4 {
+            return Err("last-write needs a free watchpoint slot; 4 are armed (hardware limit: DBGWVR0-3)".into());
+        }
+        if self.watches.iter().any(|&(a, _, _)| a == addr) {
+            return Err(format!("{addr:#x} is already watched; `unwatch {addr:#x}` before `last-write`"));
+        }
+        let at = (self.n, self.k, self.phase);
+        let (bps, ws) = (std::mem::take(&mut self.breakpoints), std::mem::take(&mut self.watches));
+        self.watches = vec![(addr, len, None)];
+        let halt = self.cmd_reverse_continue(&mut std::io::sink());
+        self.breakpoints = bps;
+        self.watches = ws;
+        let mut f: Vec<(&'static str, J)> = Vec::new();
+        let hex_of = |b: Option<Vec<u8>>| b.map_or(J::Null, |b| J::Str(b.iter().map(|x| format!("{x:02x}")).collect()));
+        match halt? {
+            Halt::NoEarlierHit => {
+                line(out, format_args!("no earlier write to {addr:#x}: it holds what it held when the program started"))?;
+                f.push(("found", J::Bool(false)));
+            }
+            Halt::Exec { .. } => {
+                // The scan met an exec first: the image that held this address is gone, and no write is later.
+                self.recover(at)?;
+                line(out, format_args!("no earlier write to {addr:#x}: it holds what it held when the program started"))?;
+                f.push(("found", J::Bool(false)));
+            }
+            Halt::Watch { .. } => {
+                let (n, k) = (self.n, self.k);
+                let (pc, thread) = (self.sess().pc(), self.sess().current_thread());
+                let before = self.sess().read_mem(addr, len as usize);
+                // One step of the writing thread retires the store; a window end leaves `value_after` null.
+                let after = match self.cmd_stepi(1, &mut std::io::sink())? {
+                    Halt::Stepped => self.sess().read_mem(addr, len as usize),
+                    _ => None,
+                };
+                self.reseek(n, k)?;
+                self.phase = Phase::Watch;
+                let sym = self.syms_at(n).resolve(pc).map(|(raw, off)| (self.readable_at(n, raw), off));
+                let (lines, _) = self.source_lines(&[pc]);
+                let loc = lines.into_iter().next().flatten();
+                let mut text = format!("last write to {addr:#x} ({len} bytes): store at {pc:#x}");
+                if let Some((name, off)) = &sym { text += &format!(" in {name}+{off:#x}"); }
+                if let Some((file, l)) = &loc { text += &format!(" at {file}:{l}"); }
+                text += &format!(" on thread {thread}, ({n}, {k})");
+                line(out, format_args!("{text}"))?;
+                f.push(("found", J::Bool(true)));
+                f.push(("kind", J::Str("store".into())));
+                f.push(("value_before", hex_of(before)));
+                f.push(("value_after", hex_of(after)));
+                f.extend(self.cmd_bt(None, out)?);
+            }
+            Halt::WatchSys { thread, .. } => {
+                let n = self.n;
+                // The write belongs to the event that ended window n - 1: park before it to read its number.
+                self.park_before_event(n)?;
+                let num = self.sess().peek_syscall().map(|(num, _)| num)
+                    .ok_or_else(|| format!("last-write: no syscall event ends window {}", n - 1))?;
+                self.reseek(n, 0)?;
+                self.phase = Phase::Sys;
+                let name = retrace_arch::syscall_name(num).map_or_else(|| format!("syscall{num}"), str::to_string);
+                let after = self.sess().read_mem(addr, len as usize);
+                line(out, format_args!("last write to {addr:#x}: syscall {name} ({num}) on thread {thread}, ({n}, 0)"))?;
+                f.push(("found", J::Bool(true)));
+                f.push(("kind", J::Str("syscall".into())));
+                f.push(("thread", J::UInt(u64::from(thread))));
+                f.push(("syscall", J::Obj(vec![("number", J::UInt(num)), ("name", J::Str(name))])));
+                f.push(("value_before", J::Null));
+                f.push(("value_after", hex_of(after)));
+            }
+            h => return Err(format!("last-write: unexpected stop {h:?}")),
+        }
+        Ok(f)
     }
 
     fn cmd_where<W: Write>(&mut self, out: &mut W) -> Result<(), String> {
@@ -1569,7 +1711,9 @@ pub fn run_script_mode(trace: &Path, script: &str, mode: Mode, out: &mut impl Wr
                         let lines = text.lines().map(|l| J::Str(l.to_string())).collect();
                         let mut o = vec![("command", J::Str(seg.to_string())), ("ok", J::Bool(true)), ("output", J::Arr(lines))];
                         o.extend(ex.state_fields());
-                        o.extend(extra);
+                        for (k, v) in extra { // an extra field of a state field's name replaces it
+                            match o.iter_mut().find(|(ok, _)| *ok == k) { Some(slot) => slot.1 = v, None => o.push((k, v)) }
+                        }
                         emit(out, J::Obj(o))?;
                     }
                     Err(e) => {
@@ -1587,6 +1731,7 @@ impl Exec<'_> {
     /// Today's `exec` into `out`, plus the extra fields a command contributes (none yet; B2-B6 add them).
     pub fn exec_structured(&mut self, cmd: &Cmd, out: &mut Vec<u8>) -> Result<Vec<(&'static str, J)>, String> {
         if let Cmd::Bt(tid) = cmd { return self.cmd_bt(*tid, out); }
+        if let Cmd::LastWrite(op, len) = cmd { return self.cmd_last_write(op, *len, out); }
         self.exec(cmd, out)?;
         Ok(Vec::new())
     }
@@ -1654,6 +1799,26 @@ mod tests {
         // these two cases used to sit in one test where they read as the same thing; they are not.
         assert!(parse_script("frobnicate").is_err());
         assert!(parse_script("threads x").is_err(), "`threads` takes no arguments");
+    }
+
+    #[test]
+    fn goto_parses_three_spellings() {
+        for t in ["goto 3 5", "goto (3, 5)", "goto 3:5", "goto (3,5)"] {
+            assert_eq!(parse_script(t).unwrap(), vec![Cmd::Goto(3, 5)], "{t}");
+        }
+        for t in ["goto", "goto 3", "goto 3 x", "goto a:b", "goto 1 2 3", "goto 0 1", "goto -1 2"] {
+            assert!(parse_script(t).is_err(), "{t}");
+        }
+    }
+
+    #[test]
+    fn last_write_parses_len_and_alignment() {
+        assert_eq!(parse_script("last-write 0x1000").unwrap(), vec![Cmd::LastWrite(Operand::Addr(0x1000), 8)]);
+        assert_eq!(parse_script("last-write 0x1004 4").unwrap(), vec![Cmd::LastWrite(Operand::Addr(0x1004), 4)]);
+        assert_eq!(parse_script("last-write rust_panic 1").unwrap(), vec![Cmd::LastWrite(Operand::Sym("rust_panic".into()), 1)]);
+        assert!(parse_script("last-write 0x1000 3").is_err(), "bad len");
+        assert!(parse_script("last-write 0x1004").is_err(), "8-byte misaligned");
+        assert!(parse_script("last-write").is_err() && parse_script("last-write 0x1000 8 8").is_err());
     }
 
     // -------------------------------------------------------------------------------------------
