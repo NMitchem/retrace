@@ -1,15 +1,18 @@
 #!/bin/bash
-# M56 L4: the cold start. Taps, installs through Homebrew, records crashy and reverse-debugs it
-# through lldb, in a scratch HOME. Run by hand (it needs Homebrew and the network or a local tap).
+# The cold start. Taps, installs through Homebrew, records crashy and reverse-debugs it through lldb,
+# in a scratch HOME. Run by hand (it needs Homebrew and the network or a local tap).
 #
 #   tools/coldstart.sh [--head] [--tap <dir-or-url>] [--cleanup]
+#
+# The tap is NMitchem/homebrew-retrace. With --tap <dir>, a local checkout of it, the formula's head line
+# is pointed at this retrace checkout's current branch, so --head builds the code beside this script.
 #
 # Prints one `COLDSTART pass` or `COLDSTART fail: <step>` line; exits 0 or 1. On a failure the scratch
 # directory is kept and named. Without --cleanup it never untaps or uninstalls.
 set -u
 
 HEAD_FLAG=""
-TAP_SRC="https://github.com/NMitchem/retrace"
+TAP_SRC="https://github.com/NMitchem/homebrew-retrace"
 CLEANUP=0
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -56,12 +59,12 @@ export CARGO_HOME="$SCRATCH/home/.cargo"
 export RUSTUP_HOME="$SCRATCH/home/.rustup"
 
 if [ -d "$TAP_SRC" ]; then
-  # A local checkout: Homebrew's download sandbox cannot read ~/Documents (Ruling P-3), so clone
-  # the current branch bare under /private/tmp and point the formula's head line at that.
+  # A local tap checkout. Homebrew's download sandbox cannot read ~/Documents, so clone this retrace
+  # checkout's current branch bare under /private/tmp and point the formula's head line at that.
   STEP="local tap source"
-  BRANCH="$(git -C "$TAP_SRC" rev-parse --abbrev-ref HEAD)" || fail
+  BRANCH="$(git -C "$REPO" rev-parse --abbrev-ref HEAD)" || fail
   BARE="$(mktemp -d /private/tmp/retrace-coldstart-bare.XXXXXX)" || fail
-  git clone --bare --branch "$BRANCH" "$TAP_SRC" "$BARE" >&2 || fail
+  git clone --bare --branch "$BRANCH" "$REPO" "$BARE" >&2 || fail
   step "scratch tap" brew tap-new --no-git "$TAP_NAME"
   TAP_ADDED=1
   TAP_DIR="$(brew --repository "$TAP_NAME")" || { STEP="tap dir"; fail; }

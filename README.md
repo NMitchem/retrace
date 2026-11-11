@@ -49,7 +49,6 @@ like.
 ## Install
 
 ```sh
-brew tap nmitchem/retrace https://github.com/NMitchem/retrace
 brew install nmitchem/retrace/retrace
 ```
 
