@@ -36,6 +36,19 @@ fn one_record_takes_a_static_and_a_dynamic_program() {
 }
 
 #[test]
+fn retrace_dir_places_the_trace() {
+    let d = scratch_dir("dir");
+    let dir = d.join("nested/dir");
+    let base = std::path::Path::new(retrace_guest::HELLO_DYN).file_name().unwrap().to_str().unwrap();
+    let want = dir.join(format!("{base}.retrace"));
+    let rec = util::run_bounded(util::bin(), &["record", retrace_guest::HELLO_DYN],
+        &[("RETRACE_DIR", dir.to_str().unwrap())], BOUND);
+    assert_eq!(rec.code, Some(0), "stderr:\n{}", rec.stderr);
+    assert!(want.exists(), "{} missing", want.display());
+    assert!(rec.stderr.contains(&format!("saved the recording to {}", want.display())), "stderr:\n{}", rec.stderr);
+}
+
+#[test]
 fn a_relative_path_records_replays_and_reaches_the_guest_as_typed() {
     let d = scratch_dir("rel");
     std::fs::copy(retrace_guest::APPLE_DYN, d.join("apple")).unwrap();

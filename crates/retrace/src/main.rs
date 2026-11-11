@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::exit;
 
 mod debug;
@@ -24,6 +24,8 @@ fn help() -> String {
   gdbserver <trace> [--port <n>] [--exe <path>]   serve a recording to a gdb-remote client
 
   retrace --version    print the version
+
+  RETRACE_DIR=<dir>  record without -o into <dir>/<basename>.retrace
 
 Programs retrace cannot run yet are listed at {}", retrace_arch::WALLS_URL)
 }
@@ -306,6 +308,16 @@ fn default_trace_name(program: &str) -> String {
     format!("{base}.retrace")
 }
 
+/// Where a recording goes: `-o` wins; else `<dir>/<basename>.retrace` when `dir` is set and non-empty
+/// (`RETRACE_DIR`); else the default name in the working directory.
+fn trace_path(out: Option<&str>, program: &str, dir: Option<&std::ffi::OsStr>) -> PathBuf {
+    if let Some(o) = out { return PathBuf::from(o); }
+    match dir.filter(|d| !d.is_empty()) {
+        Some(d) => Path::new(d).join(default_trace_name(program)),
+        None => PathBuf::from(default_trace_name(program)),
+    }
+}
+
 /// `record [-o <trace>] <program> [<args>...]`. LC_LOAD_DYLINKER present records through the named
 /// dylinker (real dyld); absent, the freestanding static path.
 fn record(a: &[String]) -> i32 {
@@ -329,7 +341,16 @@ fn record(a: &[String]) -> i32 {
         return bad_input(&format!("a static program takes no arguments ({guest}); {RECORD_USAGE}"));
     }
     let named = r.out.is_some();
-    let out = r.out.clone().unwrap_or_else(|| default_trace_name(guest));
+    let dir = std::env::var_os("RETRACE_DIR");
+    let out_path = trace_path(r.out.as_deref(), guest, dir.as_deref());
+    if !named && dir.as_deref().is_some_and(|d| !d.is_empty()) {
+        if let Some(parent) = out_path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                return bad_input(&format!("cannot create {}: {e}", parent.display()));
+            }
+        }
+    }
+    let out = out_path.to_string_lossy().into_owned();
     // Guest argv: argv[0] is the path as typed (what dyld's `executable_path=` is derived from).
     let mut argv = vec![guest.clone()];
     argv.extend(r.args.iter().cloned());
@@ -479,6 +500,15 @@ mod record_args_tests {
     fn default_names() {
         assert_eq!(default_trace_name("./sub/crashy"), "crashy.retrace");
         assert_eq!(default_trace_name("/bin/ls"), "ls.retrace");
+    }
+
+    #[test]
+    fn trace_path_prefers_o_then_dir_then_default() {
+        use std::ffi::OsStr;
+        assert_eq!(trace_path(Some("t.bin"), "./p", Some(OsStr::new("d"))), PathBuf::from("t.bin"));
+        assert_eq!(trace_path(None, "./x/p", Some(OsStr::new("d"))), PathBuf::from("d/p.retrace"));
+        assert_eq!(trace_path(None, "./p", None), PathBuf::from("p.retrace"));
+        assert_eq!(trace_path(None, "./p", Some(OsStr::new(""))), PathBuf::from("p.retrace"));
     }
 }
 
