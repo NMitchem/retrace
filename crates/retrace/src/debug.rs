@@ -1674,11 +1674,33 @@ impl<'a> Exec<'a> {
     }
 }
 
-/// M58 B6: a hit of `summary`'s scans.
-struct SumHit { pos: (usize, u64), thread: u32, x1: u64, x2: u64, text: Vec<String>, frames: J }
+/// M58 B6: a hit of `summary`'s scans. `pc` is the breakpoint's address.
+struct SumHit { pos: (usize, u64), thread: u32, pc: u64, x1: u64, x2: u64, text: Vec<String>, frames: J }
 
 const SUMMARY_PANIC_CAP: usize = 16;
 const SUMMARY_TAIL_LINES: usize = 20;
+
+/// Whether a readable name is `core::panicking::assert_failed` itself: the bare name (legacy mangling, hash dropped)
+/// or one instantiation of it (v0 mangling, `core::panicking::assert_failed::<i64, i64>`), and not
+/// `assert_failed_inner`, the non-generic function it calls.
+fn is_assert_failed(name: &str) -> bool {
+    name == "core::panicking::assert_failed" || name.starts_with("core::panicking::assert_failed::")
+}
+
+/// M58 final review: the start of the `assert_failed` instantiation in a panic's backtrace (`bt`'s frames, as JSON):
+/// the first frame `is_assert_failed` accepts, at its pc less its offset. A program has one instantiation per type
+/// pair it asserts on, so the panic's own frame says which one failed.
+fn assert_failed_start(frames: &J) -> Option<u64> {
+    let J::Arr(fs) = frames else { return None };
+    fs.iter().find_map(|f| {
+        let J::Obj(kv) = f else { return None };
+        let get = |k: &str| kv.iter().find(|(key, _)| *key == k).map(|(_, v)| v);
+        let Some(J::Str(name)) = get("function") else { return None };
+        if !is_assert_failed(name) { return None; }
+        let (Some(J::Str(pc)), Some(J::UInt(off))) = (get("pc"), get("offset")) else { return None };
+        u64::from_str_radix(pc.trim_start_matches("0x"), 16).ok()?.checked_sub(*off)
+    })
+}
 
 impl Exec<'_> {
     /// The executable's addresses whose readable name (hash dropped) `pred` accepts, ascending. A raw name must
@@ -1711,7 +1733,7 @@ impl Exec<'_> {
                         self.breakpoints.clear();
                         continue;
                     }
-                    let thread = self.sess().current_thread();
+                    let (thread, pc) = (self.sess().current_thread(), self.sess().pc());
                     let (x1, x2) = self.sess().thread_ctx(thread as usize).map_or((0, 0), |c| (c.regs.x[1], c.regs.x[2]));
                     let (text, fr) = if frames {
                         let mut buf = Vec::new();
@@ -1719,7 +1741,7 @@ impl Exec<'_> {
                         let text = String::from_utf8_lossy(&buf).lines().filter(|l| l.starts_with('#')).map(str::to_string).collect();
                         (text, f.into_iter().find(|(k, _)| *k == "frames").map_or(J::Arr(Vec::new()), |(_, v)| v))
                     } else { (Vec::new(), J::Null) };
-                    hits.push(SumHit { pos: (self.n, self.k), thread, x1, x2, text, frames: fr });
+                    hits.push(SumHit { pos: (self.n, self.k), thread, pc, x1, x2, text, frames: fr });
                 }
                 Halt::Exec { .. } => {}
                 Halt::Terminal(r) => return Ok((hits, truncated, r)),
@@ -1754,21 +1776,30 @@ impl Exec<'_> {
         }
         let (mut panics, truncated, mut report) = self.scan_hits(&panic_at, SUMMARY_PANIC_CAP, true)?;
         let mut asserts: Vec<Option<(u64, u64)>> = vec![None; panics.len()];
-        let mut assert_at = if panics.is_empty() { Vec::new() } else {
-            self.exe_addrs("assert_failed", |r| r == "core::panicking::assert_failed")
-        };
+        // Each panic's own `assert_failed`, from its backtrace. A test binary has one instantiation per type pair it
+        // asserts on, so arming every symbol of that name (the first six by address) missed the failing one, and under
+        // v0 mangling no symbol has the bare name at all; both silently.
+        let starts: Vec<Option<u64>> = panics.iter().map(|p| assert_failed_start(&p.frames)).collect();
+        let mut assert_at: Vec<u64> = starts.iter().flatten().copied().collect();
+        assert_at.sort_unstable();
+        assert_at.dedup();
         if assert_at.len() > 6 {
-            notes.push(format!("{} assert_failed symbols; only the first 6 by address are armed, so an assert_eq! on another type has no operands", assert_at.len()));
+            notes.push(format!("{} assert_failed instantiations among the panics; only the first 6 by address are armed, so the panics in the others have no operands", assert_at.len()));
             assert_at.truncate(6);
         }
         if !assert_at.is_empty() {
+            // `scan_hits`'s truncated flag is dropped: 256 hits is enough. Only the panics' own instantiations are
+            // armed, and `assert_failed` never returns (it panics), so each hit is followed on its thread by a
+            // `rust_panic` hit. The panics listed are the first SUMMARY_PANIC_CAP, so the hits they pair with are among
+            // the first SUMMARY_PANIC_CAP plus one per other thread inside a failing assert at that moment.
             let (ahits, _, r) = self.scan_hits(&assert_at, 256, false)?;
             report = r;
             let mut used = vec![false; ahits.len()];
             for (pi, p) in panics.iter().enumerate() {
-                if !p.text.iter().any(|l| l.contains(" in core::panicking::assert_failed")) { continue; }
-                // The latest unused assert_failed entry on this thread before the panic.
-                if let Some(ai) = (0..ahits.len()).rev().find(|&i| !used[i] && ahits[i].thread == p.thread && ahits[i].pos <= p.pos) {
+                let Some(start) = starts[pi].filter(|s| assert_at.contains(s)) else { continue };
+                // The latest unused entry of this panic's own assert_failed on its thread before the panic.
+                if let Some(ai) = (0..ahits.len()).rev()
+                    .find(|&i| !used[i] && ahits[i].pc == start && ahits[i].thread == p.thread && ahits[i].pos <= p.pos) {
                     used[ai] = true;
                     asserts[pi] = Some((ahits[ai].x1, ahits[ai].x2));
                 }
@@ -1990,6 +2021,30 @@ impl Exec<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn frame(function: Option<&str>, pc: u64, offset: Option<u64>) -> J {
+        J::Obj(vec![("pc", hex(pc)), ("function", function.map_or(J::Null, |f| J::Str(f.into()))),
+            ("offset", offset.map_or(J::Null, J::UInt))])
+    }
+
+    #[test] fn a_panic_s_own_assert_failed_is_its_function_start() {
+        // The readme's ledger panic: assert_failed_inner first (not it), then assert_failed+0x54.
+        let legacy = J::Arr(vec![
+            frame(Some("__rustc::rust_panic"), 0x100077ba8, Some(0)),
+            frame(Some("core::panicking::assert_failed_inner"), 0x100079028, Some(0xbc)),
+            frame(Some("core::panicking::assert_failed"), 0x100073308, Some(0x54)),
+            frame(Some("core::panicking::assert_failed"), 0x100074000, Some(0x10)),
+        ]);
+        assert_eq!(assert_failed_start(&legacy), Some(0x100073308 - 0x54));
+        // v0 mangling: the instantiation's readable name carries its type arguments.
+        let v0 = J::Arr(vec![frame(Some("core::panicking::assert_failed::<i64, i64>"), 0x100002010, Some(0x10))]);
+        assert_eq!(assert_failed_start(&v0), Some(0x100002000));
+        // No assert_failed frame (a plain `panic!`), a frame without a symbol, and no frames: none.
+        let plain = J::Arr(vec![frame(Some("core::panicking::panic_fmt"), 0x10, Some(4)), frame(None, 0x20, None)]);
+        assert_eq!(assert_failed_start(&plain), None);
+        assert_eq!(assert_failed_start(&J::Arr(Vec::new())), None);
+        assert!(!is_assert_failed("core::panicking::assert_failed_inner"));
+    }
 
     #[test] fn parses_commands() {
         let cs = parse_script("break 0x1804af834; continue; reverse-stepi 2; x 0x1000 16; where").unwrap();

@@ -419,7 +419,10 @@ limit and the measurement behind it. These are the ones you'll hit first:
   ([below](#debugging-the-same-way-in-lldb)), but it has no Rust language plugin, so it shows Rust
   variables only in part. `summary` lists the panics of the program the recording started as, not of
   a program it execs. There are six breakpoints and four watch slots (the hardware's), and `last-write`
-  takes one of the four. Watches trigger on writes only. Under lldb, each `process continue -R`
+  takes one of the four. Watches trigger on writes only. A write retrace makes into the program's memory
+  itself, the result of a call it answers without the kernel (a `kevent` event list or a `poll` or
+  `select` result, also one handed to a thread as it wakes), is not seen by `last-write` or a watch, so
+  `last-write` names an earlier write. Under lldb, each `process continue -R`
   replays forward from the start of the recording, and `process interrupt` can't stop a long reverse
   motion.
 
