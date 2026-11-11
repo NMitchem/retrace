@@ -18,6 +18,7 @@ retrace-trace = { path = "../retrace-trace" }
 retrace-arch = { path = "../retrace-arch" }
 
 [dev-dependencies]
+serde_json = "1"
 retrace-guest = { path = "../retrace-guest" }
 retrace-trace = { path = "../retrace-trace" }
 retrace-sim = { path = "../retrace-sim" }

@@ -1,0 +1,12 @@
+{
+  "name": "retrace",
+  "description": "The retrace skill for Claude Code: record a failing test once, then query the recording.",
+  "owner": { "name": "Noah Mitchem" },
+  "plugins": [
+    {
+      "name": "retrace",
+      "source": "./plugin",
+      "description": "Record a failing Rust, C or C++ test or crash once on an Apple Silicon Mac, then ask the recording who wrote a value, from which line, on which thread."
+    }
+  ]
+}
