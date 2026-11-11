@@ -236,6 +236,9 @@ fn parse_one(seg: &str) -> Result<Cmd, String> {
     }
 }
 
+/// The `last-write` line when an exec at landmark `n` comes before any write: the image that held the address is gone.
+fn no_write_since_exec(addr: u64, n: usize) -> String { format!("no write to {addr:#x} since the exec at ({n}, 0)") }
+
 fn check_watch_len(len: u64) -> Result<(), String> {
     if matches!(len, 1 | 2 | 4 | 8) { Ok(()) } else { Err(format!("watch len must be 1, 2, 4, or 8; got {len}")) }
 }
@@ -892,20 +895,31 @@ impl<'a> Exec<'a> {
         let (bps, ws) = (std::mem::take(&mut self.breakpoints), std::mem::take(&mut self.watches));
         self.watches = vec![(addr, len, None)];
         let halt = self.cmd_reverse_continue(&mut std::io::sink());
+        // The report steps the writer once, so it too runs with the user's breakpoints and watches still off.
+        self.watches.clear();
+        let rep = self.last_write_report(halt, addr, len, at, out);
         self.breakpoints = bps;
         self.watches = ws;
+        rep
+    }
+
+    fn last_write_report<W: Write>(&mut self, halt: Result<Halt, String>, addr: u64, len: u64, at: (usize, u64, Phase), out: &mut W)
+        -> Result<Vec<(&'static str, J)>, String> {
         let mut f: Vec<(&'static str, J)> = Vec::new();
         let hex_of = |b: Option<Vec<u8>>| b.map_or(J::Null, |b| J::Str(b.iter().map(|x| format!("{x:02x}")).collect()));
         match halt? {
             Halt::NoEarlierHit => {
                 line(out, format_args!("no earlier write to {addr:#x}: it holds what it held when the program started"))?;
                 f.push(("found", J::Bool(false)));
+                f.push(("reason", J::Str("start".into())));
             }
             Halt::Exec { .. } => {
                 // The scan met an exec first: the image that held this address is gone, and no write is later.
+                let n = self.n;
                 self.recover(at)?;
-                line(out, format_args!("no earlier write to {addr:#x}: it holds what it held when the program started"))?;
+                line(out, format_args!("{}", no_write_since_exec(addr, n)))?;
                 f.push(("found", J::Bool(false)));
+                f.push(("reason", J::Str("exec".into())));
             }
             Halt::Watch { .. } => {
                 let (n, k) = (self.n, self.k);
@@ -1799,6 +1813,11 @@ mod tests {
         // these two cases used to sit in one test where they read as the same thing; they are not.
         assert!(parse_script("frobnicate").is_err());
         assert!(parse_script("threads x").is_err(), "`threads` takes no arguments");
+    }
+
+    #[test]
+    fn exec_text_names_the_exec() {
+        assert_eq!(no_write_since_exec(0x1000, 7), "no write to 0x1000 since the exec at (7, 0)");
     }
 
     #[test]

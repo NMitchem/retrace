@@ -152,6 +152,7 @@ fn none_before_leaves_the_cursor() {
     let objs = json_lines(&out);
     let o = &objs[1];
     assert_eq!(o["found"], false, "{o}");
+    assert_eq!(o["reason"], "start", "{o}");
     assert_eq!(objs[0]["position"], o["position"]);
     assert_eq!(objs[0]["position"], objs[2]["position"]);
     let (_, text, _) = run(trace.to_str().unwrap(), &format!("last-write {buf}"), false);
@@ -181,4 +182,24 @@ fn goto_lands_where_an_earlier_command_ended() {
     let (code, _, err) = run(ts, "goto 999999 0", false);
     assert_eq!(code, 5);
     assert!(err.contains("last position"), "{err}");
+}
+
+/// A user breakpoint on the instruction after the store must not turn `value_after` into null: the verifying step
+/// runs with the user's breakpoints off.
+#[test]
+fn user_breakpoint_after_the_store_keeps_value_after() {
+    if skip_no_cargo("user_breakpoint_after_the_store_keeps_value_after") { return; }
+    let f = ledger();
+    let base = format!("break rust_panic; continue; last-write {}", f.addr);
+    let first = last(&json_lines(&run(&f.trace, &base, true).1)).clone();
+    let pc = u64::from_str_radix(first["pc"].as_str().unwrap().trim_start_matches("0x"), 16).unwrap();
+    let want = first["value_after"].clone();
+    assert!(want.is_string(), "{first}");
+    let script = format!("break rust_panic; continue; break {:#x}; last-write {}; where", pc + 4, f.addr);
+    let (code, out, err) = run(&f.trace, &script, true);
+    assert_eq!(code, 0, "{err}");
+    let objs = json_lines(&out);
+    let o = &objs[objs.len() - 2];
+    assert_eq!(o["value_after"], want, "{o}");
+    assert_eq!(o["position"], first["position"], "{o}");
 }
