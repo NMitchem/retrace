@@ -169,8 +169,8 @@ those:
 - `value_before` and `value_after` are the bytes in memory order, in hex. Apple Silicon is
   little-endian, so `f401000000000000` is 500.
 - `file` and `line` are `null` where there is no line information, and `source_note` says why:
-  `no line information at this address`, `the binary changed since the recording`, or that the binary
-  was not found.
+  `no line information at this address`, `the binary changed since the recording`, that the binary
+  was not found, or that `dsymutil` or `atos` (which read the binary's debug info) failed or timed out.
 - A command that fails prints `{"command":…,"ok":false,"error":"…"}`, and retrace exits 5.
 
 ### Other commands

@@ -1978,9 +1978,10 @@ impl Exec<'_> {
             let cands: Vec<String> = if e == 0 { self.start_cands.clone() }
                 else { self.epochs.get(e).map(|(ep, _)| String::from_utf8_lossy(&ep.path).into_owned()).into_iter().collect() };
             let trace_dir = match self.trace.parent() { Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(), _ => std::path::PathBuf::from(".") };
-            let image = crate::image::resolve_for_source(&cands, &trace_dir, crate::image::recorded_uuid(self.sess()));
+            let want = crate::image::recorded_uuid(self.sess());
+            let image = crate::image::resolve_for_source(&cands, &trace_dir, want);
             let text_end = self.syms_at(self.n).exe().map_or(0, |t| t.text_end());
-            *slot = Some(crate::source::SourceMap::new(image, text_end));
+            *slot = Some(crate::source::SourceMap::new(image, want, text_end));
         }
         slot.as_ref().map_or((vec![None; pcs.len()], None), |m| m.lines(pcs))
     }

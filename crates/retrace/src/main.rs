@@ -8,6 +8,7 @@ mod rsp;
 mod gdbserver;
 mod image;
 mod source;
+mod tool;
 mod unwind;
 mod lldbcmd;
 

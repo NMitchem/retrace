@@ -2,11 +2,12 @@
 
 use retrace_core::symbols::Symbols;
 
+use crate::tool::{self, ToolError};
+
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The readable form of a Mach-O symbol, or `None` when it equals the raw one (C names, Swift).
@@ -52,19 +53,13 @@ fn notice_once(said: &AtomicBool, reason: Option<String>, sink: &mut dyn FnMut(&
 fn cxx_batch_with(tool: &Path, raws: &[&str]) -> (Vec<Option<String>>, Option<String>) {
     if raws.is_empty() { return (Vec::new(), None); }
     let fail = |why: String| (vec![None; raws.len()], Some(why));
-    let mut child = match Command::new(tool)
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn() {
-        Ok(c) => c,
-        Err(e) => return fail(format!("{}: {e}", tool.display())),
-    };
     let input: String = raws.iter().map(|r| format!("{r}\n")).collect();
-    let Some(mut stdin) = child.stdin.take() else { return fail("no stdin".into()) };
-    // Feed from a thread: a large batch must not deadlock against the pipe's capacity.
-    // (`std::thread::Thread` is denied for the recorder; this is presentation code, and the
-    // spawn builder is not the denied type.)
-    let writer = std::thread::spawn(move || { let _ = stdin.write_all(input.as_bytes()); });
-    let Ok(out) = child.wait_with_output() else { return fail("could not wait for it".into()) };
-    let _ = writer.join();
+    // Bounded (M58 final review): a c++filt that hangs degrades like a missing one.
+    let out = match tool::run(&mut Command::new(tool), Some(input), tool::CXXFILT_SECS) {
+        Ok(o) => o,
+        Err(ToolError::Spawn(e)) => return fail(format!("{}: {e}", tool.display())),
+        Err(ToolError::TimedOut) => return fail(format!("c++filt timed out after {} s", tool::CXXFILT_SECS)),
+    };
     if !out.status.success() { return fail(format!("exit status {}", out.status)); }
     let text = String::from_utf8_lossy(&out.stdout);
     let lines: Vec<&str> = text.lines().collect();

@@ -72,6 +72,11 @@ pub fn copy_fixture(manifest: &str, tag: &str) -> std::path::PathBuf {
 /// and stderr share one file, interleaved as a terminal shows them. Returns cargo's exit code (`None` when the 600 s
 /// bound fired) and that output.
 pub fn readme_recipe_in(dir: &Path, env: &[(&str, &str)]) -> (Option<i32>, String) {
+    cargo_in(dir, &["test", "--offline", "--no-fail-fast"], env)
+}
+
+/// `readme_recipe_in` with cargo's arguments given (`["test", "--offline", "--lib"]` records the unit tests alone).
+pub fn cargo_in(dir: &Path, args: &[&str], env: &[(&str, &str)]) -> (Option<i32>, String) {
     let cargo = cargo_path().expect("cargo");
     let mut vars: Vec<(String, String)> = vec![
         ("CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER".into(), format!("{} record", bin())),
@@ -84,7 +89,7 @@ pub fn readme_recipe_in(dir: &Path, env: &[(&str, &str)]) -> (Option<i32>, Strin
     let log = dir.join("cargo-test.log");
     let f = std::fs::File::create(&log).expect("create the log");
     let mut c = std::process::Command::new(&cargo);
-    c.args(["test", "--offline", "--no-fail-fast"]).current_dir(dir).env_clear()
+    c.args(args).current_dir(dir).env_clear()
         .stdin(std::process::Stdio::null()).stdout(f.try_clone().expect("clone the log")).stderr(f);
     for (k, v) in &vars { c.env(k, v); }
     let mut child = c.spawn().unwrap_or_else(|e| panic!("spawn {cargo}: {e}"));
