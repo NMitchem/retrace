@@ -1,16 +1,10 @@
 class Retrace < Formula
-  desc "Record/replay reverse debugger for Apple Silicon"
+  desc "Time-travel debugger for Apple Silicon Macs"
   homepage "https://github.com/NMitchem/retrace"
+  url "https://github.com/NMitchem/retrace/archive/refs/tags/v0.1.0.tar.gz"
+  sha256 "FILL-IN-AFTER-THE-TAG"
   license any_of: ["MIT", "Apache-2.0"]
   head "https://github.com/NMitchem/retrace.git", branch: "main"
-
-  # The stable stanza needs the tarball of the tag v0.1.0, which exists only after the operator pushes
-  # that tag. Until then the formula is HEAD-only: `brew install nmitchem/retrace/retrace` without --HEAD
-  # fails with Homebrew's own message, "is a HEAD-only formula". (A short name needs the formula trusted first
-  # under Homebrew 6 and later, so the fully qualified name is the one to tell a user.)
-  # After the tag, fill in the checksum (curl -L <url> | shasum -a 256) and uncomment these two lines.
-  # url "https://github.com/NMitchem/retrace/archive/refs/tags/v0.1.0.tar.gz"
-  # sha256 "FILL-IN-AFTER-THE-TAG"
 
   depends_on "rustup" => :build
   depends_on arch: :arm64
@@ -31,7 +25,7 @@ class Retrace < Formula
     system formula_opt_bin("rustup")/"rustup", "default", toolchain
     system "cargo", "install", "--locked", "--path", "crates/retrace", "--root", prefix
     # Every binary that touches the hypervisor needs this entitlement. Signing after cargo's link
-    # step keeps it (t0 measurement 1).
+    # step keeps it.
     system "codesign", "-s", "-", "-f", "--entitlements", "retrace.entitlements", bin/"retrace"
     pkgshare.install "retrace.entitlements"
     (pkgshare/"examples").install "crates/retrace-guest/c/crashy.c"

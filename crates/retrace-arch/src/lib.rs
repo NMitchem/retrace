@@ -2472,10 +2472,10 @@ pub enum MacCall {
     /// `("AMFI", 0x5a)`: answered by the host, about retrace's own process (R4). Both measured
     /// callers, dyld's `amfi_check_dyld_policy_self` and libsystem_trace's, pass the same struct.
     AmfiDyldPolicy,
-    /// `("Sandbox", 2)`: answered with the errno the pre-M47 forward returned (R7).
+    /// `("Sandbox", 2)`: answered with the errno a forwarded call returned.
     SandboxCheck,
-    /// `("Sandbox", 4)`: answered ENOTSUP (45) with no write — what the pre-M47 forward returned and
-    /// what native returns for an unsandboxed process (t0, H7; the operator's ruling, 2026-10-01).
+    /// `("Sandbox", 4)`: answered ENOTSUP (45) with no write, which is what a forwarded call returned and
+    /// what native returns for an unsandboxed process.
     SandboxContainerPath,
 }
 

@@ -12,7 +12,7 @@ mod tool;
 mod unwind;
 mod lldbcmd;
 
-/// Where the bug banner sends a report (M50 §3b).
+/// Where the bug banner sends a report.
 const ISSUES_URL: &str = "https://github.com/NMitchem/retrace/issues";
 const USAGE: &str = "usage: retrace <record [-o <trace>] <program> [<args>...] | replay <trace> \
                      | lldb <trace> [--exe <path>] [-- <lldb args>...] | debug <trace> [--json] [--script '...'] \

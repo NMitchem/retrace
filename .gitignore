@@ -1,17 +1,1 @@
 /target
-/spikes/m2spike
-/spikes/dscprobe
-/spikes/hvprobe
-/spikes/hvspike
-/spikes/cacheprobe
-/spikes/pacsign
-/spikes/cacheprobe
-/spikes/pacsign
-/spikes/sstep
-/spikes/dbgw
-/spikes/tlbi
-/spikes/sigabi
-/spikes/sigtramp
-/spikes/sigraisex0
-/spikes/protnone
-/spikes/threadjoin

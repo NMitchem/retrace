@@ -477,8 +477,8 @@ const OP_AUTDA: u64 = 3;
 // Safety net for the stub's own run() loop: a correct stub reaches its terminating `svc` in ONE
 // hv_vcpu_run (its per-entry loop never exits to EL2 until done), so any higher count means a bug.
 const SIGN_STUB_BOUND: u32 = 8;
-// The signing stub, hand-assembled (verified against spikes/pacsign.c's pac*/aut* encodings; see
-// scratchpad stub.s). x9 = table IPA, x10 = entry count; runs at EL0 (ATTR_CODE is EL0-exec) and
+// The signing stub, hand-assembled (each pac*/aut* encoding checked against clang's output on
+// macOS). x9 = table IPA, x10 = entry count; runs at EL0 (ATTR_CODE is EL0-exec) and
 // ends with `svc #0` (EL0 cannot HVC) → trampoline → EL2. Uses GPRs + the table only (no stack).
 //   loop: cbz x10,done; ldr x0,[x9]; ldr x1,[x9,#8]; ldr x2,[x9,#16]
 //         tbnz w2,#1,is_auth; tbnz w2,#0,do_pacda; pacia x0,x1; b store

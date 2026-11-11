@@ -1,9 +1,8 @@
-//! The M53 scrub: no file under `docs/` holds a credential. Before it the Apple sweep ran every row in
-//! the caller's whole environment, so the `env` and `printenv` rows' kept output, and the census
-//! tables quoting it, committed a session token and an API key verbatim (M51's evidence, M53's t0
-//! baseline and its census). `tools/apple-sweep.sh` now gives each row an allowlisted environment
-//! (`SWEEP_ENV`); this scan is for whatever writes evidence some other way. A site is reported by
-//! file, line and variable name or prefix, never by value, because gate logs are kept.
+//! No file under `docs/` holds a credential. The Apple sweep once ran every row in the caller's whole
+//! environment, so its kept output quoted a session token and an API key verbatim. `tools/apple-sweep.sh`
+//! now gives each row an allowlisted environment (`SWEEP_ENV`); this scan is for whatever writes evidence
+//! some other way. A site is reported by file, line and variable name or prefix, never by value, because
+//! test logs are kept.
 use std::path::{Path, PathBuf};
 
 /// A variable is a credential's when its name, upper-cased, holds one of these or ends `_KEY`.
@@ -77,10 +76,13 @@ fn no_file_under_docs_holds_a_credential() {
     let mut files = Vec::new();
     all_files(&docs, &mut files);
     files.sort();
-    // The file the scrub found the first leak in: the scan must reach the sweep's kept evidence.
-    let must = "sweep-evidence/2026-10-14-m51/apple-keep/env.nat.out";
-    assert!(files.iter().any(|p| p.ends_with(must)), "the scan missed {must} under {}", docs.display());
-    assert!(files.len() > 4000, "scanned only {} files under {} (4585 at the scrub)", files.len(), docs.display());
+    // The sweep's kept evidence is local and not published. Where it is present, the scan must reach it,
+    // including the file the first leak was found in.
+    if docs.join("sweep-evidence").is_dir() {
+        let must = "sweep-evidence/2026-10-14-m51/apple-keep/env.nat.out";
+        assert!(files.iter().any(|p| p.ends_with(must)), "the scan missed {must} under {}", docs.display());
+        assert!(files.len() > 4000, "scanned only {} files under {} (4585 at the scrub)", files.len(), docs.display());
+    }
     let mut hits = Vec::new();
     for p in &files {
         let text = String::from_utf8_lossy(&std::fs::read(p).unwrap()).into_owned();
