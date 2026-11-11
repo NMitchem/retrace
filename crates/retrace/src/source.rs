@@ -39,15 +39,23 @@ impl SourceMap {
             Ok(r) => return (out, Some(format!("atos is not available: {}", String::from_utf8_lossy(&r.stderr).trim()))),
             Err(e) => return (out, Some(format!("atos is not available: {e}"))),
         };
-        let text = String::from_utf8_lossy(&res.stdout);
-        let mut any = false;
-        for (&i, l) in inside.iter().zip(text.lines()) {
-            out[i] = parse_atos_line(l);
-            any |= out[i].is_some();
-        }
-        let note = if any { None } else { Some(format!("no debug info for {}", image.display())) };
+        let note = assign(&inside, &String::from_utf8_lossy(&res.stdout), &mut out);
         (out, note)
     }
+}
+
+/// Ruling P12: the note when the image is trusted and atos ran but gave no `(file:line)` for any queried pc.
+/// Rust's std is linked into the executable's text, so this never claims the binary lacks debug info.
+const NO_LINE: &str = "no line information at this address";
+
+/// Map atos's output lines to the `inside` slots of `out` by order; the note is `NO_LINE` when none got a location.
+fn assign(inside: &[usize], text: &str, out: &mut [Option<(String, u32)>]) -> Option<String> {
+    let mut any = false;
+    for (&i, l) in inside.iter().zip(text.lines()) {
+        out[i] = parse_atos_line(l);
+        any |= out[i].is_some();
+    }
+    if any { None } else { Some(NO_LINE.to_string()) }
 }
 
 /// `resolve_image`'s stderr line, as the note of a session that has no trusted image.
@@ -95,6 +103,15 @@ mod tests {
         assert_eq!(note_of("retrace: ./p was not found - symbols are not loaded; pass --exe <path> to name the right file").as_deref(),
                    Some("./p was not found"));
         assert_eq!(note_of(""), None);
+    }
+    #[test]
+    fn a_symbol_without_a_location_gets_the_no_line_note() {
+        let mut out = vec![None];
+        assert_eq!(assign(&[0], "__rustc::rust_panic (in x) + 0\n", &mut out).as_deref(), Some("no line information at this address"));
+        assert_eq!(out, vec![None]);
+        let mut out = vec![None, None];
+        assert_eq!(assign(&[0, 1], "f (in x) (/a/b.rs:3)\ng (in x) + 4\n", &mut out), None);
+        assert_eq!(out[0], Some(("/a/b.rs".to_string(), 3)));
     }
     #[test]
     fn pcs_outside_the_executable_cost_no_atos_run() {

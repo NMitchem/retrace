@@ -425,6 +425,15 @@ fn json_where_has_file_and_line_in_the_program() {
     assert!(last["file"].as_str().is_some_and(|f| f.starts_with('/') && f.ends_with("src/lib.rs")), "{last}");
     assert!(last["line"].as_u64().is_some_and(|l| l > 0), "{last}");
     assert!(last.get("source_note").is_none(), "{last}");
+
+    // Ruling P12: a stop in Rust's std has no line, and the note never claims the binary lacks debug info.
+    let out = std::process::Command::new(util::bin())
+        .args(["debug", trace.to_str().unwrap(), "--json", "--script", "break rust_panic; continue; where"]).output().expect("spawn");
+    assert_eq!(out.status.code(), Some(0), "{}", String::from_utf8_lossy(&out.stderr));
+    let objs = json_lines(&String::from_utf8(out.stdout).unwrap());
+    let last = objs.last().unwrap();
+    assert!(last["file"].is_null() && last["line"].is_null(), "{last}");
+    assert_eq!(last["source_note"], "no line information at this address", "{last}");
 }
 
 /// M58 B3: a program rebuilt since the recording is not trusted: no file, no line, and the note says why.
