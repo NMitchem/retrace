@@ -1,6 +1,6 @@
 ---
 name: retrace
-description: Use when a Rust, C or C++ test or program on an Apple Silicon Mac crashes or fails because a value is wrong, and you need to know what set that value, from which line and on which thread, or a crash happens far from its cause, or a failure is rare and you want to keep the one run that showed it. retrace records the run once and replays it identically every time; retrace debug then says how the run ended and finds the last write to a value, with its function, file and line, thread and backtrace, as text or JSON. Do not use it for logic errors that reading the code and one rerun will solve, for Python or JavaScript bugs, or for programs that serve or wait on network sockets, start child processes or need a GUI.
+description: Use when a Rust, C or C++ test or program on an Apple Silicon Mac crashes or fails because a value is wrong, and you need to know what set that value, from which line and on which thread, or a crash happens far from its cause, or a failure is rare and you want to keep the one run that showed it. retrace records the run once and replays it identically every time; retrace debug then says how the run ended and finds the last write to a value, with its function, file and line, thread and backtrace, as text or JSON. If the source shows the bug at a glance, read the source instead; retrace pays off when the value was written out of sight of the failing assert (in another module, on another thread, by one of many writers, or long before the check), when the failure does not reproduce on demand, or for a crash. Do not use it for Python or JavaScript bugs, or for programs that serve or wait on network sockets, start child processes or need a GUI.
 ---
 
 # Debugging a recorded run with retrace
@@ -13,14 +13,19 @@ macOS counterpart of rr on Linux. It needs Apple Silicon and macOS 26 or 27.
 
 ## When to use it
 
-- A test fails because a value is wrong, and the code that set it is not obvious.
+If the source shows the bug at a glance, read the source. retrace pays off when the wrong value was
+written out of sight of the assert that caught it.
+
+- A test fails because a value is wrong, and the code that set it is not obvious: it is in another
+  module, on another thread, one of many writers, or long before the check.
 - A crash or panic happens long after the mistake that caused it.
-- A failure is rare. Once recorded, it can be examined as often as you like.
+- A failure is rare or does not reproduce on demand. Once recorded, it can be examined at will.
 - You cannot add prints to the program.
 
 ## When not to use it
 
-- A logic error that reading the code and one rerun will solve. Recording costs more than a rerun.
+- A bug the source shows at a glance, or a logic error that one rerun will solve. Recording costs more
+  than reading or a rerun.
 - Python or JavaScript bugs. retrace records the interpreter, so you would be debugging its machine
   code, not your script.
 - Network servers. `bind`, `listen` and `accept` are walls (see "Read the result"), and tokio's TCP and
@@ -82,7 +87,7 @@ With no other arguments, `retrace debug` prints a summary. On a failing `assert_
 > summary
 program: /Users/you/ledger/target/debug/deps/ledger-844be10fb1d57b0c
 ended: exited with 101
-panic on thread 2 at (467, 12447)
+panic on thread 2 at (468, 12447)
   #0 0x100077ba8 in __rustc::rust_panic+0x0
   ...
   #8 0x100001198 in ledger::tests::settling_four_hundred_leaves_the_rest+0x14c at /Users/you/ledger/src/lib.rs:63
@@ -99,9 +104,13 @@ stdout (last 20 lines):
   `left` is the field itself.
 - The last 20 lines of the program's stdout and stderr follow. libtest prints a failing test's panic
   message on stdout.
-- `summary` leaves the cursor at the end of the recording. For a crash that is the faulting
-  instruction, so `--script 'summary; bt'` prints the crashing thread's backtrace. `goto` goes back to a
-  panic.
+- For a crash or a signal, the lines after `ended:` say where it stopped: the thread, the position and
+  the backtrace (`crash on thread 0 at (<n>, <k>)` or `signal on …`, then `#0 …`).
+- `summary` leaves the cursor at the end of the recording, which for a crash is the faulting
+  instruction. `goto` goes back to a panic.
+- `thread N` is retrace's own index: 0 is the program's main thread, then threads in the order they
+  were created. It does not match the number in libtest's `thread '<name>' (1048578)`, which is Rust's
+  `ThreadId`, or lldb's `thread #N`.
 - Only the program the recording started as is searched for panics. If it execs another program, the
   new program's panics are not listed.
 
@@ -112,28 +121,32 @@ retrace debug <trace> --script 'goto <n> <k>; last-write <address> <size>'
 ```
 
 `<n> <k>` is the panic's position and `<address>` the left operand's address, both from the summary.
-`<size>` is the value's size in bytes, 1, 2, 4 or 8 (8 if omitted), and the address must be a multiple
-of it. On the example above, `goto 467 12447; last-write 0x304125c0 8` prints:
+`<size>` is the size of the left side's type in bytes, from the assert line or the field's declaration
+(8 if omitted): 1 for `u8`, `i8`, `bool`; 2 for `u16`, `i16`; 4 for `u32`, `i32`, `f32`, `char`; 8 for
+`u64`, `i64`, `usize`, `isize`, `f64`, a reference or a pointer. retrace refuses any other size (`watch len must be 1, 2, 4, or 8`) and an address that is not a multiple
+of the size (`watch address 0x… must be 4-byte aligned`), with exit 5. A size larger than the value also
+watches the bytes beside it, so it can report a write to a neighbour. A larger value (a `u128`, a struct)
+cannot be watched whole: print the address of one of its fields with `{:p}` and watch that.
+
+On the example above, `l.balance` is an `i64`, and `goto 468 12447; last-write 0x304125c0 8` prints:
 
 ```
 > last-write 0x304125c0 8
-last write to 0x304125c0 (8 bytes): store at 0x100001ab4 in ledger::fees::charge+0x78 at /Users/you/ledger/src/fees.rs:14 on thread 2, (467, 2575)
+last write to 0x304125c0 (8 bytes): store at 0x100001ab4 in ledger::fees::charge+0x78 at /Users/you/ledger/src/fees.rs:14 on thread 2, (468, 2575)
 #0 0x100001ab4 in ledger::fees::charge+0x78 at /Users/you/ledger/src/fees.rs:14
 #1 0x100000d0c in ledger::Ledger::settle+0x1c at /Users/you/ledger/src/lib.rs:25
 ...
 ```
 
-- The first line names the store's function, file and line, thread and position. The backtrace at the
-  store follows.
-- The writing thread may not be the one that failed. A value written by a worker thread names the
-  worker, and its backtrace includes the closure the worker was spawned with.
+- The first line names the store's function, file and line, thread and position; its backtrace follows.
+  The writer may be another thread than the one that failed: a worker's backtrace includes the closure
+  it was spawned with.
 - Memory the kernel wrote (a `read` into a buffer) is named by its system call instead:
   `last write to <address>: syscall read (3) on thread 0, (<n>, 0)`.
 - With no earlier write it prints `no earlier write to <address>: it holds what it held when the program
   started`, or `no write to <address> since the exec at (<n>, 0)`, and the cursor stays where it was.
-- Otherwise the cursor moves to the write, so a second `last-write` in the same script finds the write
-  before it.
-- Without a position, `break rust_panic; continue` stops at the first panic.
+- Otherwise the cursor moves to the write, so a second `last-write` finds the write before it. Without a
+  position, `break rust_panic; continue` stops at the first panic.
 - `last-write` uses one of the four hardware watch slots. With four `watch`es armed it is an error.
 
 Positions can differ between two recordings of the same test, so take them from the recording you are
@@ -143,7 +156,8 @@ asking. One recording answers the same question the same way every time.
 
 Add `--json` (`retrace debug <trace> --json [--script '<cmds>']`) and each command prints one JSON object on
 its own line: `command`, `ok`, `output` (the text lines), and after any motion `position`, `thread`,
-`pc`, `function`, `file` and `line`. Beyond those:
+`pc`, `function` (the readable name alone), `offset` (into the function), `file` and `line`. Beyond
+those:
 
 - `summary`: `programs`; `ending` (`kind` is `exit`, `crash` or `signal`, with `code` or `signal`, a
   crash's `fault_address`, and its `frames`); `panics` (each with `position`, `thread`, `frames` and,
