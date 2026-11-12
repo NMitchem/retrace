@@ -143,7 +143,7 @@ fn an_unwritable_default_name_is_named_in_the_error() {
 fn version_and_help_exit_0_and_no_arguments_exits_2() {
     let v = cli(&["--version"]);
     assert_eq!(v.code, Some(0));
-    assert_eq!(String::from_utf8_lossy(&v.stdout).trim_end(), "retrace 0.1.0 (macOS 26 and 27)");
+    assert_eq!(String::from_utf8_lossy(&v.stdout).trim_end(), "retrace 0.1.1 (macOS 26 and 27)");
     for h in [&["--help"][..], &["help"]] {
         let r = cli(h);
         assert_eq!(r.code, Some(0), "{h:?}");
