@@ -216,6 +216,11 @@ use of `MAP_JIT` memory, or a write to the per-thread JIT protection register wi
 doesn't admit. Other memory walls are a `vm_remap` or `mach_vm_map` option retrace doesn't model, a
 fixed mapping that straddles an existing one. A bad pointer the program passes to a call gets the error it gets natively, usually EFAULT, and the recording goes on.
 
+malloc's reclaim ring is the other source. macOS's malloc queues freed large blocks in a ring the kernel
+empties, and retrace empties it when the program asks. A ring macOS would kill the program over stops the
+recording here instead: unreadable indices or entries, more entries than the ring holds, an entry that
+frees memory that isn't all mapped, or an entry of a kind macOS doesn't define.
+
 ## Exceptions
 
 The program ran an instruction retrace can't run or record, such as one of Apple's AMX matrix

@@ -56,5 +56,5 @@ fn the_supported_majors_and_their_point_releases_pass() {
 fn version_names_the_supported_majors() {
     let r = util::run_bounded(util::bin(), &["--version"], &[], BOUND);
     assert_eq!(r.code, Some(0));
-    assert_eq!(String::from_utf8_lossy(&r.stdout).trim_end(), "retrace 0.1.0 (macOS 26 and 27)");
+    assert_eq!(String::from_utf8_lossy(&r.stdout).trim_end(), "retrace 0.1.1 (macOS 26 and 27)");
 }

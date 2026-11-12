@@ -687,6 +687,8 @@ impl Box_ {
         self.reservations.clear();
         self.noaccess.clear();
         self.mmap_next = MMAP_BASE;
+        // M59: the ring was a mapping in the old address space; the new image's libmalloc asks again.
+        self.reclaim = None;
         self.tlbi_stub_ready = false;
 
         // 2. Stage the new image exactly as the start does, with the thread id the table will assign.

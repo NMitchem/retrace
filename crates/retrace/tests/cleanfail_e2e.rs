@@ -336,22 +336,23 @@ fn a_socketpair_stops_at_one_clean_line() {
 
 /// M55 t4 (spec §3g): a blocking read on an empty guest pipe that another thread would fill hung the
 /// recorder before M55. It is a wall now, in `threads`, naming the call and the descriptor (the guest's
-/// number for the read end, 4 under retrace). The output before it is printed, and replay ends at the
-/// incomplete-recording line.
+/// number for the read end: 3, native's, since M59 grants malloc's reclaim ring; before it a refused ring
+/// left a syslog socket on 3, and the read end was 4). The output before it is printed, and replay ends
+/// at the incomplete-recording line.
 #[test]
 fn a_blocking_read_between_threads_stops_at_one_clean_line() {
     let line = assert_guest_wall(retrace_guest::BLOCKIO_DYN, &["pipe"], "start\n",
-        "read on guest pipe fd 4 would wait for another thread to write", "threads");
+        "read on guest pipe fd 3 would wait for another thread to write", "threads");
     assert!(line.contains("blocking I/O between threads is not modelled"), "{line}");
 }
 
 /// M53 t4 (C1): `poll` on a regular file is outside the pipe model and refused by value, naming the
-/// call and the descriptor (the guest's number for it, 4 under retrace).
+/// call and the descriptor (the guest's number for it: 3, native's, since M59; 4 before it, see above).
 #[test]
 fn a_poll_on_a_file_stops_at_one_clean_line() {
     let line = assert_guest_wall(retrace_guest::CF_WALLS, &["pollfile"], "cf: pollfile\n",
-        "poll (syscall 230) on fd 4, not a guest pipe end", "threads");
-    assert_eq!(line, format!("retrace: unsupported: poll (syscall 230) on fd 4, not a guest pipe end - see {WALLS}#threads"));
+        "poll (syscall 230) on fd 3, not a guest pipe end", "threads");
+    assert_eq!(line, format!("retrace: unsupported: poll (syscall 230) on fd 3, not a guest pipe end - see {WALLS}#threads"));
 }
 
 /// M53 t4 (Ruling T4-closepolled): another thread closing the descriptor a blocked poller watches is

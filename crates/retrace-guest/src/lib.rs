@@ -391,6 +391,12 @@ pub const VMREALLOC_DYN: &str = concat!(env!("OUT_DIR"), "/vmrealloc_dyn");
 /// M52 §3b: `mach_vm_copy` by case (`disjoint`, `overlap_fwd`, `overlap_back`, `unmapped_src`, `none_dst`,
 /// `unaligned`, `zero`, `reserved`).
 pub const VMCOPY_DYN: &str = concat!(env!("OUT_DIR"), "/vmcopy_dyn");
+/// M59: xzone malloc's deferred-reclamation ring, driven by malloc: the first free descriptor, a churn
+/// of large blocks, and the accounting trap.
+pub const RECLAIM_DYN: &str = concat!(env!("OUT_DIR"), "/reclaim_dyn");
+/// M59: the ring driven by hand through libsystem_kernel's reclaim API (run with `MallocSpaceEfficient=1`):
+/// what a flush and a resize unmap, the cancel states, a full ring.
+pub const RECLAIMAPI_DYN: &str = concat!(env!("OUT_DIR"), "/reclaimapi_dyn");
 /// M52 §3b: a `Vec<u8>` grown to 24 MiB, then a thread spawned and joined.
 pub const VECGROW: &str = concat!(env!("OUT_DIR"), "/vecgrow");
 /// M47: `fork()` with `RLIMIT_NPROC` lowered to 1; prints the errno the fork failed with.

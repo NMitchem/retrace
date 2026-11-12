@@ -1,6 +1,6 @@
 {
   "name": "retrace",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A skill for recording a failing test or crash with retrace and querying the recording: who last wrote a value, from which line, on which thread.",
   "author": { "name": "Noah Mitchem" }
 }

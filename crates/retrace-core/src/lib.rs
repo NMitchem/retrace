@@ -347,6 +347,7 @@ fn mach2_unreachable(b: &mut Box_, m: &machmsg::Msg2, route: &machmsg::Route) ->
         ServiceGetSpecialPort => machmsg::encode_get_special_port_reply(0, 0).len(),
         ServiceSetSpecialPort | ServicePortsRegister | StubMigReply(_) => machmsg::encode_mig_error(0, 0, 0).len(),
         ServiceClockGetTime => machmsg::encode_clock_get_time_reply(0, 0, 0).len(),
+        ServiceReclaimAlloc | ServiceReclaimFlush | ServiceReclaimResize => machmsg::encode_reclaim_reply(0, 0, 0, 0).len(),
         Forward(_) => 0,
         RefuseMqSend | RefuseMqRecv | Unsupported(_) => return None,
     };
@@ -360,6 +361,27 @@ fn mach2_unreachable(b: &mut Box_, m: &machmsg::Msg2, route: &machmsg::Route) ->
 /// M50 §3c (B1): a box refusal reaching the record loop. A wall, marked at its site (Task 4 marks
 /// M2's wall rows), passes through so `?` ends the recording with it; any other text is a retrace
 /// bug and panics, as every one of these sites did before M50.
+/// M59: the reply to a deferred-reclamation request (4822 allocate, 4823 flush, 4826 resize), from
+/// the request `buf` the arm read and the same `Box_` call on both sides: record appends it, replay
+/// byte-compares it, so symmetry rule 1 holds by construction. `Err` is a wall (a short request, or a
+/// ring xnu would kill the process over) or a bug (another msgh_id), told apart by `wall_or_bug`.
+fn reclaim_reply(b: &mut Box_, m: &machmsg::Msg2, route: &machmsg::Route, buf: &[u8]) -> Result<Vec<u8>, String> {
+    use machmsg::Route::*;
+    let answer = match route {
+        ServiceReclaimAlloc => {
+            let (len, max_len) = machmsg::decode_reclaim_alloc(buf)?;
+            b.guest_reclaim_allocate(len, max_len)
+        }
+        ServiceReclaimFlush => b.guest_reclaim_flush(machmsg::decode_reclaim_count(buf, 4823)?)?,
+        ServiceReclaimResize => b.guest_reclaim_resize(machmsg::decode_reclaim_count(buf, 4826)?)?,
+        other => return Err(format!("reclaim_reply called for {other:?}")),
+    };
+    Ok(match answer {
+        Ok(a) => machmsg::encode_reclaim_reply(m.reply_port, m.msgh_id, a, retrace_box::RECLAIM_NO_DEADLINE),
+        Err(kr) => machmsg::encode_mig_error(m.msgh_id, m.reply_port, kr as i32),
+    })
+}
+
 fn wall_or_bug(m: String) -> String {
     if Unsupported::from_marked(&m).is_some() { m } else { panic!("{m}") }
 }
@@ -1041,6 +1063,20 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                             .map_err(|e| format!("append mach_msg2 ports_register: {e}"))?; count += 1;
                         b.apply_and_return(machmsg::MACH_MSG_SUCCESS, false, &writes);
                     }
+                    machmsg::Route::ServiceReclaimAlloc | machmsg::Route::ServiceReclaimFlush
+                    | machmsg::Route::ServiceReclaimResize => {
+                        // M59: the deferred-reclamation ring, box-answered (retrace-box reclaim.rs). The
+                        // reply is recomputed and byte-compared on replay; a flush or resize's unmaps and
+                        // index writes are the box's on both sides, below the trace.
+                        let buf = b.read_guest(m.data, m.send_size as usize);
+                        let bytes = reclaim_reply(&mut b, &m, &route, &buf)
+                            .map_err(|e| wall_or_bug(retrace_arch::in_context(&format!("reclaim ring ({})", m.msgh_id), e)))?;
+                        let writes = vec![Region { ipa: m.data, bytes }];
+                        w.append(&Event::Syscall { num, args, ret: machmsg::MACH_MSG_SUCCESS, ret1: 0,
+                            err: false, writes: writes.clone(), thread })
+                            .map_err(|e| format!("append mach_msg2 reclaim: {e}"))?; count += 1;
+                        b.apply_and_return(machmsg::MACH_MSG_SUCCESS, false, &writes);
+                    }
                     machmsg::Route::StubMigReply(retcode) => {
                         // Optional/no-op kernel routine (no out-params): reply with a mig_reply_error
                         // carrying `retcode` (chosen in route() — 4822 vm_reclaim => KERN_NOT_SUPPORTED
@@ -1197,6 +1233,17 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                 w.append(&Event::Syscall { num, args, ret: rc, ret1: 0, err: false, writes: vec![], thread })
                     .map_err(|e| format!("append yield: {e}"))?; count += 1;
                 b.set_x0_err_and_return(rc, false);
+            }
+            // M59: `mach_vm_reclaim_update_kernel_accounting_trap` (-63), box-answered for the
+            // deferred-reclamation ring (`retrace-box`'s reclaim.rs): 0 bytes, no deadline. No
+            // `arg_kinds` row (C1), so this arm's place before the generic negative arm is what keeps
+            // it from being a wall there. Its two out-parameters are the writes, recomputed and
+            // compared on replay; `guest_reclaim_accounting` checks both pointers with `prepare_reply`.
+            Stop::Syscall { num, args } if num == retrace_arch::MACH_VM_RECLAIM_ACCOUNTING => {
+                let (rc, writes) = b.guest_reclaim_accounting(args[1], args[2]);
+                w.append(&Event::Syscall { num, args, ret: rc, ret1: 0, err: false, writes: writes.clone(), thread })
+                    .map_err(|e| format!("append reclaim accounting: {e}"))?; count += 1;
+                b.apply_and_return(rc, false, &writes);
             }
             // M18 Stage 2b: the mach semaphore SIGNAL (see `Box_::guest_sem_signal`). Never
             // forwarded, for the wait arm's reason exactly.
@@ -3274,6 +3321,19 @@ impl ReplaySession {
                                         }
                                         self.b.apply_and_return(*ret, *err, writes);
                                     }
+                                    machmsg::Route::ServiceReclaimAlloc | machmsg::Route::ServiceReclaimFlush
+                                    | machmsg::Route::ServiceReclaimResize => {
+                                        // M59: mirror of record's arm: the same request read, the same
+                                        // `reclaim_reply`, the reply byte-compared.
+                                        let buf = self.b.read_guest(m.data, m.send_size as usize);
+                                        let reply = reclaim_reply(&mut self.b, &m, &route, &buf).map_err(|e| Divergence {
+                                            landmark: self.idx, pc, detail: format!("replay reclaim ring ({}): {e}", m.msgh_id) })?;
+                                        if writes.len() != 1 || writes[0].bytes != reply {
+                                            return Err(Divergence { landmark: self.idx, pc,
+                                                detail: format!("reclaim ring ({}) reply mismatch", m.msgh_id) });
+                                        }
+                                        self.b.apply_and_return(*ret, *err, writes);
+                                    }
                                     machmsg::Route::StubMigReply(retcode) => {
                                         let reply = machmsg::encode_mig_error(m.msgh_id, m.reply_port,
                                                                               retcode);
@@ -4006,6 +4066,17 @@ impl ReplaySession {
                                         retrace_arch::syscall_display(num), writes.len()) });
                                 }
                                 self.b.set_x0_err_and_return(*ret, *err);
+                                return self.finish_event();
+                            }
+                            // M59: mirror of record's -63 arm: the same Box_ call, its answer and writes compared.
+                            if num == retrace_arch::MACH_VM_RECLAIM_ACCOUNTING {
+                                let (rc, mine) = self.b.guest_reclaim_accounting(args[1], args[2]);
+                                if rc != *ret || *ret1 != 0 || *err || mine != *writes {
+                                    return Err(Divergence { landmark: self.idx, pc, detail: format!(
+                                        "reclaim accounting (mach trap -63) mismatch: replay rc {rc:#x} with {} write(s), \
+                                         recorded {ret:#x} with {}", mine.len(), writes.len()) });
+                                }
+                                self.b.apply_and_return(*ret, *err, writes);
                                 return self.finish_event();
                             }
                             if num == retrace_arch::MACH_SEMAPHORE_SIGNAL {
