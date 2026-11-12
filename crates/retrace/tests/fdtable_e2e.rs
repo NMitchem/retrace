@@ -7,6 +7,10 @@
 // closes it, so the guest legitimately holds one more descriptor than a native process does. The
 // absolute number therefore tests libSystem's pre-main behaviour, not the table. These invariants
 // test the table, and are verified to hold natively too.
+//
+// M59 correction: the socket was libmalloc reporting the deferred-reclamation ring retrace refused
+// (MIG 4822), logged through syslog, not a missing notifyd. With the ring granted, a program's first
+// descriptor under retrace is native's 3 (reclaim_e2e pins it). The invariants stay as they are.
 mod util;
 
 /// Every invariant true. Identical natively and under retrace — verified in both.
