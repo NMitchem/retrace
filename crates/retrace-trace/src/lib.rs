@@ -90,7 +90,7 @@ pub enum Event {
     },
 }
 
-pub const TRACE_MAGIC: [u8;4] = *b"RT\x00\x12"; // "RT" + format version 0x0012. M57 bumped it for two reasons. The header now carries a host record (the macOS product, build and shared-cache UUID) after the magic, which changes its layout, so a recording replays only on the macOS build that made it. And the guest address space is 40 bits, which moved retrace's L2 page-table array from IPA 0x8000 to `PT_L2_IPA`, so a snapshot's page-table bytes mean something different and a pre-M57 snapshot restored under the new layout would be wrong. 0x0011 was M55's: M55 bumped it because a write that returns `EPIPE` on a guest pipe or socket end raises SIGPIPE, so a pre-M55 recording's `EPIPE` would replay with a signal its recording never took. 0x0010 was M54's: M54 bumped it because a successful exec is an `Event::Exec` carrying the new image, and a pre-M54 recording's exec landmark is the M38 refusal. 0x000f was M53's: M53 bumped it because `readv`, `writev`, `preadv` and `pwritev` are translated (a console `writev` is a console write; a forwarded iovec lands as per-entry writes), so a pre-M53 recording of one holds an EFAULT or a wall where this retrace records the transfer. 0x000e was M52's: M52 bumped it because the synthetic clock moves 5 ticks per timebase read, not 0x2400, so a pre-M52 recording carries a clock whose meaning differs (the clock is regenerated, not recorded, but every recorded timeout, sleep deadline and `gettimeofday` out-parameter was computed against it). 0x000d was M51's: M51 bumped it because `Event::Crash` gained `sig` and J1 changes the ESR a recorded instruction abort carries, so a pre-M51 recording is refused whole. 0x000c was M49's: a translation fault's SignalDelivery frame carries SEGV_ACCERR and the store-exclusive rewrite changes the code bytes a snapshot holds, so a pre-M49 recording would replay into a false divergence. 0x000b was M47's, for `mach_vm_map`'s mask.
+pub const TRACE_MAGIC: [u8;4] = *b"RT\x00\x13"; // "RT" + format version 0x0013. M59 bumped it because xzone malloc's deferred-reclamation ring (MIG 4822) is now granted where every earlier retrace refused it, so a pre-M59 recording's 4822 landmark holds a refusal this retrace recomputes as a ring, and replay would diverge at the first malloc instead of being refused by name. 0x0012 was M57's: M57 bumped it for two reasons. The header now carries a host record (the macOS product, build and shared-cache UUID) after the magic, which changes its layout, so a recording replays only on the macOS build that made it. And the guest address space is 40 bits, which moved retrace's L2 page-table array from IPA 0x8000 to `PT_L2_IPA`, so a snapshot's page-table bytes mean something different and a pre-M57 snapshot restored under the new layout would be wrong. 0x0011 was M55's: M55 bumped it because a write that returns `EPIPE` on a guest pipe or socket end raises SIGPIPE, so a pre-M55 recording's `EPIPE` would replay with a signal its recording never took. 0x0010 was M54's: M54 bumped it because a successful exec is an `Event::Exec` carrying the new image, and a pre-M54 recording's exec landmark is the M38 refusal. 0x000f was M53's: M53 bumped it because `readv`, `writev`, `preadv` and `pwritev` are translated (a console `writev` is a console write; a forwarded iovec lands as per-entry writes), so a pre-M53 recording of one holds an EFAULT or a wall where this retrace records the transfer. 0x000e was M52's: M52 bumped it because the synthetic clock moves 5 ticks per timebase read, not 0x2400, so a pre-M52 recording carries a clock whose meaning differs (the clock is regenerated, not recorded, but every recorded timeout, sleep deadline and `gettimeofday` out-parameter was computed against it). 0x000d was M51's: M51 bumped it because `Event::Crash` gained `sig` and J1 changes the ESR a recorded instruction abort carries, so a pre-M51 recording is refused whole. 0x000c was M49's: a translation fault's SignalDelivery frame carries SEGV_ACCERR and the store-exclusive rewrite changes the code bytes a snapshot holds, so a pre-M49 recording would replay into a false divergence. 0x000b was M47's, for `mach_vm_map`'s mask.
 
 // Minimal in-tree CRC32 (IEEE) — no external checksum dependency.
 fn crc32(data: &[u8]) -> u32 {
@@ -410,7 +410,8 @@ mod tests {
         // M54: a successful exec is an `Event::Exec` carrying the new image.
         // M55: a write's EPIPE on a guest end raises SIGPIPE, so a pre-M55 recording replays with a signal it never took.
         // M57: a host record follows the magic, and the 40-bit IPA moved the page tables a snapshot holds.
-        assert_eq!(TRACE_MAGIC, *b"RT\x00\x12");
+        // M59: the deferred-reclamation ring is granted, so a pre-M59 4822 landmark would diverge.
+        assert_eq!(TRACE_MAGIC, *b"RT\x00\x13");
     }
 
     fn host() -> Host { Host { product: "27.2".into(), build: "26B123".into(), cache_uuid: Some([0x11; 16]) } }
@@ -425,7 +426,7 @@ mod tests {
         body.extend_from_slice(&6u64.to_le_bytes()); body.extend_from_slice(b"26B123");
         body.push(1); body.extend_from_slice(&[0x11; 16]);
         assert_eq!(body.len(), 43);
-        let mut want = b"RT\x00\x12".to_vec();
+        let mut want = b"RT\x00\x13".to_vec();
         want.extend_from_slice(&43u32.to_le_bytes());
         want.extend_from_slice(&crc32(&body).to_le_bytes());
         want.extend_from_slice(&body);
@@ -468,7 +469,7 @@ mod tests {
         let f = named_tempfile("prem57");
         std::fs::write(&f, b"RT\x00\x11rest-of-a-pre-M57-trace").unwrap();
         let msg = Reader::format_skew(&f).unwrap().expect("skew");
-        assert!(msg.contains(r"RT\x00\x11") && msg.contains(r"RT\x00\x12"), "{msg}");
+        assert!(msg.contains(r"RT\x00\x11") && msg.contains(r"RT\x00\x13"), "{msg}");
         assert_eq!(Reader::host(&f).unwrap(), None);
         std::fs::remove_file(&f).ok();
     }

@@ -71,6 +71,8 @@ impl Msg2 {
 #[derive(Debug)]
 pub enum Route { ServiceVmMap, ServiceVmRemap, ServiceVmCopy, ServiceVmRealloc, ServiceGetSpecialPort, ServiceSetSpecialPort, ServicePortsRegister,
                  ServiceClockGetTime,
+                 // M59: xzone malloc's deferred-reclamation ring, box-answered (`retrace-box` reclaim.rs).
+                 ServiceReclaimAlloc, ServiceReclaimFlush, ServiceReclaimResize,
                  StubMigReply(i32), RefuseMqSend, RefuseMqRecv, Forward(&'static str), Unsupported(String) }
 
 /// Read-only kernel queries + create-once calls that stay forwarded (spec §Scope). Keyed by
@@ -175,9 +177,13 @@ pub fn route(m: &Msg2, guest_task_port: Option<u64>) -> Route {
             // KERN_SUCCESS — never forwarded (that would register retrace's own). Decoded and
             // checked by value in dispatch.
             3403 => return Route::ServicePortsRegister,
-            // vm_reclaim (deferred reclamation): optional. Report unavailable so libmalloc takes
-            // its no-reclaim fallback.
-            4822 => return Route::StubMigReply(KERN_NOT_SUPPORTED),
+            // M59: the deferred-reclamation ring (mach_vm.defs: 4822 allocate, 4823 flush, 4826
+            // resize). Answering 4822 KERN_NOT_SUPPORTED, as every release before M59 did, made xzone
+            // malloc report the failure: a line on a terminal's stderr, a syslog socket otherwise.
+            // The box now plays a kernel that hands out the ring and drains it only when asked.
+            4822 => return Route::ServiceReclaimAlloc,
+            4823 => return Route::ServiceReclaimFlush,
+            4826 => return Route::ServiceReclaimResize,
             // Private task_restartable subsystem (base 8000): _register(8000) records
             // libplatform's os_unfair_lock restartable critical sections; _synchronize(8001) is a
             // barrier over them. On a single vCPU with no preemption those ranges can never fire,
@@ -489,6 +495,39 @@ pub fn encode_vm_remap_reply(reply_port: u32, target: u64, cur: u32, max: u32) -
     out
 }
 
+/// M59: `mach_vm_deferred_reclamation_buffer_allocate` (4822) request, not complex, 40 bytes:
+/// header(24) + NDR(8), then len @32 and max_len @36 (u32 each). Returns `(len, max_len)`.
+pub fn decode_reclaim_alloc(buf: &[u8]) -> Result<(u32, u32), String> {
+    if buf.len() < 40 { return Err(retrace_arch::wall(retrace_arch::WallCategory::MachMessages, format!("reclaim allocate request short: {} < 40", buf.len()))); }
+    let id = u32_at(buf, 20);
+    if id != 4822 { return Err(format!("msgh_id {id} != 4822")); }
+    Ok((u32_at(buf, 32), u32_at(buf, 36)))
+}
+
+/// M59: the flush (4823, `num_entries_to_reclaim`) and resize (4826, `new_len`) requests, 36 bytes:
+/// header(24) + NDR(8), then one u32 @32.
+pub fn decode_reclaim_count(buf: &[u8], want: u32) -> Result<u32, String> {
+    if buf.len() < 36 { return Err(retrace_arch::wall(retrace_arch::WallCategory::MachMessages, format!("reclaim request {want} short: {} < 36", buf.len()))); }
+    let id = u32_at(buf, 20);
+    if id != want { return Err(format!("msgh_id {id} != {want}")); }
+    Ok(u32_at(buf, 32))
+}
+
+/// M59: the success reply of 4822, 4823 and 4826 (msgh_id + 100): header(24) + NDR(8) + RetCode(4) +
+/// two u64 outs, `a` @36 and `b` @44 = 52 (msgh_size), + trailer(8) = 60, the stubs' rcv_size. For
+/// allocate `a` is the ring's address; for flush and resize it is the bytes reclaimed. `b` is
+/// `next_deadline` in all three. An error is `encode_mig_error`.
+pub fn encode_reclaim_reply(reply_port: u32, request_msgh_id: u32, a: u64, b: u64) -> Vec<u8> {
+    let mut out = Vec::with_capacity(60);
+    reply_header(&mut out, 52, reply_port, request_msgh_id + 100);
+    out.extend_from_slice(&NDR);
+    out.extend_from_slice(&0i32.to_le_bytes());
+    out.extend_from_slice(&a.to_le_bytes());
+    out.extend_from_slice(&b.to_le_bytes());
+    out.extend_from_slice(&TRAILER);
+    out
+}
+
 /// mig_reply_error_t for any request id: header(24) + NDR(8) + RetCode(4) + trailer(8).
 pub fn encode_mig_error(request_msgh_id: u32, reply_port: u32, retcode: i32) -> Vec<u8> {
     let mut out = Vec::with_capacity(44);
@@ -690,9 +729,13 @@ mod tests {
     #[test]
     fn routes_vm_map_to_service_and_stubs_to_mig_reply() {
         assert!(matches!(route(&msg(4811, 0x203, KOBJ), Some(0x203)), Route::ServiceVmMap));
-        // 4822 vm_reclaim => KERN_NOT_SUPPORTED; 8000/8001 task_restartable => KERN_SUCCESS.
-        assert!(matches!(route(&msg(4822, 0x203, KOBJ), Some(0x203)),
-                         Route::StubMigReply(KERN_NOT_SUPPORTED)));
+        // M59: the deferred-reclamation ring (4822 allocate, 4823 flush, 4826 resize) is the box's;
+        // 8000/8001 task_restartable => KERN_SUCCESS.
+        assert!(matches!(route(&msg(4822, 0x203, KOBJ), Some(0x203)), Route::ServiceReclaimAlloc));
+        assert!(matches!(route(&msg(4823, 0x203, KOBJ), Some(0x203)), Route::ServiceReclaimFlush));
+        assert!(matches!(route(&msg(4826, 0x203, KOBJ), Some(0x203)), Route::ServiceReclaimResize));
+        // 4828 (query) has no measured caller in a program about itself: still a wall.
+        assert!(matches!(route(&msg(4828, 0x203, KOBJ), Some(0x203)), Route::Unsupported(_)));
         assert!(matches!(route(&msg(8000, 0x203, KOBJ), Some(0x203)),
                          Route::StubMigReply(KERN_SUCCESS)));
         assert!(matches!(route(&msg(8001, 0x203, KOBJ), Some(0x203)),
@@ -877,6 +920,30 @@ mod tests {
         assert_eq!(u32::from_le_bytes(e[4..8].try_into().unwrap()), 36);     // msgh_size
         assert_eq!(i32::from_le_bytes(e[20..24].try_into().unwrap()), 4922); // reply id
         assert_eq!(i32::from_le_bytes(e[32..36].try_into().unwrap()), KERN_NOT_SUPPORTED);
+    }
+    /// M59: the request layouts libsystem_kernel's 27.2 MIG stubs send (brief §1, the visits request
+    /// captured byte for byte: len 1016, max_len 0x4003f8), and the 52-byte success reply they read.
+    #[test]
+    fn reclaim_requests_decode_and_replies_have_the_stub_shape() {
+        let alloc: [u8; 40] = [0x13, 0x15, 0, 0, 0x28, 0, 0, 0, 3, 2, 0, 0, 3, 0x12, 0, 0,
+                               0, 0, 0, 0, 0xd6, 0x12, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0,
+                               0xf8, 3, 0, 0, 0xf8, 3, 0x40, 0];
+        assert_eq!(decode_reclaim_alloc(&alloc).unwrap(), (1016, 0x4003f8));
+        assert!(decode_reclaim_alloc(&alloc[..36]).is_err(), "a short request is refused");
+        let mut flush = alloc[..36].to_vec();
+        flush[20..24].copy_from_slice(&4823u32.to_le_bytes());
+        flush[32..36].copy_from_slice(&77u32.to_le_bytes());
+        assert_eq!(decode_reclaim_count(&flush, 4823).unwrap(), 77);
+        assert!(decode_reclaim_count(&flush, 4826).is_err(), "the id is checked");
+
+        let r = encode_reclaim_reply(0x1203, 4822, 0xa_1234_4000, u64::MAX);
+        assert_eq!(r.len(), 60, "52 bytes of message and the 8-byte trailer fill the stub's rcv_size");
+        assert_eq!(u32::from_le_bytes(r[4..8].try_into().unwrap()), 52);     // msgh_size
+        assert_eq!(u32::from_le_bytes(r[20..24].try_into().unwrap()), 4922); // reply id
+        assert_eq!(i32::from_le_bytes(r[32..36].try_into().unwrap()), 0);    // RetCode
+        assert_eq!(u64::from_le_bytes(r[36..44].try_into().unwrap()), 0xa_1234_4000);
+        assert_eq!(u64::from_le_bytes(r[44..52].try_into().unwrap()), u64::MAX);
+        assert_eq!(encode_reclaim_reply(0x1203, 4826, 0, 0)[20..24], 4926u32.to_le_bytes());
     }
     #[test]
     fn restartable_register_stub_replies_success() {

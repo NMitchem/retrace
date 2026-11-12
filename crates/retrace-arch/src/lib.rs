@@ -1809,6 +1809,22 @@ pub const SWITCH_OPTION_NONE: u64 = 0;
 pub const SWITCH_OPTION_DEPRESS: u64 = 1;
 pub const SWITCH_OPTION_WAIT: u64 = 2;
 
+/// `mach_vm_reclaim_update_kernel_accounting_trap`, mach trap `-63` (M59; xnu-12377
+/// `osfmk/kern/syscall_sw.c` slot 63, the SDK's `mach/mach_traps.h`): `(task, *bytes_reclaimed,
+/// *next_deadline)`. Box-answered for the deferred-reclamation ring (`retrace-box`'s `reclaim.rs`); it has
+/// no `arg_kinds` row, so a misplaced arm is a wall, never a forward (C1).
+pub const MACH_VM_RECLAIM_ACCOUNTING: u64 = (-63i64) as u64;
+/// What a kernel with no reclaim ring answers trap -63 (`KERN_NOT_FOUND`, `mach/kern_return.h`).
+pub const KERN_NOT_FOUND: u64 = 56;
+/// `KERN_INVALID_ARGUMENT`, `KERN_INVALID_TASK` and `KERN_MEMORY_ERROR` (`mach/kern_return.h`), as the
+/// reclaim routines answer them (M59).
+pub const KERN_INVALID_ARGUMENT: u64 = 4;
+pub const KERN_INVALID_TASK: u64 = 16;
+pub const KERN_MEMORY_ERROR: u64 = 10;
+/// `err_vm_reclaim(6)`: a second ring for the same task (xnu-12377 `vm_reclaim.c`,
+/// `VM_RECLAIM_RESOURCE_SHORTAGE`; measured as the host's answer in `mach_msg2_capture.txt`).
+pub const VM_RECLAIM_RESOURCE_SHORTAGE: u64 = 0x2000_4006;
+
 /// `kern_return_t` values the semaphore family answers (`mach/kern_return.h`).
 pub const KERN_INVALID_NAME: u64 = 15;
 pub const KERN_INVALID_VALUE: u64 = 18;
@@ -2890,6 +2906,14 @@ mod tests {
     #[test]
     fn the_m52_semaphore_and_yield_traps_cannot_reach_the_generic_forward() {
         for t in [-38i64, -59, -61] { assert!(refusal_before_forward(t as u64).is_some(), "{t}"); }
+    }
+
+    /// M59 (C1): no row for -63 either, so the reclaim accounting arm's place before the generic
+    /// negative arm is what keeps it from being a wall, and a misplaced arm can never forward it.
+    #[test]
+    fn the_m59_reclaim_accounting_trap_cannot_reach_the_generic_forward() {
+        assert_eq!(MACH_VM_RECLAIM_ACCOUNTING, (-63i64) as u64);
+        assert!(refusal_before_forward(MACH_VM_RECLAIM_ACCOUNTING).is_some());
     }
 
     /// M53 §3b (t0 M2): every number of `m2-rows.tsv` forwards, and the one `_nocancel` twin among

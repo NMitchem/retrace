@@ -701,6 +701,18 @@ fn main() {
         .status().expect("clang vmcopy_dyn");
     assert!(status.success(), "vmcopy_dyn guest build failed");
 
+    // reclaim_dyn and reclaimapi_dyn: M59 fixtures, the deferred-reclamation ring through malloc and
+    // through libsystem_kernel's reclaim API. Same recipe as hello_dyn.
+    for name in ["reclaim_dyn", "reclaimapi_dyn"] {
+        let src = format!("{}/c/{name}.c", env!("CARGO_MANIFEST_DIR"));
+        let bin = format!("{out}/{name}");
+        println!("cargo:rerun-if-changed={src}");
+        let status = Command::new("clang")
+            .args(["-arch","arm64","-o",&bin,&src])
+            .status().unwrap_or_else(|e| panic!("clang {name}: {e}"));
+        assert!(status.success(), "{name} guest build failed");
+    }
+
     // vecgrow: M52 t1 (spec §3b) — a Vec grown past 2 MiB into an in-place huge chunk (to 24 MiB), then a thread spawn. Same recipe as hello_rust.
     let src = format!("{}/rs/vecgrow.rs", env!("CARGO_MANIFEST_DIR"));
     let bin = format!("{out}/vecgrow");

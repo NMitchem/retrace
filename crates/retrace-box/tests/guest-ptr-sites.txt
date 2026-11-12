@@ -29,6 +29,9 @@ crates/retrace-core/src/lib.rs	record_box	read_guest	covered: mach2_unreachable 
 crates/retrace-core/src/lib.rs	record_box	apply_and_return	covered: mach2_unreachable vm_copy 4807 reply, in the buffer the request was read from
 crates/retrace-core/src/lib.rs	record_box	read_guest	covered: mach2_unreachable vm_reallocate 4829 request
 crates/retrace-core/src/lib.rs	record_box	apply_and_return	covered: mach2_unreachable vm_reallocate 4829 reply, in the buffer the request was read from
+crates/retrace-core/src/lib.rs	record_box	read_guest	covered: mach2_unreachable reclaim ring 4822, 4823 and 4826 request
+crates/retrace-core/src/lib.rs	record_box	apply_and_return	covered: mach2_unreachable reclaim ring 4822, 4823 and 4826 reply, in the buffer the request was read from
+crates/retrace-core/src/lib.rs	record_box	apply_and_return	internal: trap -63's two out-parameters, which guest_reclaim_accounting checks with prepare_reply before it returns them
 crates/retrace-core/src/lib.rs	record_box	read_guest	covered: mach2_unreachable task_get_special_port 3409 request
 crates/retrace-core/src/lib.rs	record_box	apply_and_return	covered: mach2_unreachable task_get_special_port 3409 reply, in the buffer the request was read from
 crates/retrace-core/src/lib.rs	record_box	read_guest	covered: mach2_unreachable task_set_special_port 3410 request
@@ -58,6 +61,9 @@ crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies
 crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies a recorded Region list (or the empty list); the regions were checked or recomputed on record
 crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies a recorded Region list (or the empty list); the regions were checked or recomputed on record
 crates/retrace-core/src/lib.rs	advance	read_guest	covered: mach2_unreachable vm_reallocate 4829 request (replay mirror)
+crates/retrace-core/src/lib.rs	advance	read_guest	covered: mach2_unreachable reclaim ring 4822, 4823 and 4826 request (replay mirror)
+crates/retrace-core/src/lib.rs	advance	apply_and_return	covered: mach2_unreachable reclaim ring reply (replay mirror), byte-compared with reclaim_reply's first
+crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: trap -63's recorded out-parameters (replay mirror), compared with guest_reclaim_accounting's first
 crates/retrace-core/src/lib.rs	advance	read_guest	covered: prepare_forward_pointers replay mirror of the sigaction new action read
 crates/retrace-core/src/lib.rs	advance	read_guest	covered: prepare_forward_pointers replay mirror of the sigaltstack new stack read
 crates/retrace-core/src/lib.rs	advance	apply_and_return	internal: replay applies a recorded Region list (or the empty list); the regions were checked or recomputed on record

@@ -95,7 +95,7 @@ fn a_pre_m57_recording_is_refused_as_another_format() {
     let rep = util::run_bounded(util::bin(), &["replay", t.to_str().unwrap()], &[], BOUND);
     assert_eq!(rep.code, Some(3), "format skew keeps exit 3: {}", rep.stderr);
     assert!(rep.stderr.contains("recorded by a different retrace trace format"), "{}", rep.stderr);
-    assert!(rep.stderr.contains(r"RT\x00\x11") && rep.stderr.contains(r"RT\x00\x12"), "{}", rep.stderr);
+    assert!(rep.stderr.contains(r"RT\x00\x11") && rep.stderr.contains(r"RT\x00\x13"), "{}", rep.stderr);
     assert!(!rep.stderr.contains("panicked at") && !rep.stderr.contains("internal error"), "{}", rep.stderr);
     let _ = std::fs::remove_file(&t);
 }
