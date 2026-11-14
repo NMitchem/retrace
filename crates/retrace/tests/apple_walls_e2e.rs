@@ -98,8 +98,18 @@ fn launchctl_records_and_replays() {
     assert_eq!(rec.code, 1, "{path}: record exited {} — its own no-argument usage exit is 1; the recorder's last lines:\n{tail}", rec.code);
     assert!(rec.stdout.starts_with(b"Usage: launchctl "),
         "{path}: stdout does not start with launchctl's usage text — the guest did not reach main:\n{tail}");
-    assert_eq!(rec.stderr.matches("retrace: refused: mach_msg2 message-queue receive").count(), 1,
-        "{path}: expected exactly one RCV-only message-queue refusal on the recorder's stderr:\n{tail}");
+    // M60: the refusal's line prints only under RETRACE_VERBOSE, so the positive control moved to
+    // the trace: exactly one mach_msg2 landmark answered MACH_RCV_INVALID_NAME, the refusal's code.
+    assert!(!rec.stderr.contains("retrace: refused:"), "{path}: a plain run prints no refusal line:\n{tail}");
+    let (events, torn) = retrace_trace::Reader::open_checked(&trace).unwrap();
+    assert!(!torn, "{path}: the recording is complete");
+    let refusals = events.iter().filter(|e| matches!(e, retrace_trace::Event::Syscall { num, ret, .. }
+        if *num == (-47i64) as u64 && *ret == 0x1000_4002)).count();
+    assert_eq!(refusals, 1, "{path}: expected exactly one RCV-only message-queue refusal in the recording");
+    let (verbose, vtrace) = util::record_dynamic_env(path, &[("RETRACE_VERBOSE", "1")]);
+    assert_eq!(verbose.stderr.matches("retrace: refused: mach_msg2 message-queue receive").count(), 1,
+        "{path}: RETRACE_VERBOSE=1 prints the refusal's line, once:\n{}", verbose.stderr);
+    let _ = std::fs::remove_file(vtrace);
     let rp = util::replay(&trace);
     assert_eq!(rp.code, rec.code, "{path}: replay exited {}: {}", rp.code, rp.stderr.lines().last().unwrap_or(""));
     assert_eq!(rp.stdout, rec.stdout, "{path}: replay stdout differs from the recording");

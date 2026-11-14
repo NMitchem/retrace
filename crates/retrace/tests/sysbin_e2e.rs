@@ -75,20 +75,18 @@ fn an_objc_heavy_system_tool_records_and_replays() {
     // — what this gate checked while parked — would also pass for a guest that died inside dyld,
     // and the M22 note that "`aa` with no args exits 1" was a guess: it exits **0** after printing
     // its usage. Measure, then assert on what was measured.
-    // M51 §3e: the usage is on stderr, where `aa` writes it; stdout is empty. The recorder's own
-    // `retrace: refused:` line (the message-queue send, M38) comes first on a recording's stderr and
-    // is not the program's, so it is set aside. Replay meets no refusal and prints none.
-    let program_stderr = |s: &str| s.split_inclusive('\n')
-        .filter(|l| !l.starts_with("retrace: refused:")).collect::<String>();
-    let out = program_stderr(&rec.stderr);
+    // M51 §3e: the usage is on stderr, where `aa` writes it; stdout is empty. Until M60 the
+    // recorder's own `retrace: refused:` line (the message-queue send, M38) came first and was set
+    // aside here; since M60 it prints only under RETRACE_VERBOSE, so the recording's whole stderr is
+    // the program's and is compared as it stands.
+    let out = rec.stderr.clone();
     assert!(out.starts_with("Usage: aa command"),
         "`aa` must print its own usage text, i.e. run its own code; got {} bytes: {:?}",
         out.len(), &out[..out.len().min(120)]);
 
     // ...and that it replays bit-for-bit. 11 KB of usage text (on stderr since M51 §3e) is a far
     // stronger agreement check than the exit code: a replay that re-derived any of it differently
-    // would show here. The program's stderr on both sides (the recorder's refusal line aside) is
-    // what carries the check now.
+    // would show here. The program's stderr on both sides is what carries the check now.
     let rep = util::replay(&trace);
     assert_eq!(rep.code, 0, "replay must not diverge: {}", rep.stderr);
     assert_eq!(rec.stdout, rep.stdout, "replay stdout must be byte-identical to the recording");

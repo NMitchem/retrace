@@ -32,7 +32,7 @@ written out of sight of the assert that caught it.
   has been run).
 - Programs that start other processes: `posix_spawn`, `system()` and `popen()` stop at a wall, and
   `fork` fails with `EAGAIN` (retrace prints a `retrace: refused:` line and the program goes on).
-- GUI programs.
+- GUI programs, or ones that need a daemon or XPC service (`RETRACE_VERBOSE=1` shows each refused call).
 - Races that need preemption. Guest threads switch only when one blocks, so a race that depends on
   the scheduler interrupting a thread won't reproduce.
 
