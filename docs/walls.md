@@ -29,6 +29,9 @@ Please report it at https://github.com/NMitchem/retrace/issues, with the line it
 
 Some calls retrace answers with an error the program can handle, instead of stopping at a wall. For those it
 prints `retrace: refused: <call>, returned <error> to the program` and keeps recording. `fork` is refused this way.
+So is a message to a system service retrace doesn't host, such as an XPC daemon, but its line prints only with
+`RETRACE_VERBOSE=1`: almost every program that sends one carries on without an answer. If a program says it
+couldn't reach a service, record it again with `RETRACE_VERBOSE=1` to see the calls retrace refused.
 
 A program that crashes or is killed by a signal ends with 1 line of retrace's own, after the program's output,
 such as `retrace: the program was killed by SIGSEGV (fault at 0x0, pc 0x100003f2c in main+0x2c)`. Set

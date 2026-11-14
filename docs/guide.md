@@ -369,7 +369,8 @@ The limit is retrace's, and the program hasn't failed: debug it some other way, 
 doesn't make that call under test. Under `cargo test` the line shows in cargo's output, followed by
 cargo's `process didn't exit successfully: … (exit status: 4)`, and the recording is still saved. A
 call that retrace answers with an error the program can handle, such as `fork`, isn't a wall: it
-prints `retrace: refused: <call>, returned <error> to the program` and the recording goes on. A
+prints `retrace: refused: <call>, returned <error> to the program` and the recording goes on. A message
+to a system service retrace doesn't host is refused too, with no line unless `RETRACE_VERBOSE=1` is set. A
 recording that ends at a wall replays up to the wall, but `retrace debug`, `retrace lldb` and
 `retrace gdbserver` refuse it with exit 5: debugging up to a wall isn't supported. To report a wall or
 a bug, record the program again with `RETRACE_TRACE=1` set, which logs every trap.

@@ -63,3 +63,21 @@ fn a_guest_that_opens_an_xpc_connection_records_and_replays() {
         "replay must reproduce the RECORDED timestamp, not a fresh one:\nrecord: {out:?}\nreplay: {:?}",
         String::from_utf8_lossy(&rep.stdout));
 }
+
+/// M60: the message-queue refusal is quiet on a plain run and prints its one line under
+/// RETRACE_VERBOSE. Nearly every program that sends one carries on, so the line had been noise
+/// in front of the program's output; the landmark is in the recording either way (the test above).
+#[test]
+fn the_refusal_prints_its_line_only_under_retrace_verbose() {
+    let (plain, t1) = util::record_dynamic("/bin/date");
+    assert_eq!(plain.code, 0, "record must complete: {}", plain.stderr);
+    assert!(!plain.stderr.contains("retrace: refused:"), "a plain run prints no refusal line: {}", plain.stderr);
+    let (verbose, t2) = util::record_dynamic_env("/bin/date", &[("RETRACE_VERBOSE", "1")]);
+    assert_eq!(verbose.code, 0, "record must complete: {}", verbose.stderr);
+    let lines: Vec<_> = verbose.stderr.lines().filter(|l| l.starts_with("retrace: refused:")).collect();
+    assert_eq!(lines.len(), 1, "RETRACE_VERBOSE=1 prints the refusal once: {}", verbose.stderr);
+    assert!(lines[0].starts_with("retrace: refused: mach_msg2 message-queue send (msgh_id ")
+        && lines[0].ends_with("returned MACH_SEND_INVALID_DEST to the program"), "{}", lines[0]);
+    let _ = std::fs::remove_file(t1);
+    let _ = std::fs::remove_file(t2);
+}

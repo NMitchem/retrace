@@ -1101,9 +1101,15 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                         // both the return and the (empty) write set are constants, which is what
                         // lets replay recompute and byte-compare them instead of trusting them.
                         // M50 §3b: a refusal the program survives, in the wall line's format.
-                        say_err(&retrace_arch::refused_line(&format!("mach_msg2 message-queue send \
-                            (msgh_id {:#x} dest {:#x} send_size {})", m.msgh_id, m.dest, m.send_size),
-                            "MACH_SEND_INVALID_DEST"));
+                        // M60: printed only under RETRACE_VERBOSE. Nearly every program that sends
+                        // one carries on (SQLite, os_log, libxpc's lookups), so on a plain run the
+                        // line was noise in front of the program's own output; the trace keeps the
+                        // landmark either way, and walls.md tells a reader where the line went.
+                        if verbose {
+                            say_err(&retrace_arch::refused_line(&format!("mach_msg2 message-queue send \
+                                (msgh_id {:#x} dest {:#x} send_size {})", m.msgh_id, m.dest, m.send_size),
+                                "MACH_SEND_INVALID_DEST"));
+                        }
                         w.append(&Event::Syscall { num, args, ret: machmsg::MACH_SEND_INVALID_DEST, ret1: 0,
                             err: false, writes: vec![], thread })
                             .map_err(|e| format!("append mach_msg2 mq refusal: {e}"))?; count += 1;
@@ -1119,9 +1125,12 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                         // untouched — so both the return and the empty write set are constants
                         // replay recomputes (the RefuseMqSend posture).
                         // M50 §3b: a refusal the program survives, in the wall line's format.
-                        say_err(&retrace_arch::refused_line(&format!("mach_msg2 message-queue receive \
-                            (rcv_name {:#x} rcv_size {} options {:#x})", m.rcv_name, m.rcv_size, m.options),
-                            "MACH_RCV_INVALID_NAME"));
+                        // M60: under RETRACE_VERBOSE only, as the send's above.
+                        if verbose {
+                            say_err(&retrace_arch::refused_line(&format!("mach_msg2 message-queue receive \
+                                (rcv_name {:#x} rcv_size {} options {:#x})", m.rcv_name, m.rcv_size, m.options),
+                                "MACH_RCV_INVALID_NAME"));
+                        }
                         w.append(&Event::Syscall { num, args, ret: machmsg::MACH_RCV_REFUSAL, ret1: 0,
                             err: false, writes: vec![], thread })
                             .map_err(|e| format!("append mach_msg2 mq receive refusal: {e}"))?; count += 1;
