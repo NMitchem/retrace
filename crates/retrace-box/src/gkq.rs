@@ -720,7 +720,7 @@ impl GuestKqueues {
                 let pair_ok = flags & EV_CLEAR != 0 && c.filter == EVFILT_READ && matches!(watch, FdKind::Sock(_));
                 if flags & EV_ONESHOT != 0 && !pair_ok {
                     return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!("{at}: EV_ONESHOT on a pipe or socket filter is not modelled \
-                                        (only EV_CLEAR|EV_ONESHOT on a socket's read filter, T0-clear-oneshot)")));
+                                        (only EV_CLEAR|EV_ONESHOT on a socket's read filter)")));
                 }
                 n.active = match ready_of(&self.pipes, &self.socks, c.ident, watch, c.filter)? {
                     Some(_) => { *seq += 1; Some(*seq) }

@@ -64,8 +64,8 @@ impl JitSet {
         }
         if prot != 0 && prot != PROT_RWX {
             return Err(retrace_arch::wall(retrace_arch::WallCategory::Memory, format!(
-                "MAP_JIT mmap prot {prot:#x}: only PROT_NONE (V8's code-range reservation, \
-                 t0 M5) and RWX (sprr.c's page) are measured on a MAP_JIT mapping")));
+                "MAP_JIT mmap prot {prot:#x}: only PROT_NONE (V8's code-range reservation) \
+                 and RWX (sprr.c's page) are modelled on a MAP_JIT mapping")));
         }
         Ok(true)
     }

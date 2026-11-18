@@ -601,9 +601,7 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                     if b.threads().is_blocked_for(thread as usize, sig) {
                         return Err(wall(WallCategory::Signals, format!("raising blocked signal {sig} \
                             synchronously is not modelled: a fault cannot be deferred, POSIX leaves it \
-                            undefined, and Darwin force-delivers. M11 models no pending set, so \
-                            implement one — and revisit sigpending's always-empty answer — before a \
-                            guest needs this.")));
+                            undefined, and Darwin force-delivers. No pending set is modelled.")));
                     }
                     // C9: `deliver_signal_to(thread, …)`, not the `deliver_signal(…)` shorthand it
                     // delegates to. Behaviourally identical — the shorthand IS
@@ -1273,13 +1271,10 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                 if !deliverable.is_empty() {
                     return Err(wall(WallCategory::Signals, format!(
                     "semaphore signal woke thread(s) {deliverable:?} carrying a pending deliverable \
-                     signal. Since M55 a handled signal interrupts a semaphore wait at the raise and a \
+                     signal. A handled signal interrupts a semaphore wait at the raise and a \
                      masked one does not count as deliverable, so only a signal unmasked while the \
-                     thread was parked reaches this wake. M18 Stage 2b deliberately does NOT \
-                     materialise there: the saved context of a semaphore-parked thread at a wake is \
-                     unmeasured, so the completed-syscall correction M17 applies would be a guess — \
-                     and waking the thread without materialising strands the signal where \
-                     assert_no_stranded_signals cannot see it.")));
+                     thread was parked reaches this wake, and delivering it there is not \
+                     modelled.")));
                 }
                 w.append(&Event::Syscall { num, args, ret: rc, ret1: 0, err: false, writes: vec![], thread })
                     .map_err(|e| format!("append sem_signal: {e}"))?; count += 1;
@@ -1869,18 +1864,17 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
                 if deliver_to.len() > 1 {
                     return Err(wall(WallCategory::Signals, format!(
                         "one wake made {} threads deliverable at once ({deliver_to:?}); that needs N+1 \
-                         landmarks at a single stop and a decision about their order, which M17 does \
-                         not model. No fixture produces it — measure the guest before modelling it.",
+                         landmarks at a single stop and a decision about their order, which is \
+                         not modelled.",
                         deliver_to.len())));
                 }
                 // M50 (T0-d): likewise for a second deliverable signal on the one receiving thread.
                 if let Some(&t) = deliver_to.first() {
                     if (b.threads().pending_of(t) & !b.threads().mask_of(t)).count_ones() > 1 {
                         return Err(wall(WallCategory::Signals, format!(
-                            "woken thread {t} has more than one deliverable signal at this wake: M17 \
-                             materialises at most ONE signal per wake, so the second would be silently \
-                             swallowed. Queueing at a wake is deliberately unmodelled because no guest in \
-                             the tree measures it; measure one before modelling it.")));
+                            "woken thread {t} has more than one deliverable signal at this wake: at \
+                             most one signal is delivered per wake, and queueing a second is not \
+                             modelled.")));
                     }
                 }
                 w.append(&Event::Syscall { num, args, ret: rc, ret1: 0, err: false, writes: vec![], thread })
@@ -3013,7 +3007,7 @@ impl ReplaySession {
                                 if *ret != 0 || *ret1 != 0 || *err || !writes.is_empty() {
                                     return Err(Divergence { landmark: self.idx, pc, detail: format!(
                                         "madvise recorded ret={ret:#x} ret1={ret1:#x} err={err} with {} write(s); \
-                                         the model records 0, 0, false and none (R3)", writes.len()) });
+                                         the model records 0, 0, false and none", writes.len()) });
                                 }
                                 self.b.apply_and_return(0, false, &zeros);
                                 return self.finish_event();
@@ -4294,8 +4288,8 @@ impl ReplaySession {
                                     return Err(Divergence { landmark: self.idx, pc, detail: format!(
                                         "fd divergence: recording says syscall {num} returned fd {ret}, \
                                          but the guest's own open/close sequence yields {expect}. A \
-                                         recorded HOST fd (typically >= 16) means the trace predates \
-                                         M10's fd table.") });
+                                         recorded HOST fd (typically >= 16) means the trace was \
+                                         made before retrace numbered the guest's descriptors.") });
                                 }
                             }
                             // M38: pipe. Two `alloc()`s — the same two calls `bind_returned_pair`
