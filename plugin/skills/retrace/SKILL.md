@@ -27,9 +27,9 @@ written out of sight of the assert that caught it.
 - A bug the source shows at a glance, or a logic error one rerun will solve: recording costs more.
 - Python or JavaScript bugs: retrace records the interpreter, so you would debug its machine code.
 - Network servers. `bind`, `listen` and `accept` are walls (see "Read the result"), and tokio's TCP and
-  Unix listener tests stop at `bind`. `socket` and `connect` are forwarded, but waiting on such a socket
-  through kqueue, `poll` or `select` is refused (this is from reading retrace's code: no network client
-  has been run).
+  Unix listener tests stop at `bind`. A client that connects to a numeric address and uses blocking
+  reads and writes records and replays, but looking up a host name (`getaddrinfo`) stops at a wall, and
+  waiting on a socket through kqueue, `poll` or `select` is refused.
 - Programs that start other processes: `posix_spawn`, `system()` and `popen()` stop at a wall, and
   `fork` fails with `EAGAIN` (retrace prints a `retrace: refused:` line and the program goes on).
 - GUI programs, or ones that need a daemon or XPC service (`RETRACE_VERBOSE=1` shows each refused call).

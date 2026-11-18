@@ -3,12 +3,12 @@
 Time-travel debugging for Apple Silicon Macs.
 
 retrace records one run of a program or a test suite. Then you, or your coding agent, ask the recording what
-happened: how the run ended, and which line wrote any value, on which thread. Each question is one command. The
-answer never changes, because the run only happened once.
+happened: how the run ended, and which line wrote any value, on which thread. Each question is one command, and
+the recording gives the same answer every time.
 
 https://github.com/user-attachments/assets/d08d8c7b-f46d-4a16-896f-70bd3541ce7c
 
-## The crash is in SQLite. The bug isn't.
+## Example: a crash inside SQLite
 
 [`examples/visits.c`](examples/visits.c) is 25 lines of C that log 3 random visitors to an in-memory SQLite
 database. About 1 run in 5, it crashes inside SQLite:
@@ -26,8 +26,6 @@ Every tool you'd reach for points at SQLite:
 | Running it again | It passes 4 times in 5. |
 | lldb | `EXC_BAD_ACCESS` inside `libsqlite3.dylib`, under your `sqlite3_bind_text` or `sqlite3_finalize`. |
 | AddressSanitizer | `SEGV on unknown address` inside `libsqlite3.dylib`. No overflow found. |
-
-Three tools, zero line numbers.
 
 retrace takes the other route: record until a run fails, then ask who wrote the bad pointer.
 
@@ -100,22 +98,20 @@ macOS. It differs in 2 ways: threads switch only when one blocks, and a program 
 The cost: about 0.3 s to start, then computation within about 11% of native. System calls that move a lot of
 memory are the slow part. [More](docs/how-it-works.md).
 
-## Where it breaks
+## Limits
 
-retrace is a technical preview, and its limits are real:
+retrace is a technical preview. These are the limits you'll hit first:
 
-- **Command-line programs and test suites only.** C, C++, Rust and Swift (Swift without Dispatch queues or
-  async/await). No GUI apps.
-- **Very little network.** `curl` stops, and so does any program that looks up a host name (`getaddrinfo`) or
-  serves (`bind`, `listen`, `accept`). A client that connects to a numeric address records and replays.
-- **One process.** A program can replace itself with `exec`, but starting a child process stops the recording.
-- **Threads take turns.** They switch only when one blocks, so a race that needs 2 threads running at once
-  won't reproduce.
+- It runs command-line programs and test suites in C, C++, Rust and Swift. GUI apps don't run, and Swift
+  programs can't use Dispatch queues or async/await.
+- Network support is minimal. `curl` stops, and so does any program that looks up a host name (`getaddrinfo`)
+  or serves (`bind`, `listen`, `accept`). A client that connects to a numeric address records and replays.
+- A recording covers a single process. A program can replace itself with `exec`, but starting a child process
+  stops the recording.
+- Threads switch only when one blocks, so a race that needs 2 threads running at once won't reproduce.
 
-When a program reaches something retrace can't run, it doesn't guess: it prints 1 line naming the call and a
-link to [what that means](docs/walls.md), then exits with status 4. [Every limit](docs/limits.md).
-
-Next time a test fails 1 run in 5, don't rerun it. Record it.
+When a program reaches something retrace can't run, retrace prints 1 line naming the call and a link to
+[what that means](docs/walls.md), then exits with status 4. [Every limit](docs/limits.md).
 
 ## More
 

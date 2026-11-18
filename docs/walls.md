@@ -11,7 +11,7 @@ stays on disk, and `retrace replay` replays it to the same point (see
 [Incomplete recordings](#incomplete-recordings)). To see every call the program made before the wall, run the same
 `record` command again with `RETRACE_TRACE=1` set. That log is the most useful thing you can attach to a report.
 
-A wall isn't a bug. It's a limit retrace documents, and retrace stops at it on purpose instead of guessing. A bug
+A wall isn't a bug. It's a limit retrace documents, and retrace stops at it on purpose. A bug
 looks different: retrace prints this line and exits with status 70.
 
     retrace: internal error - this is a bug in retrace, not in your program.
