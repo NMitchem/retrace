@@ -59,7 +59,7 @@ fn tid_0x3ff_is_the_last_kport_the_scheme_can_name_and_it_ends_in_binary_11() {
 /// `0x0BAD_7007`. Two threads with one name alias silently in `thread_of_port` and in lock owners,
 /// and M18 never reuses a worker, so the box stops at the 1024th spawn instead.
 #[test]
-#[should_panic(expected = "M18 never reuses a parked worker, so a guest that spawns more than 1023 threads stops here by design")]
+#[should_panic(expected = "A parked worker is never reused, so a guest that spawns more than 1023 threads stops here")]
 fn tid_0x400_is_refused_because_its_kport_would_alias_an_earlier_threads() {
     spawn_through(0x400);
 }
