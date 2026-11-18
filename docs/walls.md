@@ -57,6 +57,9 @@ their neighbours) and `readv`, `writev`, `preadv` and `pwritev` are modelled. Th
   `stat64_extended` `*xsecurity_size` past its buffer's backing (`syscall 341 was given a length of …`).
   Natively the call may succeed, because the kernel writes only what it needs, but retrace can't size the
   memory it must watch. Pass the buffer's real size.
+- A Sandbox check retrace doesn't answer (`a Sandbox check for "mach-lookup": retrace answers only
+  "syscall-unix" and "file-write-data"`). `curl` stops here, and so does a program that looks up a host name
+  with `getaddrinfo`, at the check for `"process-fork"`.
 - `chroot`, which is privileged and stays out of scope for good.
 
 `socketpair` of a Unix-domain stream pair runs, which is what tokio's runtime needs, and the pair
@@ -75,7 +78,8 @@ it. What still stops here, each line naming the call and its descriptor:
   descriptor they make isn't a guest end, so waiting on it stops under [Threads](#threads). tokio's TCP and Unix
   listener tests stop at `bind`.
 
-Network sockets and datagram pairs aren't modelled yet.
+A client that connects to a numeric address and uses blocking reads and writes records and replays.
+Waiting on a network socket, serving, and datagram pairs aren't modelled yet.
 
 ## Mach messages
 
@@ -144,7 +148,6 @@ The program used a signal in a way retrace doesn't model yet. These reach it tod
 - `setitimer` or `getitimer` on `ITIMER_VIRTUAL` or `ITIMER_PROF`, which count CPU time the synthetic clock doesn't have (`only ITIMER_REAL is modelled`).
 - A signal sent to the process (`kill(getpid(), …)`, a timer's `SIGALRM`) when the main thread has exited and every other thread masks it.
 - A stop signal (`SIGSTOP`, `SIGTSTP`, `SIGTTIN`, `SIGTTOU`) pending at an exec that would stop the new image (`… pending at exec, which stops the new image: stopping a process is not modelled`).
-- `sigreturn` with a null context and `UC_SET_ALT_STACK` or `UC_RESET_ALT_STACK`, which libplatform's `longjmp` issues after a refused `fork` (`csh`, `tcsh`, `flex`). The line says the sigreturn token doesn't match, which misdescribes a legitimate call.
 - A signal blocked, raised and then unblocked at its default action, which ends the recording where native exits 128 plus the signal.
 
 `pause()` and `sigsuspend()` wait for a signal and return `EINTR` after its handler, `ITIMER_REAL` (so
@@ -154,6 +157,10 @@ returns `EINVAL`, as natively. A `pause()` that nothing can ever signal is the d
 
 A handler installed with `signal()`, `kill(pid, 0)` and `pthread_kill(thread, 0)`, and
 `abort_with_payload` (which dyld calls when a library is missing) run as they do natively.
+
+`longjmp` and `siglongjmp` run, out of a signal handler on an alternate stack too. retrace works out whether a
+thread is on its alternate stack from the stack pointer, so a program that sets that flag by hand (`sigreturn`
+with `UC_SET_ALT_STACK`) and then asks `sigaltstack` sees it clear, where natively it reads set.
 
 ## Threads
 
