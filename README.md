@@ -6,6 +6,8 @@ retrace records one run of a program or a test suite. Then you, or your coding a
 happened: how the run ended, and which line wrote any value, on which thread. Each question is one command. The
 answer never changes, because the run only happened once.
 
+https://github.com/user-attachments/assets/d08d8c7b-f46d-4a16-896f-70bd3541ce7c
+
 ## The crash is in SQLite. The bug isn't.
 
 [`examples/visits.c`](examples/visits.c) is 25 lines of C that log 3 random visitors to an in-memory SQLite
