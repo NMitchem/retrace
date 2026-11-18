@@ -444,6 +444,7 @@ pub const NODE_CRASH_ADDON: Option<&str> = option_env!("RETRACE_NODE_CRASH_ADDON
 /// shape `import ctypes` triggers via libffi, minus CPython. Also the native protections probe
 /// (spec R7): run without retrace it prints the kernel's `cur`/`max` for the remap.
 pub const VMREMAP_DYN: &str = concat!(env!("OUT_DIR"), "/vmremap_dyn");
+pub const LONGJMP_DYN: &str = concat!(env!("OUT_DIR"), "/longjmp_dyn");
 /// M37 (C1): closes fd 1 and fd 2, then writes to each — exits 0 only if both writes are EBADF,
 /// so the rung helper's exit-0 demand carries the "a closed console slot is closed on both sides"
 /// property and its stdout equality carries the mirror.

@@ -1568,7 +1568,8 @@ fn record_box(mut b: Box_, trace_path: &Path, sink: Option<Box<dyn OutputSink>>)
             Stop::Syscall { num, args } if num == retrace_arch::SYS_SIGRETURN => {
                 w.append(&Event::Syscall { num, args, ret: 0, ret1: 0, err: false, writes: vec![], thread })
                     .map_err(|e| format!("append sigreturn: {e}"))?; count += 1;
-                b.sigreturn_restore(args[0], args[2]);
+                if retrace_arch::is_sigreturn_altstack_flag(&args) { b.sigreturn_altstack_flag(); }
+                else { b.sigreturn_restore(args[0], args[2]); }
             }
             Stop::Syscall { num, .. } if num == retrace_arch::SYS_SIGWAIT =>
                 return Err(wall(WallCategory::Signals, format!("{} waits for a signal, and retrace cannot \
@@ -2866,7 +2867,8 @@ impl ReplaySession {
                                 format!("expected recorded sigreturn, got {other:?} \
                                          (live args={args:?})") }),
                         }
-                        self.b.sigreturn_restore(args[0], args[2]);
+                        if retrace_arch::is_sigreturn_altstack_flag(&args) { self.b.sigreturn_altstack_flag(); }
+                        else { self.b.sigreturn_restore(args[0], args[2]); }
                         return self.finish_event();
                     }
                     // M16 Task 9 mirror of record's mask arm — and its OWN arm, rather than the

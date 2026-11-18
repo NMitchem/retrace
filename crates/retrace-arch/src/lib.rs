@@ -1691,6 +1691,15 @@ pub const SIGALRM: u64 = 14;
 /// `SIGPIPE`, raised by a write that returns `EPIPE` (M55).
 pub const SIGPIPE: u64 = 13;
 pub const SYS_SIGRETURN: u64 = 184;
+/// xnu's `sigreturn` infostyle values libplatform's `longjmp`/`siglongjmp` pass (through `_sigunaltstack`) to set
+/// or clear the thread's on-alternate-stack flag. Not in the SDK headers; measured natively (t0, 2026-11-17).
+pub const UC_SET_ALT_STACK: u32 = 0x4000_0000;
+pub const UC_RESET_ALT_STACK: u32 = 0x8000_0000;
+/// True for `sigreturn(NULL, UC_SET_ALT_STACK | UC_RESET_ALT_STACK, _)`. xnu compares only the low 32 bits of
+/// the infostyle, and looks at it before the context pointer.
+pub fn is_sigreturn_altstack_flag(args: &[u64; 8]) -> bool {
+    args[0] == 0 && matches!(args[1] as u32, UC_SET_ALT_STACK | UC_RESET_ALT_STACK)
+}
 pub const SYS_PTHREAD_KILL: u64 = 328;
 pub const SYS_PTHREAD_SIGMASK: u64 = 329;
 pub const SYS_SIGWAIT: u64 = 330;
@@ -2873,6 +2882,17 @@ pub fn stage2_abort_as_stage1(esr_el2: u64, guest_cpsr: u64) -> Result<u64, Stri
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sigreturn_altstack_flag_decision() {
+        let a = |x: u64, y: u64| [x, y, 0, 0, 0, 0, 0, 0];
+        assert!(super::is_sigreturn_altstack_flag(&a(0, 0x4000_0000)));
+        assert!(super::is_sigreturn_altstack_flag(&a(0, 0x8000_0000)));
+        // only the low 32 bits count, as in xnu
+        assert!(super::is_sigreturn_altstack_flag(&a(0, 0xffff_ffff_4000_0000)));
+        assert!(!super::is_sigreturn_altstack_flag(&a(0x1000, 0x4000_0000)));
+        assert!(!super::is_sigreturn_altstack_flag(&a(0, 0x12345)));
+        assert!(!super::is_sigreturn_altstack_flag(&a(0, 1)));
+    }
     use super::*;
 
     /// M53 §3c: the iovec set is the eight SDK numbers, and `IOV_MAX` is the measured limit.

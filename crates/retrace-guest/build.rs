@@ -389,6 +389,15 @@ fn main() {
         .status().expect("clang vmremap_dyn");
     assert!(status.success(), "vmremap_dyn guest build failed");
 
+    // longjmp_dyn: setjmp/longjmp and sigsetjmp/siglongjmp, which end in sigreturn(NULL, UC_*_ALT_STACK, 0).
+    let src = format!("{}/c/longjmp_dyn.c", env!("CARGO_MANIFEST_DIR"));
+    let bin = format!("{out}/longjmp_dyn");
+    println!("cargo:rerun-if-changed={src}");
+    let status = Command::new("clang")
+        .args(["-arch","arm64","-o",&bin,&src])
+        .status().expect("clang longjmp_dyn");
+    assert!(status.success(), "longjmp_dyn guest build failed");
+
     // atfdcwd_dyn: the M38 AT_FDCWD fixture — `fstatat(AT_FDCWD, ".")` prints `ok` when the
     // sentinel passes through translation. Same recipe as hello_dyn.
     let src = format!("{}/c/atfdcwd_dyn.c", env!("CARGO_MANIFEST_DIR"));
