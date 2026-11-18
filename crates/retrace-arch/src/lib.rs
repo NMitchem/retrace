@@ -1692,7 +1692,7 @@ pub const SIGALRM: u64 = 14;
 pub const SIGPIPE: u64 = 13;
 pub const SYS_SIGRETURN: u64 = 184;
 /// xnu's `sigreturn` infostyle values libplatform's `longjmp`/`siglongjmp` pass (through `_sigunaltstack`) to set
-/// or clear the thread's on-alternate-stack flag. Not in the SDK headers; measured natively (t0, 2026-11-17).
+/// or clear the thread's on-alternate-stack flag. Not in the SDK headers; measured natively on 2026-11-17 (both return 0).
 pub const UC_SET_ALT_STACK: u32 = 0x4000_0000;
 pub const UC_RESET_ALT_STACK: u32 = 0x8000_0000;
 /// True for `sigreturn(NULL, UC_SET_ALT_STACK | UC_RESET_ALT_STACK, _)`. xnu compares only the low 32 bits of

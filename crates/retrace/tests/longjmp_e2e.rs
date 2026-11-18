@@ -33,7 +33,9 @@ fn rung(mode: &str) -> util::RungOut {
 #[test] fn a_jump_out_of_an_altstack_handler_matches_native() {
     let r = rung("handler");
     let out = String::from_utf8(r.stdout).unwrap();
-    assert!(out.contains("handler ran on the alternate stack"), "{out}");
+    // Both raises: the second handler runs on the alternate stack only if the first jump left it free again.
+    assert_eq!(out.matches("handler ran on the alternate stack").count(), 2, "{out}");
+    assert!(out.contains("after second jump: SS_ONSTACK clear"), "{out}");
 }
 
 #[test]

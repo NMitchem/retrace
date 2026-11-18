@@ -5678,6 +5678,12 @@ impl Box_ {
     /// Write raw bytes into guest memory (tests only — the production path is `write_guest`).
     pub fn poke_guest(&mut self, ipa: u64, bytes: &[u8]) { self.write_guest(ipa, bytes) }
 
+    /// `sigreturn(NULL, UC_SET_ALT_STACK | UC_RESET_ALT_STACK, _)`, which libplatform's `longjmp` ends with: xnu flips
+    /// the thread's on-altstack flag and returns 0. retrace derives that flag from the stack pointer
+    /// (`on_altstack_of`) and `longjmp` has just restored the pointer the saved flag described, so nothing is stored.
+    /// Called by BOTH record and replay, and unlike `sigreturn_restore` it DOES return a value.
+    pub fn sigreturn_altstack_flag(&mut self) { self.set_x0_err_and_return(0, false); }
+
     /// The inverse of [`deliver_signal`](Self::deliver_signal): read the mcontext back out of guest
     /// memory and resume the interrupted context. Called by BOTH record and replay.
     ///
@@ -5685,12 +5691,6 @@ impl Box_ {
     /// the `sigreturn` trap and resumes from those registers. A caller must therefore NOT follow
     /// this with `set_x0_err_and_return`: `sigreturn` does not return a value, and doing so would
     /// overwrite the `x0` just restored from the frame.
-    /// `sigreturn(NULL, UC_SET_ALT_STACK | UC_RESET_ALT_STACK, _)`, which libplatform's `longjmp` ends with: xnu flips
-    /// the thread's on-altstack flag and returns 0. retrace derives that flag from the stack pointer
-    /// (`on_altstack_of`) and `longjmp` has just restored the pointer the saved flag described, so nothing is stored.
-    /// Called by BOTH record and replay, and unlike `sigreturn_restore` it DOES return a value.
-    pub fn sigreturn_altstack_flag(&mut self) { self.set_x0_err_and_return(0, false); }
-
     pub fn sigreturn_restore(&mut self, uctx_ipa: u64, token: u64) {
         let expected = sigreturn_token(uctx_ipa);
         if token != expected {
