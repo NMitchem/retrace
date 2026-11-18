@@ -34,6 +34,10 @@ measured. macOS 27 is measured at 27.2. macOS 26 was measured at 26.5.2 and is k
 re-measured since. Other point releases of 26 and 27 run but are untested. A recording replays only on the macOS
 build that made it.
 
+**Not on hosted CI.** retrace needs Hypervisor.framework, which a Mac that is itself a virtual machine doesn't
+offer. GitHub's hosted arm64 macOS runners are reported not to offer it, and retrace hasn't been run on one.
+On a Mac you run yourself, a self-hosted runner included, it works as it does at your desk.
+
 **Threads run 1 at a time.** They switch only when one blocks or exits. That keeps the schedule replayable without
 recording it, but races that need preemption won't reproduce, and parallel programs run serially. A thread that
 spins waiting for another one, without ever blocking, hangs the run. After 20 seconds of that, the recorder prints
@@ -49,10 +53,11 @@ itself, or select the Command Line Tools.
 
 **Command-line programs only.** XPC service lookups, I/O Kit and GUI frameworks aren't modelled. kqueue, `poll`
 and `select` readiness cover only a program's own pipes and `socketpair`s, so waiting on a terminal, an inherited
-descriptor or a network socket is refused. (The network case comes from reading the code: `socket` and `connect`
-are forwarded, but no network client has been run.) A tokio program that listens stops at `bind`. A blocking read
-or write that has to wait for another thread to feed or drain a pipe or socket stops at a wall, and so does a
-handled signal sent to a thread blocked in a condition variable or mutex.
+descriptor or a network socket is refused. A network client that connects to a numeric address and uses
+blocking reads and writes records and replays (measured against a server on 127.0.0.1). One that looks up a
+host name with `getaddrinfo` stops at a wall, and so does `curl`. A tokio program that listens stops at `bind`.
+A blocking read or write that has to wait for another thread to feed or drain a pipe or socket stops at a wall,
+and so does a handled signal sent to a thread blocked in a condition variable or mutex.
 
 **A system call or Mach message retrace has no model for stops the recording at a wall.** In the latest sweep, 46
 of the 54 Apple binaries in the committed sample recorded and replayed with native's stdout and exit status, and

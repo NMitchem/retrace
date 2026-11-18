@@ -77,7 +77,7 @@ fn an_unmodelled_policy_or_operation_is_refused_by_name() {
     assert!(e.starts_with("unmodelled __mac_syscall policy \"Quarantine\" call 0x2"), "{e}");
     let t = sandbox(&mut b, b"file-read-data");
     let e = b.guest_mac_syscall(args(t - 0x400, 2, t - 0x300)).unwrap_err().unmark();
-    assert!(e.starts_with("unmeasured Sandbox operation \"file-read-data\""), "{e}");
+    assert!(e.starts_with("a Sandbox check for \"file-read-data\""), "{e}");
 }
 
 /// R4: the host's answer about THIS process (the test binary, ad-hoc signed by the cargo runner, as

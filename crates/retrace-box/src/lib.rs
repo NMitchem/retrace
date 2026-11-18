@@ -875,8 +875,8 @@ fn guest_thread_kport(tid: usize) -> u32 {
     if tid >= 0x400 {
         retrace_arch::refuse!(Threads, "a box-spawned thread id past 0x3ff reaches GUEST_THREAD_PORT_BASE's bits 12-14, so its \
          mach port name would alias an earlier thread's (tid 0x401 would get tid 1's 0x0BAD7007) and \
-         two threads would share one name. M18 never reuses a parked worker, so a guest that spawns \
-         more than 1023 threads stops here by design; widen the name scheme before raising this bound.");
+         two threads would share one name. A parked worker is never reused, so a guest that spawns \
+         more than 1023 threads stops here.");
     }
     GUEST_THREAD_PORT_BASE | ((tid as u32) << 2) | 3
 }
@@ -1827,11 +1827,11 @@ impl Box_ {
         let pc = self.vcpu.get_sys(sysreg::ELR_EL1).unwrap();
         let Some((we, pr)) = self.sprr_admitted() else {
             return Err(Unsupported::new(WallCategory::Memory, format!("SPRR write {value:#x} at pc {pc:#x}: this guest has no SPRR commpage \
-                    (+0x110 and +0x118 absent or equal), so no value is admissible (R2, Ruling T6-f)")));
+                    (+0x110 and +0x118 absent or equal), so no value is admissible")));
         };
         if value != we && value != pr {
             return Err(Unsupported::new(WallCategory::Memory, format!("SPRR write {value:#x} at pc {pc:#x} is neither the commpage's write-enable word \
-             {we:#x} (+0x110) nor its protect word {pr:#x} (+0x118) (R2)")));
+             {we:#x} (+0x110) nor its protect word {pr:#x} (+0x118)")));
         }
         let tid = self.threads.current();
         self.threads.set_sprr_of(tid, value);
@@ -2427,10 +2427,8 @@ impl Box_ {
         let mut p = start;
         while p < end {
             if self.host_span(p).is_none() {
-                retrace_arch::refuse!(Memory, "protect_none: no backing for {p:#x} (in [{start:#x},{end:#x})). M13 models \
-                 no-access only on BACKED pages: an unbacked protected page would fault at stage 2, \
-                 where commit_reserved_page would silently materialize it instead of faulting. \
-                 Model the reservation-protect case deliberately before a guest needs it.");
+                retrace_arch::refuse!(Memory, "protect_none: no backing for {p:#x} (in [{start:#x},{end:#x})). No-access \
+                 protection is modelled only on backed pages.");
             }
             p += g;
         }
@@ -5678,6 +5676,12 @@ impl Box_ {
     /// Write raw bytes into guest memory (tests only — the production path is `write_guest`).
     pub fn poke_guest(&mut self, ipa: u64, bytes: &[u8]) { self.write_guest(ipa, bytes) }
 
+    /// `sigreturn(NULL, UC_SET_ALT_STACK | UC_RESET_ALT_STACK, _)`, which libplatform's `longjmp` ends with: xnu flips
+    /// the thread's on-altstack flag and returns 0. retrace derives that flag from the stack pointer
+    /// (`on_altstack_of`) and `longjmp` has just restored the pointer the saved flag described, so nothing is stored.
+    /// Called by BOTH record and replay, and unlike `sigreturn_restore` it DOES return a value.
+    pub fn sigreturn_altstack_flag(&mut self) { self.set_x0_err_and_return(0, false); }
+
     /// The inverse of [`deliver_signal`](Self::deliver_signal): read the mcontext back out of guest
     /// memory and resume the interrupted context. Called by BOTH record and replay.
     ///
@@ -5771,10 +5775,10 @@ impl Box_ {
             if !matches!(self.threads.state_of(tid), thread::ThreadState::Blocked(_)) { continue; }
             if let Some(sig) = self.threads.peek_deliverable(tid) {
                 retrace_arch::refuse!(Signals, "thread {tid} is exiting still Blocked with pending signal {sig}, which it \
-                        can therefore never take: M17 materialises a pended signal at the WAKE, and \
+                        can therefore never take: a pended signal is delivered at the wake, and \
                         this thread was never woken. Either the guest deadlocked, or the signal \
-                        needs the wait to be interrupted (EINTR) rather than deferred — which M17 \
-                        deliberately does not model. State: {:?}", self.threads.state_of(tid));
+                        needs the wait to be interrupted (EINTR) rather than deferred, which is \
+                        not modelled. State: {:?}", self.threads.state_of(tid));
             }
         }
     }
@@ -6284,8 +6288,7 @@ impl Box_ {
     pub fn guest_workq_open(&mut self, _args: [u64; 8]) -> u64 {
         if self.wq_thread_pc.is_none() {
             retrace_arch::refuse!(Threads, "workq_open before bsdthread_register — refusing to bring up a workqueue \
-             with no registered wqthread entry point. Every dynamic guest registers one at startup \
-             (measured, M14 Task 2), so this means the guest took a path no measurement covers.");
+             with no registered wqthread entry point. Every dynamic guest registers one at startup.");
         }
         0
     }
@@ -6348,12 +6351,10 @@ impl Box_ {
             WQOPS_THREAD_RETURN => Ok(self.guest_workq_park(args)),
             retrace_arch::WQOPS_THREAD_KEVENT_RETURN => self.guest_workq_kevent_return(args),
             other => Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
-                "unmeasured workq_kernreturn opcode {other:#x} — only \
+                "unmeasured workq_kernreturn opcode {other:#x} - only \
                  SETUP_DISPATCH ({WQOPS_SETUP_DISPATCH:#x}), REQTHREADS \
-                 ({WQOPS_QUEUE_REQTHREADS:#x}), THREAD_RETURN ({WQOPS_THREAD_RETURN:#x}) and, since \
-                 M46, THREAD_KEVENT_RETURN ({:#x}) have ever been observed (M18 Task 6; Stage 2b \
-                 Task 1 §3d; M46 t0 M3). Measure what issues this one before modelling it; a \
-                 guessed opcode silently corrupts the guest's workqueue state. args={args:#x?}",
+                 ({WQOPS_QUEUE_REQTHREADS:#x}), THREAD_RETURN ({WQOPS_THREAD_RETURN:#x}) and \
+                 THREAD_KEVENT_RETURN ({:#x}) are modelled. args={args:#x?}",
                 retrace_arch::WQOPS_THREAD_KEVENT_RETURN))),
         }
     }
@@ -6414,9 +6415,9 @@ impl Box_ {
         // value posture exists to prevent.
         if (args[1], args[2], args[3]) != (0, 0, 0) {
             retrace_arch::refuse!(Threads, "workq_kernreturn THREAD_RETURN with unmeasured arguments \
-             {:#x?} — the only measured park is (0x4, 0, 0, 0) (Task 1 §3d). Non-zero args here \
-             are XNU's kevent-carrying variant, which must return events rather than merely park; \
-             measure it before modelling it. args={args:#x?}",
+             {:#x?} — the only park modelled is (0x4, 0, 0, 0). Non-zero args here \
+             are XNU's kevent-carrying variant, which must return events rather than merely park. \
+             args={args:#x?}",
             (args[1], args[2], args[3]));
         }
         self.park_on_svc();
@@ -6467,8 +6468,7 @@ impl Box_ {
     fn guest_workq_reqthreads(&mut self, args: [u64; 8]) -> u64 {
         let entry = self.wq_thread_pc.unwrap_or_else(|| retrace_arch::refuse!(Threads, "REQTHREADS with no registered wqthread entry point — refusing to build \
              a worker that would enter an invented address. Every dynamic guest registers one at \
-             startup (measured, M14 Task 2), so this means the guest took a path no measurement \
-             covers."));
+             startup."));
         let pthsize = self.pthread_size.expect(
             "REQTHREADS with no registered pthread size — captured by the same \
              bsdthread_register that captures the entry point, so this cannot happen without the \
@@ -6476,7 +6476,7 @@ impl Box_ {
         let count = args[2];
         if !(1..=WQ_MAX_WORKERS_PER_REQUEST).contains(&count) {
             retrace_arch::refuse!(Threads, "REQTHREADS for {count} threads, outside 1..={WQ_MAX_WORKERS_PER_REQUEST}. \
-             `args[2]` is numthreads (§5 item 5). Zero is meaningless — libdispatch would wait \
+             `args[2]` is numthreads. Zero is meaningless — libdispatch would wait \
              forever on work no worker was built to run — and anything near the ceiling means this \
              box is reading the wrong argument, not that the guest wants that many workers; each \
              one costs a stack reservation. Every observed request asks for 1. args={args:#x?}");
@@ -6593,9 +6593,7 @@ impl Box_ {
         let entry = self.read_va_prefix(args[1], retrace_arch::KEVENT_QOS_SIZE);
         let shape = retrace_arch::kevent_qos_shape(args, &entry).map_err(|why| retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
             "unmeasured kevent_qos shape: {why}. Modelled: libdispatch's workqueue-kqueue init, \
-             its memory-pressure registration and its manager poke (M46 §2a-§2b). Measure what \
-             issues this one before modelling it; a guessed kevent silently corrupts libdispatch's \
-             event state. args=[{}]", Self::fmt_args(args))))?;
+             its memory-pressure registration and its manager poke. args=[{}]", Self::fmt_args(args))))?;
         let table = |why: String| retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
             "kevent_qos against the knote table: {why}. args=[{}]", Self::fmt_args(args)));
         match shape {
@@ -7444,12 +7442,12 @@ impl Box_ {
             Some(sleep::SYSTEM_CLOCK) => Ok(sleep::timespec_of_ticks(self.now_guest())),
             Some(sleep::CALENDAR_CLOCK) => Err(retrace_arch::wall(retrace_arch::WallCategory::MachMessages, format!(
                 "clock_get_time on port {port:#x}, a CALENDAR_CLOCK (1) port: wall time is not \
-                 modelled (R7); only SYSTEM_CLOCK (0) is answered, from the guest clock"))),
+                 modelled; only SYSTEM_CLOCK (0) is answered, from the guest clock"))),
             Some(id) => Err(retrace_arch::wall(retrace_arch::WallCategory::MachMessages, format!(
-                "clock_get_time on port {port:#x}, clock id {id}: only SYSTEM_CLOCK (0) is answered (R7)"))),
+                "clock_get_time on port {port:#x}, clock id {id}: only SYSTEM_CLOCK (0) is answered"))),
             None => Err(retrace_arch::wall(retrace_arch::WallCategory::MachMessages, format!(
                 "clock_get_time to port {port:#x}, which no host_get_clock_service (206) reply \
-                 named. Only a SYSTEM_CLOCK port the guest learned is answered (R7)"))),
+                 named. Only a SYSTEM_CLOCK port the guest learned is answered"))),
         }
     }
 
@@ -7805,7 +7803,7 @@ impl Box_ {
         let g = GRANULE as u64;
         if addr % g != 0 {
             return Err(retrace_arch::wall(retrace_arch::WallCategory::Memory, format!("madvise range starts at {addr:#x}, not on a 16 KiB page (native accepts \
-                it; no corpus call is unaligned — t0 M1(d)). args=[{}]", Self::fmt_args(args))));
+                it). args=[{}]", Self::fmt_args(args))));
         }
         let end = addr.checked_add(len).and_then(|e| e.checked_add(g - 1)).map(|e| e & !(g - 1))
             .ok_or_else(|| retrace_arch::wall(retrace_arch::WallCategory::Memory, format!("madvise range {addr:#x}+{len:#x} overflows. args=[{}]", Self::fmt_args(args))))?;
@@ -8560,8 +8558,7 @@ impl Box_ {
     pub fn guest_bsdthread_create(&mut self, args: [u64; 8]) -> u64 {
         let (func, arg, stack, pthread, flags) = (args[0], args[1], args[2], args[3], args[4]);
         let start = self.thread_start_pc.unwrap_or_else(|| retrace_arch::refuse!(Threads, "bsdthread_create before bsdthread_register — refusing to invent a thread entry \
-             point. Every dynamic guest registers one at startup (measured, M14 Task 2), so this \
-             means the guest took a path no measurement covers."));
+             point. Every dynamic guest registers one at startup."));
 
         let mut ctx = thread::ThreadCtx::zeroed();
         // The entry point is written to BOTH `elr` and `regs.pc`, not just one. `switch_to_thread`'s
@@ -8976,7 +8973,7 @@ impl Box_ {
             if port != 0 || !measured {
                 return Err(retrace_arch::wall(retrace_arch::WallCategory::Threads, format!(
                     "thread_switch (mach trap -61) with thread {:#x}, option {} ({}): only MACH_PORT_NULL with \
-                     SWITCH_OPTION_NONE (0), DEPRESS (1) and WAIT (2) are modelled, the options real callers pass (t0 M6)",
+                     SWITCH_OPTION_NONE (0), DEPRESS (1) and WAIT (2) are modelled, the options real callers pass",
                     port, option as u32,
                     match option { 0 => "NONE", 1 => "DEPRESS", 2 => "WAIT", _ => "not in mach/thread_switch.h" })));
             }

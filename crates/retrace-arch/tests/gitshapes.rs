@@ -125,7 +125,7 @@ fn sandbox_continuity_is_by_operation_and_refuses_the_rest() {
     assert_eq!(sandbox_check_continuity(b"file-write-data"), Ok(22));
     for op in [&b"syscall-uni"[..], b"syscall-unix2", b"file-read-data", b"", b"SYSCALL-UNIX"] {
         let e = marked_what(sandbox_check_continuity(op).unwrap_err());
-        assert!(e.starts_with(&format!("unmeasured Sandbox operation {:?}", String::from_utf8_lossy(op))), "{e}");
+        assert!(e.starts_with(&format!("a Sandbox check for {:?}", String::from_utf8_lossy(op))), "{e}");
     }
 }
 

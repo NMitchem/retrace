@@ -30,6 +30,7 @@ Three tools, zero line numbers.
 retrace takes the other route: record until a run fails, then ask who wrote the bad pointer.
 
 ```console
+$ clang -g -o visits visits.c -lsqlite3
 $ while retrace record ./visits; do :; done
 ...
 retrace: the program was killed by SIGSEGV (fault at 0x6f48207961727275, pc 0x186f08d20 in vdbeUnbind+0x20 (libsqlite3.dylib))
@@ -45,7 +46,7 @@ last write to 0x100008070 (8 bytes): store at 0x185555f08 in _platform_memmove+0
 
 `last-write` runs the recording backwards to the last instruction that wrote `app.insert`: a `memcpy` on line
 21. The fault address is text. `urray Ho` is 8 bytes of "Grace Brewster Murray Hopper", the one name too long
-for the 16-byte field.
+for the 16-byte field. `last-write` finds `app.insert` by name because the program was built with `-g`.
 
 The loop is cheap. A recorded run of `visits` takes 0.33 s, so at 1 crash in 5 it catches one in under 2
 seconds, on average. Then the failing run stays on disk, and you can ask it anything, as often as you like.
@@ -91,6 +92,9 @@ came back: the return value and every byte the kernel wrote. A replay runs the s
 saved answers back. It never calls the kernel, so it's exact. Going backwards is replaying forwards to the right
 instruction.
 
+If you know [rr](https://rr-project.org/), the record-and-replay debugger for Linux, retrace does that job on
+macOS. It differs in 2 ways: threads switch only when one blocks, and a program can't start a child process.
+
 The cost: about 0.3 s to start, then computation within about 11% of native. System calls that move a lot of
 memory are the slow part. [More](docs/how-it-works.md).
 
@@ -100,7 +104,8 @@ retrace is a technical preview, and its limits are real:
 
 - **Command-line programs and test suites only.** C, C++, Rust and Swift (Swift without Dispatch queues or
   async/await). No GUI apps.
-- **No network servers.** `bind`, `listen` and `accept` aren't supported yet.
+- **Very little network.** `curl` stops, and so does any program that looks up a host name (`getaddrinfo`) or
+  serves (`bind`, `listen`, `accept`). A client that connects to a numeric address records and replays.
 - **One process.** A program can replace itself with `exec`, but starting a child process stops the recording.
 - **Threads take turns.** They switch only when one blocks, so a race that needs 2 threads running at once
   won't reproduce.

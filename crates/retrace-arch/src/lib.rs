@@ -1691,6 +1691,15 @@ pub const SIGALRM: u64 = 14;
 /// `SIGPIPE`, raised by a write that returns `EPIPE` (M55).
 pub const SIGPIPE: u64 = 13;
 pub const SYS_SIGRETURN: u64 = 184;
+/// xnu's `sigreturn` infostyle values libplatform's `longjmp`/`siglongjmp` pass (through `_sigunaltstack`) to set
+/// or clear the thread's on-alternate-stack flag. Not in the SDK headers; measured natively on 2026-11-17 (both return 0).
+pub const UC_SET_ALT_STACK: u32 = 0x4000_0000;
+pub const UC_RESET_ALT_STACK: u32 = 0x8000_0000;
+/// True for `sigreturn(NULL, UC_SET_ALT_STACK | UC_RESET_ALT_STACK, _)`. xnu compares only the low 32 bits of
+/// the infostyle, and looks at it before the context pointer.
+pub fn is_sigreturn_altstack_flag(args: &[u64; 8]) -> bool {
+    args[0] == 0 && matches!(args[1] as u32, UC_SET_ALT_STACK | UC_RESET_ALT_STACK)
+}
 pub const SYS_PTHREAD_KILL: u64 = 328;
 pub const SYS_PTHREAD_SIGMASK: u64 = 329;
 pub const SYS_SIGWAIT: u64 = 330;
@@ -2451,10 +2460,8 @@ pub fn madvise_effect(advice: u32) -> Result<MadviseEffect, String> {
         MADV_FREE_REUSABLE | MADV_FREE_REUSE => Ok(MadviseEffect::NoOp),
         MADV_ZERO => Ok(MadviseEffect::Zero),
         _ => Err(wall(WallCategory::Memory, format!(
-            "unmeasured madvise advice {advice}. Modelled, from t0 M1(a)'s census: \
-             FREE_REUSABLE (7) and FREE_REUSE (8) as no-ops and ZERO (11) as a zero-fill. \
-             Measure its native effect before modelling it; forwarded, an advice acts on retrace's \
-             own backing of the guest range"))),
+            "unmeasured madvise advice {advice}. Modelled: \
+             FREE_REUSABLE (7) and FREE_REUSE (8) as no-ops and ZERO (11) as a zero-fill"))),
     }
 }
 
@@ -2521,10 +2528,8 @@ pub fn sandbox_check_continuity(operation: &[u8]) -> Result<u64, String> {
         b"syscall-unix" => Ok(14),
         b"file-write-data" => Ok(22),
         _ => Err(wall(WallCategory::Syscalls, format!(
-            "unmeasured Sandbox operation {:?}. Measured: \"syscall-unix\" (dyld's \
-             sandbox_check_common, EFAULT 14) and \"file-write-data\" (libsystem_sandbox's \
-             rootless_check_trusted_internal, EINVAL 22) (t0 M2, R7). Measure what the pre-M47 \
-             forward returned for this one before adding it", String::from_utf8_lossy(operation)))),
+            "a Sandbox check for {:?}: retrace answers only \"syscall-unix\" and \
+             \"file-write-data\"", String::from_utf8_lossy(operation)))),
     }
 }
 
@@ -2873,6 +2878,17 @@ pub fn stage2_abort_as_stage1(esr_el2: u64, guest_cpsr: u64) -> Result<u64, Stri
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sigreturn_altstack_flag_decision() {
+        let a = |x: u64, y: u64| [x, y, 0, 0, 0, 0, 0, 0];
+        assert!(super::is_sigreturn_altstack_flag(&a(0, 0x4000_0000)));
+        assert!(super::is_sigreturn_altstack_flag(&a(0, 0x8000_0000)));
+        // only the low 32 bits count, as in xnu
+        assert!(super::is_sigreturn_altstack_flag(&a(0, 0xffff_ffff_4000_0000)));
+        assert!(!super::is_sigreturn_altstack_flag(&a(0x1000, 0x4000_0000)));
+        assert!(!super::is_sigreturn_altstack_flag(&a(0, 0x12345)));
+        assert!(!super::is_sigreturn_altstack_flag(&a(0, 1)));
+    }
     use super::*;
 
     /// M53 §3c: the iovec set is the eight SDK numbers, and `IOV_MAX` is the measured limit.

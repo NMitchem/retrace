@@ -439,12 +439,12 @@ fn admit_mutex(call: &str, mutex: u64, flags: u32) -> Result<(), String> {
         return Err(wall("a process-shared mutex is keyed by its VM object (ksyn_findobj), not its address".into()));
     }
     if flags & MTX_POLICY_MASK == MTX_POLICY_FAIRSHARE {
-        return Err(wall("a fairshare mutex needs the sequence-matched wake of _psynch_mutexdrop_internal, which M52 \
-                         does not port (C5); only the default firstfit policy is modelled".into()));
+        return Err(wall("a fairshare mutex needs the sequence-matched wake of _psynch_mutexdrop_internal, which is not \
+                         modelled; only the default firstfit policy is modelled".into()));
     }
     if flags & !MTX_VARIABLE != MTX_FIRSTFIT_PRIVATE || flags & MTX_TYPE_MASK == MTX_TYPE_MASK {
         return Err(wall(format!("only a private firstfit mutex is modelled: {MTX_FIRSTFIT_PRIVATE:#x} once the type, \
-                                 notify and lock count are set aside (t0 M7)")));
+                                 notify and lock count are set aside")));
     }
     Ok(())
 }
