@@ -118,4 +118,4 @@ When a program reaches something retrace can't run, retrace prints 1 line naming
 [Guide](docs/guide.md) · [Limits](docs/limits.md) · [How it works](docs/how-it-works.md) ·
 [What a wall means](docs/walls.md) · [Contributing](CONTRIBUTING.md)
 
-Dual-licensed under [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE).
+Made by [Noah Mitchem](https://noahmitchem.com). Dual-licensed under [MIT](LICENSE-MIT) or [Apache 2.0](LICENSE-APACHE).
